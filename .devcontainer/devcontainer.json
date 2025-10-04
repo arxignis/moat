@@ -1,18 +1,11 @@
 {
   "name": "eBPF Linux Development",
   "build": {
-    "dockerfile": "./Dockerfile",
-    "context": "..",
-    "args": {
-      "INSTALL_MAINLINE_HEADERS": "true",
-      "KERNEL_VER": "6.10.14",
-      "KERNEL_UBUNTU_TAG": "061014"
-    }
+    "dockerfile": "../Dockerfile",
+    "context": ".."
   },
   "runArgs": [
-    "--privileged",
-    "--cap-add=SYS_ADMIN",
-    "--cap-add=NET_ADMIN"
+    "--privileged"
   ],
   "customizations": {
     "vscode": {
