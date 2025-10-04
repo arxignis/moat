@@ -1,18 +1,11 @@
 {
   "name": "eBPF Linux Development",
   "build": {
-    "dockerfile": "./Dockerfile",
-    "context": "..",
-    "args": {
-      "INSTALL_MAINLINE_HEADERS": "true",
-      "KERNEL_VER": "6.10.14",
-      "KERNEL_UBUNTU_TAG": "061014"
-    }
+    "dockerfile": "../Dockerfile",
+    "context": ".."
   },
   "runArgs": [
-    "--privileged",
-    "--cap-add=SYS_ADMIN",
-    "--cap-add=NET_ADMIN"
+    "--privileged"
   ],
   "customizations": {
     "vscode": {
@@ -24,8 +17,6 @@
       ]
     }
   },
-  "remoteUser": "vscode",
-  "postStartCommand": "sudo mount -t bpf bpf /sys/fs/bpf || true && sudo mount -t debugfs none /sys/kernel/debug || true && sudo sysctl -w kernel.unprivileged_bpf_disabled=0 || true && sudo ulimit -l unlimited || true",
-  "postCreateCommand": "git clone git@github.com:arxignis/citadel.git /home/vscode/workspace",
+  "postCreateCommand": "sudo chown vscode:vscode /usr/src",
   "workspaceFolder": "/home/vscode/workspace"
 }
