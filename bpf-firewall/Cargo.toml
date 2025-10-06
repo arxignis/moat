@@ -1,0 +1,22 @@
+[package]
+name = "bpf-firewall"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+libbpf-cargo = "0.25.0"
+vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git", rev = "83a228cf37fc65f2d14e4896a04922b5ee531a94" }
+
+[dependencies]
+libbpf-rs = "0.25.0"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "signal",
+] }
+anyhow = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
