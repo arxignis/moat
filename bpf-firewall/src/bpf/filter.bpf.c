@@ -1,120 +1,153 @@
-// SPDX-License-Identifier: GPL-2.0
-// CO-RE friendly includes
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include "filter.h"
-// Minimal kernel-like typedefs and constants to avoid linux/bpf.h dependency
-typedef int __s32;
-typedef __u32 __wsum;
+
+#define NF_DROP         0
+#define NF_ACCEPT       1
+#define ETH_P_IP        0x0800
+#define ETH_P_IPV6      0x86DD
+#define IP_MF           0x2000
+#define IP_OFFSET       0x1FFF
+#define NEXTHDR_FRAGMENT    44
 
 
-
-#ifndef XDP_ABORTED
-#define XDP_ABORTED 0
-#endif
-#ifndef XDP_DROP
-#define XDP_DROP 1
-#endif
-#ifndef XDP_PASS
-#define XDP_PASS 2
-#endif
-#ifndef XDP_TX
-#define XDP_TX 3
-#endif
-#ifndef XDP_REDIRECT
-#define XDP_REDIRECT 4
-#endif
-
-#ifndef BPF_ANY
-#define BPF_ANY 0
-#endif
-#ifndef BPF_MAP_TYPE_HASH
-#define BPF_MAP_TYPE_HASH 1
-#endif
-
-char LICENSE[] SEC("license") = "GPL";
+struct lpm_key {
+    __u32 prefixlen;
+    __be32 addr;
+};
 
 // Two maps: permanently banned and recently banned
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, CITADEL_IP_MAP_MAX);
-	__type(key, __u32);           // IPv4 address in network byte order
+	__type(key, struct lpm_key);           // IPv4 address in network byte order
 	__type(value, ip_flag_t);     // presence flag (1)
 } banned_ips SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, CITADEL_IP_MAP_MAX);
-	__type(key, __u32);
+	__type(key, struct lpm_key);
 	__type(value, ip_flag_t);
 } recently_banned_ips SEC(".maps");
 
-static __always_inline int parse_ipv4(void *data, void *data_end, __u32 *src, __u8 *proto, void **l4_hdr)
+extern int bpf_dynptr_from_skb(struct __sk_buff *skb, __u64 flags,
+                  struct bpf_dynptr *ptr__uninit) __ksym;
+extern void *bpf_dynptr_slice(const struct bpf_dynptr *ptr, uint32_t offset,
+                  void *buffer, uint32_t buffer__sz) __ksym;
+
+volatile int shootdowns = 0;
+
+static bool is_frag_v4(struct iphdr *iph)
 {
-	struct ethhdr *eth = data;
-	if ((void *)(eth + 1) > data_end)
-		return -1;
+    int offset;
+    int flags;
 
-	__u16 h_proto = bpf_ntohs(eth->h_proto);
-	// 0x0800 == IPv4 EtherType
-	if (h_proto != 0x0800)
-		return -1;
+    offset = bpf_ntohs(iph->frag_off);
+    flags = offset & ~IP_OFFSET;
+    offset &= IP_OFFSET;
+    offset <<= 3;
 
-	struct iphdr *iph = (void *)(eth + 1);
-	if ((void *)(iph + 1) > data_end)
-		return -1;
-
-	__u32 ihl_len = iph->ihl * 4;
-	if (ihl_len < sizeof(*iph))
-		return -1;
-	if ((void *)iph + ihl_len > data_end)
-		return -1;
-
-	*src = iph->saddr;            // network byte order
-	*proto = iph->protocol; // 6 == TCP
-	*l4_hdr = (void *)iph + ihl_len;
-	return 0;
+    return (flags & IP_MF) || offset;
 }
 
-SEC("xdp")
-int xdp_filter(struct xdp_md *ctx)
+static bool is_frag_v6(struct ipv6hdr *ip6h)
 {
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data = (void *)(long)ctx->data;
-
-	__u32 src_ip = 0;
-	__u8 proto = 0;
-	void *l4 = NULL;
-	if (parse_ipv4(data, data_end, &src_ip, &proto, &l4) < 0)
-		return XDP_PASS; // Not IPv4; ignore
-
-	// 1) Drop immediately if in banned list
-	ip_flag_t *flag = bpf_map_lookup_elem(&banned_ips, &src_ip);
-	if (flag)
-		return XDP_DROP;
-
-	// 2) If in recently_banned, allow packets through for now
-	ip_flag_t *recent = bpf_map_lookup_elem(&recently_banned_ips, &src_ip);
-	if (recent) {
-		// If TCP and FIN/RST is observed, move to banned
-		if (proto == 6 /* TCP */) {
-			struct tcphdr *tcp = l4;
-			if ((void *)(tcp + 1) <= data_end) {
-				if (tcp->fin || tcp->rst) {
-					ip_flag_t one = 1;
-					bpf_map_update_elem(&banned_ips, &src_ip, &one, BPF_ANY);
-					bpf_map_delete_elem(&recently_banned_ips, &src_ip);
-				}
-			}
-		}
-		return XDP_PASS;
-	}
-
-	// 3) Otherwise allow
-	return XDP_PASS;
+    /* Simplifying assumption that there are no extension headers
+     * between fixed header and fragmentation header. This assumption
+     * is only valid in this test case. It saves us the hassle of
+     * searching all potential extension headers.
+     */
+    return ip6h->nexthdr == NEXTHDR_FRAGMENT;
 }
 
-// Optional: helper program to promote keys from recently_banned to banned
-// could be implemented via a userspace sweeper or a BPF timer. Not included here.
+static int handle_v4(struct __sk_buff *skb)
+{
+    struct bpf_dynptr ptr;
+    u8 iph_buf[20] = {};
+    struct iphdr *iph;
 
+    if (bpf_dynptr_from_skb(skb, 0, &ptr))
+        return NF_DROP;
+
+    iph = bpf_dynptr_slice(&ptr, 0, iph_buf, sizeof(iph_buf));
+    if (!iph)
+        return NF_DROP;
+
+    /* Shootdown any frags first (preserve original behavior/metric) */
+    if (is_frag_v4(iph)) {
+        shootdowns++;
+        return NF_DROP;
+    }
+
+    // Check banned/recently banned maps by source IP (exact /32 match)
+    struct lpm_key key = {
+        .prefixlen = 32,
+        .addr = iph->saddr,
+    };
+
+    ip_flag_t *ban = bpf_map_lookup_elem(&banned_ips, &key);
+    if (ban)
+        return NF_DROP;
+
+    ip_flag_t *recent = bpf_map_lookup_elem(&recently_banned_ips, &key);
+    if (recent) {
+        // Allow packets to pass while in recently-banned.
+        // If this is TCP FIN/RST, promote to banned and remove from recently.
+        if (iph->protocol == 6 /* TCP */) {
+            __u32 ihl_len = iph->ihl * 4;
+            u8 tcph_buf[20] = {};
+            struct tcphdr *tcph = bpf_dynptr_slice(&ptr, ihl_len, tcph_buf, sizeof(tcph_buf));
+            if (tcph) {
+                if (tcph->fin || tcph->rst) {
+                    ip_flag_t one = 1;
+                    bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
+                    bpf_map_delete_elem(&recently_banned_ips, &key);
+                }
+            }
+        }
+        return NF_ACCEPT;
+    }
+
+    return NF_ACCEPT;
+}
+
+static int handle_v6(struct __sk_buff *skb)
+{
+    struct bpf_dynptr ptr;
+    struct ipv6hdr *ip6h;
+    u8 ip6h_buf[40] = {};
+
+    if (bpf_dynptr_from_skb(skb, 0, &ptr))
+        return NF_DROP;
+
+    ip6h = bpf_dynptr_slice(&ptr, 0, ip6h_buf, sizeof(ip6h_buf));
+    if (!ip6h)
+        return NF_DROP;
+
+    /* Shootdown any frags */
+    if (is_frag_v6(ip6h)) {
+        shootdowns++;
+        return NF_DROP;
+    }
+
+    return NF_ACCEPT;
+}
+
+SEC("netfilter")
+int defrag(struct bpf_nf_ctx *ctx)
+{
+    struct __sk_buff *skb = (struct __sk_buff *)ctx->skb;
+
+    switch (bpf_ntohs(ctx->skb->protocol)) {
+    case ETH_P_IP:
+        return handle_v4(skb);
+    case ETH_P_IPV6:
+        return handle_v6(skb);
+    default:
+        return NF_ACCEPT;
+    }
+}
+
+char _license[] SEC("license") = "GPL";
