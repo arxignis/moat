@@ -14,3 +14,5 @@ Attackers see nothing but endless reflection — their own attacks bouncing back
 
 Because this is your Citadel, your Arx, your Ignis.
 And with Moat, the fire never reaches your gates. 🔥
+
+![Story](./images/story.png)
