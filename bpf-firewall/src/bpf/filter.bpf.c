@@ -12,6 +12,17 @@
 #define NEXTHDR_FRAGMENT    44
 
 
+static inline bool is_frag_v4(const struct iphdr *iph)
+{
+	return (iph->frag_off & bpf_htons(IP_MF | IP_OFFSET)) != 0;
+}
+
+static inline bool is_frag_v6(const struct ipv6hdr *ip6h)
+{
+	return ip6h->nexthdr == NEXTHDR_FRAGMENT;
+}
+
+
 struct lpm_key {
     __u32 prefixlen;
     __be32 addr;
@@ -21,6 +32,7 @@ struct lpm_key {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, CITADEL_IP_MAP_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct lpm_key);           // IPv4 address in network byte order
 	__type(value, ip_flag_t);     // presence flag (1)
 } banned_ips SEC(".maps");
@@ -28,126 +40,112 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, CITADEL_IP_MAP_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct lpm_key);
 	__type(value, ip_flag_t);
 } recently_banned_ips SEC(".maps");
 
-extern int bpf_dynptr_from_skb(struct __sk_buff *skb, __u64 flags,
-                  struct bpf_dynptr *ptr__uninit) __ksym;
-extern void *bpf_dynptr_slice(const struct bpf_dynptr *ptr, uint32_t offset,
-                  void *buffer, uint32_t buffer__sz) __ksym;
+// Remove dynptr helpers, not used in XDP manual parsing
+// extern int bpf_dynptr_from_skb(struct __sk_buff *skb, __u64 flags,
+//                   struct bpf_dynptr *ptr__uninit) __ksym;
+// extern void *bpf_dynptr_slice(const struct bpf_dynptr *ptr, uint32_t offset,
+//                   void *buffer, uint32_t buffer__sz) __ksym;
 
 volatile int shootdowns = 0;
 
-static bool is_frag_v4(struct iphdr *iph)
+/*
+ * Helper for bounds checking and advancing a cursor.
+ *
+ * @cursor: pointer to current parsing position
+ * @end:    pointer to end of packet data
+ * @len:    length of the struct to read
+ *
+ * Returns a pointer to the struct if it's within bounds,
+ * and advances the cursor. Returns NULL otherwise.
+ */
+static void *parse_and_advance(void **cursor, void *end, __u32 len)
 {
-    int offset;
-    int flags;
-
-    offset = bpf_ntohs(iph->frag_off);
-    flags = offset & ~IP_OFFSET;
-    offset &= IP_OFFSET;
-    offset <<= 3;
-
-    return (flags & IP_MF) || offset;
+    void *current = *cursor;
+    if (current + len > end)
+        return NULL;
+    *cursor = current + len;
+    return current;
 }
 
-static bool is_frag_v6(struct ipv6hdr *ip6h)
+SEC("xdp")
+int firewall(struct xdp_md *ctx)
 {
-    /* Simplifying assumption that there are no extension headers
-     * between fixed header and fragmentation header. This assumption
-     * is only valid in this test case. It saves us the hassle of
-     * searching all potential extension headers.
-     */
-    return ip6h->nexthdr == NEXTHDR_FRAGMENT;
-}
 
-static int handle_v4(struct __sk_buff *skb)
-{
-    struct bpf_dynptr ptr;
-    u8 iph_buf[20] = {};
-    struct iphdr *iph;
+    bpf_printk("XDP: got packet from IP: ");
+    
+    // return XDP_PASS;
+    return XDP_DROP;
+    void *data_end = (void *)(long)ctx->data_end;
+    void *cursor = (void *)(long)ctx->data;
 
-    if (bpf_dynptr_from_skb(skb, 0, &ptr))
-        return NF_DROP;
+    // 1. Parse Ethernet header
+    struct ethhdr *eth = parse_and_advance(&cursor, data_end, sizeof(*eth));
+    if (!eth)
+        return XDP_PASS; // Not enough data for Ethernet header
 
-    iph = bpf_dynptr_slice(&ptr, 0, iph_buf, sizeof(iph_buf));
-    if (!iph)
-        return NF_DROP;
+    __u16 h_proto = eth->h_proto;
 
-    /* Shootdown any frags first (preserve original behavior/metric) */
-    if (is_frag_v4(iph)) {
-        shootdowns++;
-        return NF_DROP;
-    }
+    // 2. Handle IPv4 packets
+    if (h_proto == bpf_htons(ETH_P_IP)) {
+        // Parse IP header
+        struct iphdr *iph = parse_and_advance(&cursor, data_end, sizeof(*iph));
+        bpf_printk("XDP: got packet from IP: %pI4", &iph->saddr);
+        if (!iph)
+            return XDP_PASS; // Not enough data for IP header
 
-    // Check banned/recently banned maps by source IP (exact /32 match)
-    struct lpm_key key = {
-        .prefixlen = 32,
-        .addr = iph->saddr,
-    };
+        
 
-    ip_flag_t *ban = bpf_map_lookup_elem(&banned_ips, &key);
-    if (ban)
-        return NF_DROP;
+        // Check for fragments (same logic as before)
+        if (is_frag_v4(iph)) {
+            shootdowns++;
+            return XDP_DROP;
+        }
 
-    ip_flag_t *recent = bpf_map_lookup_elem(&recently_banned_ips, &key);
-    if (recent) {
-        // Allow packets to pass while in recently-banned.
-        // If this is TCP FIN/RST, promote to banned and remove from recently.
-        if (iph->protocol == 6 /* TCP */) {
-            __u32 ihl_len = iph->ihl * 4;
-            u8 tcph_buf[20] = {};
-            struct tcphdr *tcph = bpf_dynptr_slice(&ptr, ihl_len, tcph_buf, sizeof(tcph_buf));
-            if (tcph) {
-                if (tcph->fin || tcph->rst) {
-                    ip_flag_t one = 1;
-                    bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
-                    bpf_map_delete_elem(&recently_banned_ips, &key);
+        // Check banned/recently banned maps by source IP
+        struct lpm_key key = {
+            .prefixlen = 32,
+            .addr = iph->saddr,
+        };
+
+        if (bpf_map_lookup_elem(&banned_ips, &key))
+            return XDP_DROP;
+
+        if (bpf_map_lookup_elem(&recently_banned_ips, &key)) {
+            // If TCP FIN/RST, promote to banned list
+            if (iph->protocol == IPPROTO_TCP) {
+                struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
+                if (tcph) {
+                    if (tcph->fin || tcph->rst) {
+                        ip_flag_t one = 1;
+                        bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
+                        bpf_map_delete_elem(&recently_banned_ips, &key);
+                    }
                 }
             }
+            return XDP_PASS; // Allow if recently banned
         }
-        return NF_ACCEPT;
+
+        return XDP_PASS; // Default action for IPv4 is to pass
+    }
+    // 3. Handle IPv6 packets (fragment check only)
+    else if (h_proto == bpf_htons(ETH_P_IPV6)) {
+        struct ipv6hdr *ip6h = parse_and_advance(&cursor, data_end, sizeof(*ip6h));
+        if (!ip6h)
+            return XDP_PASS;
+
+        if (is_frag_v6(ip6h)) {
+            shootdowns++;
+            return XDP_DROP;
+        }
+        return XDP_PASS;
     }
 
-    return NF_ACCEPT;
-}
-
-static int handle_v6(struct __sk_buff *skb)
-{
-    struct bpf_dynptr ptr;
-    struct ipv6hdr *ip6h;
-    u8 ip6h_buf[40] = {};
-
-    if (bpf_dynptr_from_skb(skb, 0, &ptr))
-        return NF_DROP;
-
-    ip6h = bpf_dynptr_slice(&ptr, 0, ip6h_buf, sizeof(ip6h_buf));
-    if (!ip6h)
-        return NF_DROP;
-
-    /* Shootdown any frags */
-    if (is_frag_v6(ip6h)) {
-        shootdowns++;
-        return NF_DROP;
-    }
-
-    return NF_ACCEPT;
-}
-
-SEC("netfilter")
-int defrag(struct bpf_nf_ctx *ctx)
-{
-    struct __sk_buff *skb = (struct __sk_buff *)ctx->skb;
-
-    switch (bpf_ntohs(ctx->skb->protocol)) {
-    case ETH_P_IP:
-        return handle_v4(skb);
-    case ETH_P_IPV6:
-        return handle_v6(skb);
-    default:
-        return NF_ACCEPT;
-    }
+    return XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";
