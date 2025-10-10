@@ -283,7 +283,7 @@ struct FingerprintingTcpListener {
 
 impl FingerprintingTcpListener {
     fn new(inner: TcpListenerStream) -> Self {
-        Self { 
+        Self {
             inner,
             pending: None,
         }
@@ -390,7 +390,7 @@ fn install_ring_crypto_provider() -> Result<()> {
 
 fn load_acme_client_config(path: Option<&Path>) -> Result<Arc<AcmeClientConfig>> {
     let mut roots = RootCertStore::empty();
-    
+
     if let Some(path) = path {
         // Load custom CA bundle
         let file = File::open(path)
