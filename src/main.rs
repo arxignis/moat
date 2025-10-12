@@ -1090,24 +1090,8 @@ async fn run_acme_tls_proxy(
         acme_config.directory_lets_encrypt(args.acme_use_prod)
     };
 
-    let tcp_stream = TcpListenerStream::new(listener);
-    let fingerprinted_tcp = tcp_stream.then(|res| async {
-        match res {
-            Ok(stream) => match FingerprintTcpStream::new(stream).await {
-                Ok(fp_stream) => {
-                    log_tls_fingerprint(fp_stream.peer_addr(), fp_stream.fingerprint());
-                    Ok(fp_stream)
-                }
-                Err(err) => Err(err),
-            },
-            Err(err) => Err(err),
-        }
-    });
-
-    let mut incoming = acme_config.tokio_incoming(
-        fingerprinted_tcp,
-        vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()],
-    );
+    let mut incoming = acme_config
+        .tokio_incoming(TcpListenerStream::new(listener), vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
 
     tls_state
         .set_running_detail("ACME certificate manager running")
