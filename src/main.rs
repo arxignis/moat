@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll};
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -244,7 +244,7 @@ impl FingerprintTcpStream {
 impl AsyncRead for FingerprintTcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
@@ -254,17 +254,17 @@ impl AsyncRead for FingerprintTcpStream {
 impl AsyncWrite for FingerprintTcpStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -1025,24 +1025,8 @@ async fn run_acme_tls_proxy(
         acme_config.directory_lets_encrypt(args.acme_use_prod)
     };
 
-    let tcp_stream = TcpListenerStream::new(listener);
-    let fingerprinted_tcp = tcp_stream.then(|res| async {
-        match res {
-            Ok(stream) => match FingerprintTcpStream::new(stream).await {
-                Ok(fp_stream) => {
-                    log_tls_fingerprint(fp_stream.peer_addr(), fp_stream.fingerprint());
-                    Ok(fp_stream)
-                }
-                Err(err) => Err(err),
-            },
-            Err(err) => Err(err),
-        }
-    });
-
-    let mut incoming = acme_config.tokio_incoming(
-        fingerprinted_tcp,
-        vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()],
-    );
+    let mut incoming = acme_config
+        .tokio_incoming(TcpListenerStream::new(listener), vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
 
     tls_state
         .set_running_detail("ACME certificate manager running")
