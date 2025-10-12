@@ -1090,8 +1090,9 @@ async fn run_acme_tls_proxy(
         acme_config.directory_lets_encrypt(args.acme_use_prod)
     };
 
+    let fingerprinting_listener = FingerprintingTcpListener::new(TcpListenerStream::new(listener));
     let mut incoming = acme_config
-        .tokio_incoming(TcpListenerStream::new(listener), vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
+        .tokio_incoming(fingerprinting_listener, vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
 
     tls_state
         .set_running_detail("ACME certificate manager running")
