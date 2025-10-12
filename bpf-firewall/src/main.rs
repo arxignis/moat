@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::mem::MaybeUninit;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 
 use anyhow::Result;
 use clap::Parser;
@@ -10,8 +11,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
-use libbpf_rs::MapCore;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use libbpf_rs::{MapCore, MapFlags};
 use nix::net::if_::if_nametoindex;
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -55,17 +56,33 @@ fn header_json() -> (hyper::header::HeaderName, hyper::header::HeaderValue) {
     )
 }
 
-fn parse_ip_param(req: &Request<hyper::body::Incoming>) -> Result<Ipv4Addr, String> {
+fn parse_cidr_param(req: &Request<hyper::body::Incoming>) -> Result<(Ipv4Addr, u32), String> {
     let uri = req.uri();
     let query = uri.query().unwrap_or("");
     for pair in query.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
-            if k == "ip" {
-                return v.parse::<Ipv4Addr>().map_err(|_| "invalid ip".to_string());
+            if k == "target" {
+                if let Some((ip_str, prefix_str)) = v.split_once('/') {
+                    let ip = ip_str
+                        .parse::<Ipv4Addr>()
+                        .map_err(|_| "invalid ip in cidr".to_string())?;
+                    let prefixlen = prefix_str
+                        .parse::<u32>()
+                        .map_err(|_| "invalid prefix in cidr".to_string())?;
+                    if prefixlen > 32 {
+                        return Err("prefixlen cannot be greater than 32".to_string());
+                    }
+                    return Ok((ip, prefixlen));
+                } else {
+                    let ip = v
+                        .parse::<Ipv4Addr>()
+                        .map_err(|_| "invalid ip".to_string())?;
+                    return Ok((ip, 32)); // Default to /32 for a single IP
+                }
             }
         }
     }
-    Err("missing ip".to_string())
+    Err("missing target parameter".to_string())
 }
 
 async fn handle(
@@ -84,6 +101,36 @@ async fn handle(
         r.headers_mut().insert(k, v);
         r
     };
+
+    let peer_ip = peer.ip();
+    if let IpAddr::V4(block_ip) = peer_ip {
+        let block_ip_u32: u32 = block_ip.into();
+        let block_ip_be = block_ip_u32.to_be();
+
+        let my_ip_key: types::lpm_key = types::lpm_key {
+            prefixlen: 32_u32,
+            addr: block_ip_be,
+        };
+
+        let my_ip_key_bytes = unsafe { plain::as_bytes(&my_ip_key) };
+
+        if let Some(flag) = state
+            .clone()
+            .skel
+            .unwrap()
+            .maps
+            .recently_banned_ips
+            .lookup(my_ip_key_bytes, MapFlags::ANY)
+            .unwrap()
+        {
+            println!("result of recently banned ip lookup: {:?}", flag);
+            if flag == vec![1_u8] {
+                return Ok(Response::new(Full::<Bytes>::from(Bytes::from(
+                    "HAAAAAAHAHAHAAAAA....YOU HAVE ENTERED MY DUNGEON....you will not leave here alive (you have been banned)",
+                ))));
+            }
+        }
+    }
 
     // Root: health
     if path == "/" && method == hyper::Method::GET {
@@ -173,12 +220,12 @@ async fn handle(
         return Ok(json(&resp));
     }
 
-    // PUT /ban?ip=1.2.3.4
+    // PUT /ban?target=1.2.3.4/24
     if path == "/ban" && method == hyper::Method::PUT {
-        let resp = match parse_ip_param(&req) {
-            Ok(ip) => {
+        let resp = match parse_cidr_param(&req) {
+            Ok((ip, prefixlen)) => {
                 let key = LpmKey {
-                    prefixlen: 32,
+                    prefixlen,
                     addr: ipv4_to_u32_be(ip),
                 };
                 let key_bytes: &[u8] = unsafe { plain::as_bytes(&key) };
@@ -202,7 +249,10 @@ async fn handle(
                     return Ok(r);
                 }
                 let _ = skel.maps.recently_banned_ips.delete(key_bytes);
-                json(&format!("{{\"ok\":true,\"banned\":\"{}\"}}", ip))
+                json(&format!(
+                    "{{\"ok\":true,\"banned\":\"{}/{}\"}}",
+                    ip, prefixlen
+                ))
             }
             Err(e) => {
                 let mut r = json(&format!("{{\"ok\":false,\"error\":\"{}\"}}", e));
@@ -213,12 +263,12 @@ async fn handle(
         return Ok(resp);
     }
 
-    // PUT /recently-ban?ip=1.2.3.4
+    // PUT /recently-ban?target=1.2.3.4/24
     if path == "/recently-ban" && method == hyper::Method::PUT {
-        let resp = match parse_ip_param(&req) {
-            Ok(ip) => {
+        let resp = match parse_cidr_param(&req) {
+            Ok((ip, prefixlen)) => {
                 let key = LpmKey {
-                    prefixlen: 32,
+                    prefixlen,
                     addr: ipv4_to_u32_be(ip),
                 };
                 let key_bytes: &[u8] = unsafe { plain::as_bytes(&key) };
@@ -242,7 +292,10 @@ async fn handle(
                     return Ok(r);
                 }
                 let _ = skel.maps.banned_ips.delete(key_bytes);
-                json(&format!("{{\"ok\":true,\"recently_banned\":\"{}\"}}", ip))
+                json(&format!(
+                    "{{\"ok\":true,\"recently_banned\":\"{}/{}\"}}",
+                    ip, prefixlen
+                ))
             }
             Err(e) => {
                 let mut r = json(&format!("{{\"ok\":false,\"error\":\"{}\"}}", e));
@@ -253,12 +306,12 @@ async fn handle(
         return Ok(resp);
     }
 
-    // GET /status?ip=1.2.3.4
+    // GET /status?target=1.2.3.4
     if path == "/status" && method == hyper::Method::GET {
-        let resp = match parse_ip_param(&req) {
-            Ok(ip) => {
+        let resp = match parse_cidr_param(&req) {
+            Ok((ip, prefixlen)) => {
                 let key = LpmKey {
-                    prefixlen: 32,
+                    prefixlen,
                     addr: ipv4_to_u32_be(ip),
                 };
                 let key_bytes: &[u8] = unsafe { plain::as_bytes(&key) };
@@ -354,6 +407,27 @@ async fn main() -> Result<()> {
             panic!("failed to load skeleton");
         }
     };
+
+    let block_ip: Ipv4Addr = Ipv4Addr::from_str("192.168.215.0").unwrap();
+    let block_ip_u32: u32 = block_ip.into();
+    let block_ip_be = block_ip_u32.to_be();
+
+    let my_ip_key: types::lpm_key = types::lpm_key {
+        prefixlen: 8_u32, // change this lateeer...
+        addr: block_ip_be,
+    };
+
+    let my_ip_key_bytes = unsafe { plain::as_bytes(&my_ip_key) };
+
+    let map_val = 1_u8;
+
+    state
+        .skel
+        .as_ref()
+        .unwrap()
+        .maps
+        .recently_banned_ips
+        .update(my_ip_key_bytes, &map_val.to_le_bytes(), MapFlags::ANY)?;
 
     loop {
         tokio::select! {

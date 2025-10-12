@@ -76,37 +76,28 @@ SEC("xdp")
 int firewall(struct xdp_md *ctx)
 {
 
-    bpf_printk("XDP: got packet from IP: ");
-    
-    // return XDP_PASS;
-    return XDP_DROP;
     void *data_end = (void *)(long)ctx->data_end;
     void *cursor = (void *)(long)ctx->data;
 
-    // 1. Parse Ethernet header
     struct ethhdr *eth = parse_and_advance(&cursor, data_end, sizeof(*eth));
     if (!eth)
-        return XDP_PASS; // Not enough data for Ethernet header
+        return XDP_PASS; 
 
     __u16 h_proto = eth->h_proto;
 
-    // 2. Handle IPv4 packets
     if (h_proto == bpf_htons(ETH_P_IP)) {
-        // Parse IP header
         struct iphdr *iph = parse_and_advance(&cursor, data_end, sizeof(*iph));
         bpf_printk("XDP: got packet from IP: %pI4", &iph->saddr);
         if (!iph)
-            return XDP_PASS; // Not enough data for IP header
+            return XDP_PASS; 
 
         
 
-        // Check for fragments (same logic as before)
         if (is_frag_v4(iph)) {
             shootdowns++;
             return XDP_DROP;
         }
 
-        // Check banned/recently banned maps by source IP
         struct lpm_key key = {
             .prefixlen = 32,
             .addr = iph->saddr,
@@ -116,7 +107,6 @@ int firewall(struct xdp_md *ctx)
             return XDP_DROP;
 
         if (bpf_map_lookup_elem(&recently_banned_ips, &key)) {
-            // If TCP FIN/RST, promote to banned list
             if (iph->protocol == IPPROTO_TCP) {
                 struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
                 if (tcph) {
@@ -127,12 +117,11 @@ int firewall(struct xdp_md *ctx)
                     }
                 }
             }
-            return XDP_PASS; // Allow if recently banned
+            return XDP_PASS; 
         }
 
-        return XDP_PASS; // Default action for IPv4 is to pass
+        return XDP_PASS; 
     }
-    // 3. Handle IPv6 packets (fragment check only)
     else if (h_proto == bpf_htons(ETH_P_IPV6)) {
         struct ipv6hdr *ip6h = parse_and_advance(&cursor, data_end, sizeof(*ip6h));
         if (!ip6h)
