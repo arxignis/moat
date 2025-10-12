@@ -275,6 +275,72 @@ impl AsRef<TcpStream> for FingerprintTcpStream {
     }
 }
 
+// Custom stream wrapper that implements Unpin for use with rustls-acme
+struct FingerprintingTcpListener {
+    inner: TcpListenerStream,
+    pending: Option<Pin<Box<dyn futures::Future<Output = Result<(TcpStream, Option<TlsFingerprint>, SocketAddr), io::Error>> + Send>>>,
+}
+
+impl FingerprintingTcpListener {
+    fn new(inner: TcpListenerStream) -> Self {
+        Self { 
+            inner,
+            pending: None,
+        }
+    }
+}
+
+impl futures::Stream for FingerprintingTcpListener {
+    type Item = Result<TcpStream, io::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        // If we have a pending fingerprinting task, poll it
+        if let Some(mut fut) = self.pending.take() {
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(Ok((stream, fp, peer))) => {
+                    log_tls_fingerprint(peer, fp.as_ref());
+                    return Poll::Ready(Some(Ok(stream)));
+                }
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Some(Err(e)));
+                }
+                Poll::Pending => {
+                    self.pending = Some(fut);
+                    return Poll::Pending;
+                }
+            }
+        }
+
+        // Poll for new connection
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(stream))) => {
+                // Create a future to do the fingerprinting
+                let fut = Box::pin(async move {
+                    let peer = stream.peer_addr()?;
+                    let mut buf = vec![0u8; 16 * 1024];
+                    let fp = match stream.peek(&mut buf).await {
+                        Ok(n) if n > 0 => fingerprint_client_hello(&buf[..n]),
+                        _ => None,
+                    };
+                    Ok((stream, fp, peer))
+                });
+                self.pending = Some(fut);
+                // Immediately poll the future we just created
+                self.poll_next(cx)
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+// Implement Unpin so it works with rustls-acme
+impl Unpin for FingerprintingTcpListener {}
+
 fn log_tls_fingerprint(peer: SocketAddr, fingerprint: Option<&TlsFingerprint>) {
     if let Some(fp) = fingerprint {
         println!(
@@ -1025,8 +1091,9 @@ async fn run_acme_tls_proxy(
         acme_config.directory_lets_encrypt(args.acme_use_prod)
     };
 
+    let fingerprinting_listener = FingerprintingTcpListener::new(TcpListenerStream::new(listener));
     let mut incoming = acme_config
-        .tokio_incoming(TcpListenerStream::new(listener), vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
+        .tokio_incoming(fingerprinting_listener, vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
 
     tls_state
         .set_running_detail("ACME certificate manager running")
