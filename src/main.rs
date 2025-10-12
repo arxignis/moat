@@ -1001,7 +1001,7 @@ async fn run_custom_tls_proxy(
                     };
 
                     let peer_addr = stream.peer_addr();
-                    let mut acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+                    let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
 
                     match acceptor.await {
                         Ok(start) => {
