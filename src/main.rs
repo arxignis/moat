@@ -390,7 +390,6 @@ fn install_ring_crypto_provider() -> Result<()> {
 
 fn load_acme_client_config(path: Option<&Path>) -> Result<Arc<AcmeClientConfig>> {
     let mut roots = RootCertStore::empty();
-
     if let Some(path) = path {
         // Load custom CA bundle
         let file = File::open(path)
@@ -1002,7 +1001,7 @@ async fn run_custom_tls_proxy(
                     };
 
                     let peer_addr = stream.peer_addr();
-                    let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+                    let mut acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
 
                     match acceptor.await {
                         Ok(start) => {
@@ -1091,9 +1090,24 @@ async fn run_acme_tls_proxy(
         acme_config.directory_lets_encrypt(args.acme_use_prod)
     };
 
-    let fingerprinting_listener = FingerprintingTcpListener::new(TcpListenerStream::new(listener));
-    let mut incoming = acme_config
-        .tokio_incoming(fingerprinting_listener, vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
+    let tcp_stream = TcpListenerStream::new(listener);
+    let fingerprinted_tcp = tcp_stream.then(|res| async {
+        match res {
+            Ok(stream) => match FingerprintTcpStream::new(stream).await {
+                Ok(fp_stream) => {
+                    log_tls_fingerprint(fp_stream.peer_addr(), fp_stream.fingerprint());
+                    Ok(fp_stream)
+                }
+                Err(err) => Err(err),
+            },
+            Err(err) => Err(err),
+        }
+    });
+
+    let mut incoming = acme_config.tokio_incoming(
+        fingerprinted_tcp,
+        vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()],
+    );
 
     tls_state
         .set_running_detail("ACME certificate manager running")

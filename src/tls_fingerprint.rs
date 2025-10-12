@@ -266,6 +266,7 @@ fn determine_tls_version(
         tls_parser::TlsVersion::Tls11 => TlsVersion::V1_1,
         tls_parser::TlsVersion::Tls10 => TlsVersion::V1_0,
         tls_parser::TlsVersion::Ssl30 => TlsVersion::Ssl3_0,
+        tls_parser::TlsVersion::Ssl20 => TlsVersion::Ssl2_0,
         other => TlsVersion::Unknown(other.into()),
     }
 }
