@@ -936,7 +936,7 @@ async fn run_custom_tls_proxy(
                     };
 
                     let peer_addr = stream.peer_addr();
-                    let mut acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+                    let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
 
                     match acceptor.await {
                         Ok(start) => {
@@ -1043,10 +1043,12 @@ async fn run_acme_tls_proxy(
                             .get_ref()
                             .get_ref()
                             .0
-                            .peer_addr();
+                            .get_ref()
+                            .peer_addr()
+                            .ok();
                         tokio::spawn(async move {
                             if let Err(err) =
-                                serve_proxy_conn(tls_stream, Some(peer), ctx_clone).await
+                                serve_proxy_conn(tls_stream, peer, ctx_clone).await
                             {
                                 eprintln!("ACME TLS proxy error: {err:?}");
                                 tls_state_clone.set_error_detail(format!("TLS session error: {err}")).await;
