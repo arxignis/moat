@@ -1,11 +1,13 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -36,11 +38,14 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
 use tokio::sync::{Mutex, RwLock, watch};
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::LazyConfigAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
+
+use crate::tls_fingerprint::{fingerprint_client_hello, Fingerprint as TlsFingerprint};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -189,6 +194,8 @@ impl SharedTlsState {
     }
 }
 
+mod tls_fingerprint;
+
 mod bpf {
     include!(concat!(env!("OUT_DIR"), "/filter.skel.rs"));
 }
@@ -197,6 +204,90 @@ mod bpf {
 struct AppState {
     skel: Option<Arc<bpf::FilterSkel<'static>>>,
     tls_state: SharedTlsState,
+}
+
+#[derive(Debug)]
+struct FingerprintTcpStream {
+    inner: TcpStream,
+    peer_addr: SocketAddr,
+    fingerprint: Option<TlsFingerprint>,
+}
+
+impl FingerprintTcpStream {
+    pub async fn new(stream: TcpStream) -> io::Result<Self> {
+        let peer_addr = stream.peer_addr()?;
+        let fingerprint = Self::capture_fingerprint(&stream).await;
+        Ok(Self {
+            inner: stream,
+            peer_addr,
+            fingerprint,
+        })
+    }
+
+    fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
+    }
+
+    fn fingerprint(&self) -> Option<&TlsFingerprint> {
+        self.fingerprint.as_ref()
+    }
+
+    async fn capture_fingerprint(stream: &TcpStream) -> Option<TlsFingerprint> {
+        let mut buf = vec![0u8; 16 * 1024];
+        match stream.peek(&mut buf).await {
+            Ok(n) if n > 0 => fingerprint_client_hello(&buf[..n]),
+            _ => None,
+        }
+    }
+}
+
+impl AsyncRead for FingerprintTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for FingerprintTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl AsRef<TcpStream> for FingerprintTcpStream {
+    fn as_ref(&self) -> &TcpStream {
+        &self.inner
+    }
+}
+
+fn log_tls_fingerprint(peer: SocketAddr, fingerprint: Option<&TlsFingerprint>) {
+    if let Some(fp) = fingerprint {
+        println!(
+            "TLS client {peer}: ja4={} ja4_raw={} ja4_unsorted={} ja4_raw_unsorted={} version={} sni={} alpn={}",
+            fp.ja4,
+            fp.ja4_raw,
+            fp.ja4_unsorted,
+            fp.ja4_raw_unsorted,
+            fp.tls_version,
+            fp.sni.as_deref().unwrap_or("-"),
+            fp.alpn.as_deref().unwrap_or("-")
+        );
+    }
 }
 
 #[repr(C)]
@@ -811,7 +902,7 @@ async fn run_control_plane(
 
 async fn run_custom_tls_proxy(
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    server_config: Arc<ServerConfig>,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
     mut shutdown: watch::Receiver<bool>,
@@ -829,19 +920,45 @@ async fn run_custom_tls_proxy(
                         continue;
                     }
                 };
-                let acceptor = acceptor.clone();
                 let ctx_clone = ctx.clone();
                 let tls_state_clone = tls_state.clone();
+                let config = server_config.clone();
                 tokio::spawn(async move {
-                    match acceptor.accept(stream).await {
-                        Ok(tls_stream) => {
-                            if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone.clone()).await {
-                                eprintln!("TLS proxy error from {peer}: {err:?}");
-                                tls_state_clone.set_error_detail(format!("last connection error: {err}")).await;
+                    let stream = match FingerprintTcpStream::new(stream).await {
+                        Ok(s) => {
+                            log_tls_fingerprint(s.peer_addr(), s.fingerprint());
+                            s
+                        }
+                        Err(err) => {
+                            eprintln!("failed to prepare TLS stream from {peer}: {err}");
+                            return;
+                        }
+                    };
+
+                    let peer_addr = stream.peer_addr();
+                    let mut acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+
+                    match acceptor.await {
+                        Ok(start) => {
+                            match start.into_stream(config).await {
+                                Ok(tls_stream) => {
+                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone()).await {
+                                        eprintln!("TLS proxy error from {peer_addr}: {err:?}");
+                                        tls_state_clone
+                                            .set_error_detail(format!("last connection error: {err}"))
+                                            .await;
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!("TLS handshake error from {peer_addr}: {err}");
+                                    tls_state_clone
+                                        .set_error_detail(format!("handshake failure: {err}"))
+                                        .await;
+                                }
                             }
                         }
                         Err(err) => {
-                            eprintln!("TLS handshake error from {peer}: {err}");
+                            eprintln!("TLS handshake error from {peer_addr}: {err}");
                             tls_state_clone
                                 .set_error_detail(format!("handshake failure: {err}"))
                                 .await;
@@ -908,8 +1025,22 @@ async fn run_acme_tls_proxy(
         acme_config.directory_lets_encrypt(args.acme_use_prod)
     };
 
+    let tcp_stream = TcpListenerStream::new(listener);
+    let fingerprinted_tcp = tcp_stream.then(|res| async {
+        match res {
+            Ok(stream) => match FingerprintTcpStream::new(stream).await {
+                Ok(fp_stream) => {
+                    log_tls_fingerprint(fp_stream.peer_addr(), fp_stream.fingerprint());
+                    Ok(fp_stream)
+                }
+                Err(err) => Err(err),
+            },
+            Err(err) => Err(err),
+        }
+    });
+
     let mut incoming = acme_config.tokio_incoming(
-        TcpListenerStream::new(listener),
+        fingerprinted_tcp,
         vec![b"http/1.1".to_vec(), b"acme-tls/1".to_vec()],
     );
 
@@ -928,11 +1059,11 @@ async fn run_acme_tls_proxy(
                             .get_ref()
                             .get_ref()
                             .0
-                            .get_ref()
-                            .peer_addr()
-                            .ok();
+                            .peer_addr();
                         tokio::spawn(async move {
-                            if let Err(err) = serve_proxy_conn(tls_stream, peer, ctx_clone).await {
+                            if let Err(err) =
+                                serve_proxy_conn(tls_stream, Some(peer), ctx_clone).await
+                            {
                                 eprintln!("ACME TLS proxy error: {err:?}");
                                 tls_state_clone.set_error_detail(format!("TLS session error: {err}")).await;
                             } else {
@@ -1078,7 +1209,6 @@ async fn main() -> Result<()> {
                 let cert = args.tls_cert_path.as_ref().unwrap();
                 let key = args.tls_key_path.as_ref().unwrap();
                 let config = load_custom_server_config(cert, key)?;
-                let acceptor = TlsAcceptor::from(config);
                 let listener = TcpListener::bind(args.tls_addr)
                     .await
                     .context("failed to bind TLS socket")?;
@@ -1088,7 +1218,7 @@ async fn main() -> Result<()> {
                 Some(tokio::spawn(async move {
                     if let Err(err) = run_custom_tls_proxy(
                         listener,
-                        acceptor,
+                        config.clone(),
                         proxy_ctx,
                         tls_state_clone,
                         shutdown,
