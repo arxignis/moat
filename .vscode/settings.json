@@ -1,0 +1,12 @@
+{
+  // Point rust-analyzer at the actual crate(s) in this workspace
+  "rust-analyzer.linkedProjects": [
+    "bpf-firewall/Cargo.toml"
+  ],
+  // Enable all features if your crate uses optional features
+  "rust-analyzer.cargo.allFeatures": true,
+  // Run clippy on save for quick lint feedback (optional)
+  "rust-analyzer.checkOnSave.command": "clippy",
+  // Use the local toolchain when available
+  "rust-analyzer.rustc.source": "discover"
+}

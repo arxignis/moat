@@ -1,26 +1,19 @@
-use std::convert::Infallible;
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
+use hyper::Uri;
 use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, Uri};
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags};
+use hyper_util::rt::{TokioExecutor, TokioTimer};
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use nix::net::if_::if_nametoindex;
-use serde::Deserialize;
 use tokio::net::TcpListener;
 
+pub mod access_rules;
 pub mod app_state;
 pub mod cli;
 pub mod firewall;
@@ -33,8 +26,6 @@ pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/filter.skel.rs"));
 }
 
-#[allow(clippy::wildcard_imports)]
-use bpf::*;
 use tokio::signal;
 use tokio::sync::watch;
 
@@ -44,51 +35,7 @@ use crate::ssl::{
     ProxyContext, SharedTlsState, TlsMode, install_ring_crypto_provider, load_custom_server_config,
     run_acme_tls_proxy, run_custom_tls_proxy,
 };
-// use crate::http::handle;
 use crate::utils::bpf_utils;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct LpmKey {
-    prefixlen: u32,
-    addr: u32, // network byte order
-}
-
-fn header_json() -> (hyper::header::HeaderName, hyper::header::HeaderValue) {
-    (
-        hyper::header::CONTENT_TYPE,
-        hyper::header::HeaderValue::from_static("application/json"),
-    )
-}
-
-fn parse_cidr_param(req: &Request<hyper::body::Incoming>) -> Result<(Ipv4Addr, u32), String> {
-    let uri = req.uri();
-    let query = uri.query().unwrap_or("");
-    for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == "target" {
-                if let Some((ip_str, prefix_str)) = v.split_once('/') {
-                    let ip = ip_str
-                        .parse::<Ipv4Addr>()
-                        .map_err(|_| "invalid ip in cidr".to_string())?;
-                    let prefixlen = prefix_str
-                        .parse::<u32>()
-                        .map_err(|_| "invalid prefix in cidr".to_string())?;
-                    if prefixlen > 32 {
-                        return Err("prefixlen cannot be greater than 32".to_string());
-                    }
-                    return Ok((ip, prefixlen));
-                } else {
-                    let ip = v
-                        .parse::<Ipv4Addr>()
-                        .map_err(|_| "invalid ip".to_string())?;
-                    return Ok((ip, 32)); // Default to /32 for a single IP
-                }
-            }
-        }
-    }
-    Err("missing target parameter".to_string())
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -128,14 +75,6 @@ async fn main() -> Result<()> {
         args.tls_cert_path.as_ref().map(|p| p.display().to_string()),
     );
 
-    let control_listener = TcpListener::bind(args.control_addr)
-        .await
-        .context("failed to bind control socket")?;
-    println!(
-        "HTTP control-plane listening on http://{}",
-        args.control_addr
-    );
-
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let boxed_open: Box<MaybeUninit<libbpf_rs::OpenObject>> = Box::new(MaybeUninit::uninit());
@@ -154,22 +93,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            match skel.progs.firewall.attach_xdp(ifindex) {
-                Ok(link) => {
-                    skel.links = bpf::FilterLinks {
-                        firewall: Some(link),
-                    };
-                    println!(
-                        "Attached XDP program to interface '{}' (ifindex {})",
-                        args.iface, ifindex
-                    );
-                }
-                Err(e) => {
-                    return Err(anyhow!(
-                        "failed to attach XDP program. Your environment may not support it: {e}"
-                    ));
-                }
-            }
+            bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex).unwrap();
+            println!("BPF sucessfully attached to xdp");
 
             AppState {
                 skel: Some(Arc::new(skel)),
@@ -259,10 +184,10 @@ async fn main() -> Result<()> {
     println!("Shutdown signal received, stopping servers...");
     let _ = shutdown_tx.send(true);
 
-    if let Some(handle) = tls_handle {
-        if let Err(err) = handle.await {
-            eprintln!("TLS task join error: {err}");
-        }
+    if let Some(handle) = tls_handle
+        && let Err(err) = handle.await
+    {
+        eprintln!("TLS task join error: {err}");
     }
 
     // if let Err(err) = control_handle.await {

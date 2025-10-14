@@ -13,11 +13,9 @@ pub mod bpf_utils {
                     firewall: Some(link),
                 };
 
-                return Ok(());
+                Ok(())
             }
-            Err(e) => {
-                return Err(Box::new(e));
-            }
+            Err(e) => Err(Box::new(e)),
         }
     }
 

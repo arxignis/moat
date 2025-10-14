@@ -205,35 +205,35 @@ fn extract_tls_signature_from_client_hello(
     let mut elliptic_curves = Vec::new();
     let mut elliptic_curve_point_formats = Vec::new();
 
-    if let Some(ext_data) = &client_hello.ext {
-        if let Ok((_remaining, parsed_extensions)) = parse_tls_extensions(ext_data) {
-            for extension in &parsed_extensions {
-                let ext_type: u16 = TlsExtensionType::from(extension).into();
-                if !is_grease_value(ext_type) {
-                    extensions.push(ext_type);
+    if let Some(ext_data) = &client_hello.ext
+        && let Ok((_remaining, parsed_extensions)) = parse_tls_extensions(ext_data)
+    {
+        for extension in &parsed_extensions {
+            let ext_type: u16 = TlsExtensionType::from(extension).into();
+            if !is_grease_value(ext_type) {
+                extensions.push(ext_type);
+            }
+            match extension {
+                TlsExtension::SNI(sni_list) => {
+                    if let Some((_, hostname)) = sni_list.first() {
+                        sni = String::from_utf8(hostname.to_vec()).ok();
+                    }
                 }
-                match extension {
-                    TlsExtension::SNI(sni_list) => {
-                        if let Some((_, hostname)) = sni_list.first() {
-                            sni = String::from_utf8(hostname.to_vec()).ok();
-                        }
+                TlsExtension::ALPN(alpn_list) => {
+                    if let Some(protocol) = alpn_list.first() {
+                        alpn = String::from_utf8(protocol.to_vec()).ok();
                     }
-                    TlsExtension::ALPN(alpn_list) => {
-                        if let Some(protocol) = alpn_list.first() {
-                            alpn = String::from_utf8(protocol.to_vec()).ok();
-                        }
-                    }
-                    TlsExtension::SignatureAlgorithms(sig_algs) => {
-                        signature_algorithms = sig_algs.clone();
-                    }
-                    TlsExtension::EllipticCurves(curves) => {
-                        elliptic_curves = curves.iter().map(|c| c.0).collect();
-                    }
-                    TlsExtension::EcPointFormats(formats) => {
-                        elliptic_curve_point_formats = formats.to_vec();
-                    }
-                    _ => {}
                 }
+                TlsExtension::SignatureAlgorithms(sig_algs) => {
+                    signature_algorithms = sig_algs.clone();
+                }
+                TlsExtension::EllipticCurves(curves) => {
+                    elliptic_curves = curves.iter().map(|c| c.0).collect();
+                }
+                TlsExtension::EcPointFormats(formats) => {
+                    elliptic_curve_point_formats = formats.to_vec();
+                }
+                _ => {}
             }
         }
     }

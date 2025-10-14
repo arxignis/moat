@@ -58,7 +58,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
 
         if let Some(val) = self
             .recently_banned_ips_bpf_map
-            .lookup(&ip_bytes, MapFlags::ANY)?
+            .lookup(ip_bytes, MapFlags::ANY)?
         {
             if val[0] == 1_u8 {
                 return Ok(true);
@@ -73,7 +73,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     fn unban_ip(&mut self, ip: Ipv4Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
         let ip_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
 
-        self.banned_ips_bpf_map.delete(&ip_bytes)?;
+        self.banned_ips_bpf_map.delete(ip_bytes)?;
 
         Ok(())
     }
