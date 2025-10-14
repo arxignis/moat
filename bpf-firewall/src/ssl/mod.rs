@@ -2,19 +2,17 @@ use std::convert::Infallible;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader};
-use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 
-use crate::bpf;
 use crate::cli::Args;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use clap::{Parser, ValueEnum};
+use clap::ValueEnum;
 use futures::StreamExt;
 use futures_rustls::rustls::{ClientConfig as AcmeClientConfig, RootCertStore};
 use http_body_util::combinators::BoxBody;
@@ -23,26 +21,22 @@ use hyper::body::Incoming;
 use hyper::header::{HOST, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode, Uri};
+use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use libbpf_rs::MapCore;
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use nix::net::if_::if_nametoindex;
+use hyper_util::rt::TokioIo;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, RedisError};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_acme::{AccountCache, AcmeConfig, CertCache, UseChallenge};
 use rustls_pemfile::{certs, private_key};
+use serde::Serialize;
 use serde::ser::Serializer;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::signal;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -355,12 +349,12 @@ pub fn parse_ip_param(req: &Request<Incoming>) -> Result<Ipv4Addr, String> {
     let uri = req.uri();
     let query = uri.query().unwrap_or("");
     for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == "ip" {
-                return v
-                    .parse::<Ipv4Addr>()
-                    .map_err(|_| "invalid ip parameter".to_string());
-            }
+        if let Some((k, v)) = pair.split_once('=')
+            && k == "ip"
+        {
+            return v
+                .parse::<Ipv4Addr>()
+                .map_err(|_| "invalid ip parameter".to_string());
         }
     }
     Err("missing ip parameter".to_string())
