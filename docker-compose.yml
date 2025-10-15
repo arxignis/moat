@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: moat-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - moat-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+
+  demo-app:
+    image: nginx:alpine
+    container_name: moat-demo-app
+    volumes:
+      - ./demo-app:/usr/share/nginx/html:ro
+    networks:
+      - moat-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.demo.rule=PathPrefix(`/`)"
+      - "traefik.http.services.demo.loadbalancer.server.port=80"
+    restart: unless-stopped
+
+ 
+  traefik:
+    image: traefik:v2.10
+    container_name: moat-traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "8081:80"      
+      - "8080:8080"    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - moat-network
+    depends_on:
+      - demo-app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  moat-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+
