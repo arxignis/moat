@@ -592,6 +592,13 @@ pub async fn forward_to_upstream_with_body(
         }
     }
 
+    let body_bytes = req
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| anyhow!("proxy request body read error: {e}"))?
+        .to_bytes();
+
     let mut outbound = builder
         .body(Full::new(body_bytes))
         .map_err(|e| anyhow!("failed to build proxy request: {e}"))?;
@@ -854,7 +861,7 @@ pub async fn run_custom_tls_proxy(
                         Ok(start) => {
                             match start.into_stream(config).await {
                                 Ok(tls_stream) => {
-                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone(), fingerprint.as_ref()).await {
+                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone()).await {
                                         eprintln!("TLS proxy error from {peer_addr}: {err:?}");
                                         tls_state_clone
                                             .set_error_detail(format!("last connection error: {err}"))
