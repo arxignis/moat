@@ -1,11 +1,7 @@
 {
   // Point rust-analyzer at the actual crate(s) in this workspace
   "rust-analyzer.linkedProjects": [
-<<<<<<< HEAD
     "moat/Cargo.toml"
-=======
-    "bpf-firewall/Cargo.toml"
->>>>>>> main
   ],
   // Enable all features if your crate uses optional features
   "rust-analyzer.cargo.allFeatures": true,
