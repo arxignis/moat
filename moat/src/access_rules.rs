@@ -311,22 +311,24 @@ fn apply_rules_to_skel(
 
     // Apply IPv4 bans
     for (net, prefix) in to_block {
-        println!("adding IPv4 {}/{} to map", net, prefix);
+        // println!("adding IPv4 {}/{} to map", net, prefix);
         if let Err(e) = fw.ban_ip(net, prefix) {
             eprintln!("IPv4 map update failed for {}/{}: {}", net, prefix, e);
-        } else {
-            println!("Added IPv4 {}/{} to banned", net, prefix);
         }
+        // else {
+        //     println!("Added IPv4 {}/{} to banned", net, prefix);
+        // }
     }
 
     // Apply IPv6 bans
     for (net, prefix) in to_block_v6 {
-        println!("adding IPv6 {}/{} to map", net, prefix);
+        // println!("adding IPv6 {}/{} to map", net, prefix);
         if let Err(e) = fw.ban_ipv6(net, prefix) {
             eprintln!("IPv6 map update failed for {}/{}: {}", net, prefix, e);
-        } else {
-            println!("Added IPv6 {}/{} to banned", net, prefix);
         }
+        // else {
+        //     println!("Added IPv6 {}/{} to banned", net, prefix);
+        // }
     }
 
     Ok(())

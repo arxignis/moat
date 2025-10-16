@@ -132,7 +132,7 @@ impl SharedTlsState {
     }
 }
 
-mod tls_fingerprint;
+pub mod tls_fingerprint;
 
 #[derive(Debug)]
 pub struct FingerprintTcpStream {
@@ -575,28 +575,22 @@ pub fn build_proxy_error_response(status: StatusCode, message: &str) -> Response
         .expect("valid response")
 }
 
-pub async fn forward_to_upstream(
-    req: Request<Incoming>,
+pub async fn forward_to_upstream_with_body(
+    req_parts: &hyper::http::request::Parts,
+    body_bytes: bytes::Bytes,
     ctx: Arc<ProxyContext>,
 ) -> Result<Response<ProxyBody>> {
-    let upstream_uri = build_upstream_uri(req.uri(), &ctx.upstream)?;
+    let upstream_uri = build_upstream_uri(&req_parts.uri, &ctx.upstream)?;
     let mut builder = Request::builder()
-        .method(req.method().clone())
-        .version(req.version())
+        .method(req_parts.method.clone())
+        .version(req_parts.version)
         .uri(upstream_uri.clone());
 
-    for (name, value) in req.headers().iter() {
+    for (name, value) in req_parts.headers.iter() {
         if name != HOST {
             builder = builder.header(name, value.clone());
         }
     }
-
-    let body_bytes = req
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| anyhow!("proxy request body read error: {e}"))?
-        .to_bytes();
 
     let mut outbound = builder
         .body(Full::new(body_bytes))
@@ -620,13 +614,123 @@ pub async fn forward_to_upstream(
     Ok(Response::from_parts(parts, boxed))
 }
 
+async fn log_access_request_with_body(
+    req_parts: &hyper::http::request::Parts,
+    req_body_bytes: &bytes::Bytes,
+    response: &Response<ProxyBody>,
+    peer: SocketAddr,
+    tls_fingerprint: Option<&TlsFingerprint>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Create a simplified access log for now
+    let timestamp = chrono::Utc::now();
+    let request_id = format!("req_{}", timestamp.timestamp_nanos_opt().unwrap_or(0));
+
+    let uri = req_parts.uri.clone();
+    let method = req_parts.method.to_string();
+    let scheme = uri.scheme().map(|s| s.to_string()).unwrap_or_else(|| "http".to_string());
+    let host = uri.host().unwrap_or("unknown").to_string();
+    let port = uri.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let path = uri.path().to_string();
+    let query = uri.query().unwrap_or("").to_string();
+
+    // Extract headers
+    let mut headers = std::collections::HashMap::new();
+    let mut user_agent = None;
+    let mut content_type = None;
+
+    for (name, value) in req_parts.headers.iter() {
+        let key = name.to_string();
+        let val = value.to_str().unwrap_or("").to_string();
+        headers.insert(key, val.clone());
+
+        if name.as_str().to_lowercase() == "user-agent" {
+            user_agent = Some(val.clone());
+        }
+        if name.as_str().to_lowercase() == "content-type" {
+            content_type = Some(val.clone());
+        }
+    }
+
+    // Process request body
+    let body_str = String::from_utf8_lossy(req_body_bytes).to_string();
+    let body_sha256 = format!("{:x}", sha2::Sha256::digest(req_body_bytes));
+
+    // Create access log entry
+    let access_log = serde_json::json!({
+        "event_type": "http_access_log",
+        "schema_version": "1.0.0",
+        "timestamp": timestamp.to_rfc3339(),
+        "request_id": request_id,
+        "http": {
+            "method": method,
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+            "path": path,
+            "query": query,
+            "query_hash": if query.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(format!("{:x}", sha2::Sha256::digest(query.as_bytes()))) },
+            "headers": headers,
+            "user_agent": user_agent,
+            "content_type": content_type,
+            "content_length": req_body_bytes.len() as u64,
+            "body": body_str,
+            "body_sha256": body_sha256,
+            "body_truncated": false
+        },
+        "tls": tls_fingerprint.map(|fp| serde_json::json!({
+            "version": fp.tls_version,
+            "cipher": "TLS_AES_128_GCM_SHA256", // TODO: extract actual cipher
+            "alpn": fp.alpn,
+            "sni": fp.sni,
+            "ja4": fp.ja4,
+            "ja4one": fp.ja4_unsorted,
+            "ja4l": "0_0_64", // TODO: calculate actual JA4L
+            "ja4t": fp.ja4_unsorted,
+            "ja4h": fp.ja4_unsorted,
+            "server_cert": null // TODO: extract server certificate details
+        })),
+        "response": {
+            "status": response.status().as_u16(),
+            "status_text": response.status().canonical_reason().unwrap_or("Unknown"),
+            "content_type": response.headers().get("content-type").and_then(|h| h.to_str().ok()),
+            "content_length": response.headers().get("content-length").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<u64>().ok()),
+            "body": "" // Response body is consumed, would need to capture
+        }
+    });
+
+    println!("{}", serde_json::to_string_pretty(&access_log)?);
+    Ok(())
+}
+
 pub async fn proxy_http_service(
     req: Request<Incoming>,
     ctx: Arc<ProxyContext>,
     peer: Option<SocketAddr>,
+    tls_fingerprint: Option<&TlsFingerprint>,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    match forward_to_upstream(req, ctx.clone()).await {
-        Ok(response) => Ok(response),
+    let peer_addr = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+
+    // Extract request details for logging before consuming the request
+    let (req_parts, req_body) = req.into_parts();
+    let req_body_bytes = match req_body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            eprintln!("Failed to read request body: {}", e);
+            return Ok(build_proxy_error_response(
+                StatusCode::BAD_REQUEST,
+                "body_read_error",
+            ));
+        }
+    };
+
+    match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
+        Ok(response) => {
+            // Log successful requests
+            if let Err(e) = log_access_request_with_body(&req_parts, &req_body_bytes, &response, peer_addr, tls_fingerprint).await {
+                eprintln!("Failed to log access request: {}", e);
+            }
+            Ok(response)
+        }
         Err(err) => {
             eprintln!(
                 "proxy error from {}: {err:?}",
@@ -645,6 +749,7 @@ pub async fn serve_proxy_conn<S>(
     stream: S,
     peer: Option<SocketAddr>,
     ctx: Arc<ProxyContext>,
+    tls_fingerprint: Option<&TlsFingerprint>,
 ) -> Result<(), anyhow::Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -653,7 +758,7 @@ where
     http1::Builder::new()
         .serve_connection(
             io,
-            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer)),
+            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint)),
         )
         .await
         .map_err(|e| anyhow!("http1 connection error: {e}"))
@@ -735,6 +840,7 @@ pub async fn run_custom_tls_proxy(
                     };
 
                     let peer_addr = stream.peer_addr();
+                    let fingerprint = stream.fingerprint().cloned();
                     // Pre-TLS ban check
                     if is_ipv4_banned(peer_addr, &skel_clone) {
                         let mut s = stream.inner;
@@ -748,7 +854,7 @@ pub async fn run_custom_tls_proxy(
                         Ok(start) => {
                             match start.into_stream(config).await {
                                 Ok(tls_stream) => {
-                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone()).await {
+                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone(), fingerprint.as_ref()).await {
                                         eprintln!("TLS proxy error from {peer_addr}: {err:?}");
                                         tls_state_clone
                                             .set_error_detail(format!("last connection error: {err}"))

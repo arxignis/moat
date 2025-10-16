@@ -16,6 +16,7 @@ use libbpf_rs::{MapCore, MapFlags};
 use nix::net::if_::if_nametoindex;
 use tokio::net::TcpListener;
 
+pub mod access_log;
 pub mod access_rules;
 pub mod app_state;
 pub mod cli;
