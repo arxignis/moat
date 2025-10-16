@@ -35,6 +35,10 @@ use redis::{AsyncCommands, RedisError};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_acme::{AccountCache, CertCache};
+use instant_acme::{
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
+    NewAccount, NewOrder, OrderStatus,
+};
 use rustls_pemfile::{certs, private_key};
 use serde::Serialize;
 use serde::ser::Serializer;
