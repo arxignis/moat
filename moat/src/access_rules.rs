@@ -305,15 +305,12 @@ fn apply_rules_to_skel(
         }
     }
 
-    println!("applying {} IPv4 prefixes and {} IPv6 prefixes", to_block.len(), to_block_v6.len());
-
     let mut fw = MOATFirewall::new(skel);
 
     // Apply IPv4 bans
     for (net, prefix) in to_block {
-        // println!("adding IPv4 {}/{} to map", net, prefix);
         if let Err(e) = fw.ban_ip(net, prefix) {
-            eprintln!("IPv4 map update failed for {}/{}: {}", net, prefix, e);
+            eprintln!("map update failed for {}/{}: {}", net, prefix, e);
         }
         // else {
         //     println!("Added IPv4 {}/{} to banned", net, prefix);
