@@ -70,6 +70,9 @@ pub struct Args {
     #[arg(long)]
     pub arxignis_api_key: String,
 
+    #[arg(long, default_value = "https://api.arxignis.com/v1")]
+    pub arxignis_base_url: String,
+
     // TODO: make it be able to add a list of ids
     #[arg(long)]
     pub arxignis_rule_id: String,

@@ -28,7 +28,12 @@ struct lpm_key {
     __be32 addr;
 };
 
-// Two maps: permanently banned and recently banned
+struct lpm_key_v6 {
+    __u32 prefixlen;
+    __u8 addr[16];
+};
+
+// IPv4 maps: permanently banned and recently banned
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, CITADEL_IP_MAP_MAX);
@@ -44,6 +49,23 @@ struct {
 	__type(key, struct lpm_key);
 	__type(value, ip_flag_t);
 } recently_banned_ips SEC(".maps");
+
+// IPv6 maps: permanently banned and recently banned
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, CITADEL_IP_MAP_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct lpm_key_v6);
+	__type(value, ip_flag_t);
+} banned_ips_v6 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, CITADEL_IP_MAP_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct lpm_key_v6);
+	__type(value, ip_flag_t);
+} recently_banned_ips_v6 SEC(".maps");
 
 // Remove dynptr helpers, not used in XDP manual parsing
 // extern int bpf_dynptr_from_skb(struct __sk_buff *skb, __u64 flags,
@@ -81,7 +103,7 @@ int firewall(struct xdp_md *ctx)
 
     struct ethhdr *eth = parse_and_advance(&cursor, data_end, sizeof(*eth));
     if (!eth)
-        return XDP_PASS; 
+        return XDP_PASS;
 
     __u16 h_proto = eth->h_proto;
 
@@ -89,9 +111,9 @@ int firewall(struct xdp_md *ctx)
         struct iphdr *iph = parse_and_advance(&cursor, data_end, sizeof(*iph));
         bpf_printk("XDP: got packet from IP: %pI4", &iph->saddr);
         if (!iph)
-            return XDP_PASS; 
+            return XDP_PASS;
 
-        
+
 
         if (is_frag_v4(iph)) {
             shootdowns++;
@@ -117,10 +139,10 @@ int firewall(struct xdp_md *ctx)
                     }
                 }
             }
-            return XDP_PASS; 
+            return XDP_PASS;
         }
 
-        return XDP_PASS; 
+        return XDP_PASS;
     }
     else if (h_proto == bpf_htons(ETH_P_IPV6)) {
         struct ipv6hdr *ip6h = parse_and_advance(&cursor, data_end, sizeof(*ip6h));
@@ -131,6 +153,31 @@ int firewall(struct xdp_md *ctx)
             shootdowns++;
             return XDP_DROP;
         }
+
+        // Check banned/recently banned maps by source IPv6
+        struct lpm_key_v6 key6 = {
+            .prefixlen = 128,
+        };
+        __builtin_memcpy(key6.addr, &ip6h->saddr, 16);
+
+        if (bpf_map_lookup_elem(&banned_ips_v6, &key6))
+            return XDP_DROP;
+
+        if (bpf_map_lookup_elem(&recently_banned_ips_v6, &key6)) {
+            // If TCP FIN/RST, promote to banned list
+            if (ip6h->nexthdr == IPPROTO_TCP) {
+                struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
+                if (tcph) {
+                    if (tcph->fin || tcph->rst) {
+                        ip_flag_t one = 1;
+                        bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
+                        bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                    }
+                }
+            }
+            return XDP_PASS; // Allow if recently banned
+        }
+
         return XDP_PASS;
     }
 

@@ -115,9 +115,10 @@ async fn main() -> Result<()> {
         let skel_clone = state.skel.clone();
         let api_key = args.arxignis_api_key.clone();
         let rule_id = args.arxignis_rule_id.clone();
+        let base_url = args.arxignis_base_url.clone();
         let shutdown = shutdown_rx.clone();
         Some(access_rules::start_access_rules_updater(
-            skel_clone, api_key, rule_id, shutdown,
+            base_url, skel_clone, api_key, rule_id, shutdown,
         ))
     };
 

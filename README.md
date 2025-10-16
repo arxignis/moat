@@ -30,7 +30,7 @@ Steps to regenerate:
 
 1. Install deps (Ubuntu 24.04):
    ```bash
-   sudo apt-get install -y git build-essential clang llvm libelf-dev \
+   sudo apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \
     zlib1g-dev libzstd-dev pkg-config libcap-dev binutils-multiarch-dev
    ```
 2. Build bpftool from kernel tools:
