@@ -192,10 +192,7 @@ async fn main() -> Result<()> {
                     .await
                     .context("failed to bind HTTPS socket")?;
 
-                println!(
-                    "HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)",
-                    args.http_addr
-                );
+                println!("HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)", args.http_addr);
                 println!("HTTPS server (ACME) listening on https://{}", args.tls_addr);
 
                 let tls_state_clone = tls_state.clone();
