@@ -35,10 +35,6 @@ use redis::{AsyncCommands, RedisError};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_acme::{AccountCache, CertCache};
-use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
-    NewAccount, NewOrder, OrderStatus,
-};
 use rustls_pemfile::{certs, private_key};
 use serde::Serialize;
 use serde::ser::Serializer;
@@ -622,7 +618,7 @@ async fn log_access_request_with_body(
     req_parts: &hyper::http::request::Parts,
     req_body_bytes: &bytes::Bytes,
     response: &Response<ProxyBody>,
-    peer: SocketAddr,
+    _peer: SocketAddr,
     tls_fingerprint: Option<&TlsFingerprint>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create a simplified access log for now
@@ -1028,7 +1024,7 @@ pub async fn run_acme_http01_proxy(
                                                 .unwrap();
                                             return Ok(response);
                                         } else {
-                                            proxy_http_service(req, ctx_req, Some(peer)).await
+                                            proxy_http_service(req, ctx_req, Some(peer), None).await
                                         }
                                     }
                                 });
@@ -1085,8 +1081,9 @@ pub async fn run_acme_http01_proxy(
                         tokio::spawn(async move {
                             let stream = match FingerprintTcpStream::new(stream).await {
                                 Ok(s) => {
+                                    let fingerprint = s.fingerprint().cloned();
                                     log_tls_fingerprint(s.peer_addr(), s.fingerprint());
-                                    s
+                                    (s, fingerprint)
                                 }
                                 Err(err) => {
                                     eprintln!("failed to prepare TLS stream from {peer}: {err}");
@@ -1094,12 +1091,12 @@ pub async fn run_acme_http01_proxy(
                                 }
                             };
 
-                            let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+                            let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream.0);
                             match acceptor.await {
                                 Ok(start) => {
                                     match start.into_stream(config).await {
                                         Ok(tls_stream) => {
-                                            if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone).await {
+                                            if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone, stream.1.as_ref()).await {
                                                 eprintln!("HTTPS proxy error from {peer}: {err:?}");
                                                 tls_state_clone.set_error_detail(format!("HTTPS session error: {err}")).await;
                                             } else {
@@ -1114,13 +1111,6 @@ pub async fn run_acme_http01_proxy(
                                 Err(err) => {
                                     eprintln!("TLS accept error from {peer}: {err}");
                                 }
-                            if let Err(err) =
-                                serve_proxy_conn(tls_stream, peer, ctx_clone, None).await
-                            {
-                                eprintln!("ACME TLS proxy error: {err:?}");
-                                tls_state_clone.set_error_detail(format!("TLS session error: {err}")).await;
-                            } else {
-                                tls_state_clone.set_running_detail("ACME certificate active").await;
                             }
                         });
                     }

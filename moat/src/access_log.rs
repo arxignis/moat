@@ -127,7 +127,7 @@ impl HttpAccessLog {
         let truncated_body_bytes = if body_truncated {
             body_bytes.slice(..max_body_size)
         } else {
-            body_bytes
+            body_bytes.clone()
         };
         let body_str = String::from_utf8_lossy(&truncated_body_bytes).to_string();
         let body_sha256 = format!("{:x}", Sha256::digest(&body_bytes)); // Always hash full body
