@@ -1,15 +1,17 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, OnceLock};
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use wirefilter::{ExecutionContext, Scheme, TypedArray, TypedMap};
-use crate::config::Config;
+use crate::config::{Config, fetch_config};
+use anyhow::anyhow;
 
 /// Wirefilter-based HTTP request filtering engine
 pub struct HttpFilter {
     scheme: Arc<Scheme>,
     filter: Arc<RwLock<wirefilter::Filter>>,
+    rules_hash: Arc<RwLock<Option<String>>>,
 }
 
 impl HttpFilter {
@@ -52,7 +54,8 @@ impl HttpFilter {
 
         Ok(Self {
             scheme,
-            filter: Arc::new(RwLock::new(filter))
+            filter: Arc::new(RwLock::new(filter)),
+            rules_hash: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -80,14 +83,14 @@ impl HttpFilter {
         for rule in &config.waf_rules.rules {
             // Basic validation - check if expression is not empty
             if rule.expression.trim().is_empty() {
-                eprintln!("Warning: Skipping empty WAF rule expression for rule '{}'", rule.name);
+                log::warn!("Skipping empty WAF rule expression for rule '{}'", rule.name);
                 continue;
             }
 
             // Try to parse the expression to validate it
             let scheme = Self::create_scheme();
             if let Err(error) = scheme.parse(&rule.expression) {
-                eprintln!("Warning: Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
+                log::warn!("Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
@@ -95,12 +98,15 @@ impl HttpFilter {
         }
 
         if valid_expressions.is_empty() {
-            eprintln!("Warning: No valid WAF rules found, using default filter that allows all");
+            log::warn!("No valid WAF rules found, using default filter that allows all");
             return Self::new("false");
         }
 
         let combined_expr = valid_expressions.join(" or ");
-        Self::new_from_string(combined_expr)
+        let filter = Self::new_from_string(combined_expr.clone())?;
+        let hash = Self::compute_rules_hash(&combined_expr);
+        *filter.rules_hash.write().unwrap() = Some(hash);
+        Ok(filter)
     }
 
     /// Update the filter with new WAF rules from config
@@ -110,6 +116,7 @@ impl HttpFilter {
             let ast = self.scheme.parse("false")?;
             let new_filter = ast.compile();
             *self.filter.write().unwrap() = new_filter;
+            *self.rules_hash.write().unwrap() = Some(Self::compute_rules_hash("false"));
             return Ok(());
         }
 
@@ -118,13 +125,13 @@ impl HttpFilter {
         for rule in &config.waf_rules.rules {
             // Basic validation - check if expression is not empty
             if rule.expression.trim().is_empty() {
-                eprintln!("Warning: Skipping empty WAF rule expression for rule '{}'", rule.name);
+                log::warn!("Skipping empty WAF rule expression for rule '{}'", rule.name);
                 continue;
             }
 
             // Try to parse the expression to validate it
             if let Err(error) = self.scheme.parse(&rule.expression) {
-                eprintln!("Warning: Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
+                log::warn!("Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
@@ -132,19 +139,35 @@ impl HttpFilter {
         }
 
         let combined_expr = if valid_expressions.is_empty() {
-            eprintln!("Warning: No valid WAF rules found, using default filter that allows all");
+            log::warn!("No valid WAF rules found, using default filter that allows all");
             "false".to_string()
         } else {
             valid_expressions.join(" or ")
         };
+
+        // Compute hash and skip update if unchanged
+        let new_hash = Self::compute_rules_hash(&combined_expr);
+        if let Some(prev) = self.rules_hash.read().unwrap().as_ref() {
+            if prev == &new_hash {
+                log::debug!("HTTP filter WAF rules unchanged; skipping update");
+                return Ok(());
+            }
+        }
 
         // Convert to static by leaking the string
         let leaked = Box::leak(combined_expr.into_boxed_str());
         let ast = self.scheme.parse(leaked)?;
         let new_filter = ast.compile();
         *self.filter.write().unwrap() = new_filter;
+        *self.rules_hash.write().unwrap() = Some(new_hash);
 
         Ok(())
+    }
+
+    fn compute_rules_hash(expr: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(expr.as_bytes());
+        hex::encode(hasher.finalize())
     }
 
     /// Get the current filter expression (for debugging)
@@ -277,6 +300,96 @@ impl HttpFilter {
         let filter_guard = self.filter.read().unwrap();
         let result = filter_guard.execute(&ctx)?;
         Ok(result)
+    }
+}
+
+// Global wirefilter instance for HTTP request filtering
+static HTTP_FILTER: OnceLock<HttpFilter> = OnceLock::new();
+
+pub fn get_global_http_filter() -> Option<&'static HttpFilter> {
+    HTTP_FILTER.get()
+}
+
+pub fn set_global_http_filter(filter: HttpFilter) -> anyhow::Result<()> {
+    HTTP_FILTER
+        .set(filter)
+        .map_err(|_| anyhow!("Failed to initialize HTTP filter"))
+}
+
+/// Initialize the global HTTP filter with a test rule that blocks POST requests
+pub fn init_http_filter() -> anyhow::Result<()> {
+    let filter = HttpFilter::new_test_filter()?;
+    set_global_http_filter(filter)?;
+    log::info!("HTTP filter initialized with test rule: blocking POST requests");
+    Ok(())
+}
+
+/// Initialize the global config + HTTP filter from API
+pub async fn init_config(base_url: String, api_key: String) -> anyhow::Result<()> {
+    match fetch_config(base_url, api_key).await {
+        Ok(config_response) => {
+            let filter = HttpFilter::new_from_config(&config_response.config)?;
+            set_global_http_filter(filter)?;
+            log::info!("HTTP filter initialized with {} WAF rules from config", config_response.config.waf_rules.rules.len());
+
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch config for HTTP filter: {}", e);
+            // Fallback to test filter
+            init_http_filter()
+        }
+    }
+}
+
+/// Update the global HTTP filter with new config
+pub async fn update_with_config(base_url: String, api_key: String) -> anyhow::Result<()> {
+    match fetch_config(base_url, api_key).await {
+        Ok(config_response) => {
+            if let Some(filter) = HTTP_FILTER.get() {
+                // Capture previous hash to decide logging level
+                let prev_hash = filter.rules_hash.read().unwrap().clone();
+                filter.update_from_config(&config_response.config)?;
+                let new_hash = filter.rules_hash.read().unwrap().clone();
+                if new_hash.is_some() && new_hash == prev_hash {
+                    log::debug!("HTTP filter WAF rules unchanged; skipping update log");
+                } else {
+                    log::info!(
+                        "HTTP filter updated with {} WAF rules from config",
+                        config_response.config.waf_rules.rules.len()
+                    );
+                }
+            } else {
+                log::warn!("HTTP filter not initialized, cannot update");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch config for HTTP filter update: {}", e);
+            Err(anyhow!("Failed to fetch config: {}", e))
+        }
+    }
+}
+
+/// Update the global HTTP filter using an already-fetched Config value
+pub fn update_http_filter_from_config_value(config: &Config) -> anyhow::Result<()> {
+    if let Some(filter) = HTTP_FILTER.get() {
+        // Capture previous hash to decide logging level
+        let prev_hash = filter.rules_hash.read().unwrap().clone();
+        filter.update_from_config(config)?;
+        let new_hash = filter.rules_hash.read().unwrap().clone();
+        if new_hash.is_some() && new_hash == prev_hash {
+            log::debug!("HTTP filter WAF rules unchanged; skipping update log");
+        } else {
+            log::info!(
+                "HTTP filter updated with {} WAF rules from config",
+                config.waf_rules.rules.len()
+            );
+        }
+        Ok(())
+    } else {
+        log::warn!("HTTP filter not initialized, cannot update");
+        Ok(())
     }
 }
 

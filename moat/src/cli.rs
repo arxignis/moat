@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
+use clap::ValueEnum;
 
 use crate::ssl::TlsMode;
 
@@ -103,4 +104,29 @@ pub struct Args {
     /// If specified along with whitelist, both are checked (OR logic).
     #[arg(long, value_delimiter = ',', num_args = 0..)]
     pub domain_wildcards: Vec<String>,
+
+    /// Log level (error, warn, info, debug, trace)
+    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    pub log_level: LogLevel,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub fn to_level_filter(self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
 }

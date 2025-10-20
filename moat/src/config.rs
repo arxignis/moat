@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use flate2::read::GzDecoder;
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub type Details = serde_json::Value;
 
@@ -56,6 +57,22 @@ pub struct ErrorResponse {
     pub details: Details,
     pub error: String,
     pub success: bool,
+}
+
+// Global configuration store accessible across services
+static GLOBAL_CONFIG: OnceLock<Arc<RwLock<Option<Config>>>> = OnceLock::new();
+
+pub fn global_config() -> Arc<RwLock<Option<Config>>> {
+    GLOBAL_CONFIG
+        .get_or_init(|| Arc::new(RwLock::new(None)))
+        .clone()
+}
+
+pub fn set_global_config(cfg: Config) {
+    let store = global_config();
+    if let Ok(mut guard) = store.write() {
+        *guard = Some(cfg);
+    }
 }
 
 pub async fn fetch_config(
@@ -122,6 +139,8 @@ pub async fn fetch_config(
 
             let body: ConfigApiResponse = serde_json::from_str(&json_text)
                 .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+            // Update global config snapshot
+            set_global_config(body.config.clone());
             Ok(body)
         }
         StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::INTERNAL_SERVER_ERROR => {
