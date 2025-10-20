@@ -14,16 +14,15 @@ use local_ip_address::local_ip;
 
 use crate::cli::Args;
 use crate::domain_filter::DomainFilter;
+use crate::wirefilter::get_global_http_filter;
 use crate::{bpf, utils::bpf_utils};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use clap::ValueEnum;
 use futures_rustls::rustls::{ClientConfig as AcmeClientConfig, RootCertStore};
-use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::header::{HeaderValue, HOST};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Uri};
@@ -43,7 +42,6 @@ use rustls_acme::{AccountCache, CertCache};
 use rustls_pemfile::{certs, private_key};
 use serde::ser::Serializer;
 use serde::Serialize;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -51,6 +49,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
+
+use crate::proxy_utils::{build_proxy_error_response, forward_to_upstream_with_body, ProxyBody};
 
 use self::tls_fingerprint::{fingerprint_client_hello, Fingerprint as TlsFingerprint};
 
@@ -300,25 +300,55 @@ pub fn ipv4_to_u32_be(ip: Ipv4Addr) -> u32 {
     u32::from_be_bytes(ip.octets())
 }
 
-fn is_ipv4_banned(peer: SocketAddr, skel: &Option<Arc<bpf::FilterSkel<'static>>>) -> bool {
-    let Some(skel) = skel.as_ref() else {
+fn is_ipv4_banned(peer: SocketAddr, skels: &Vec<Arc<bpf::FilterSkel<'static>>>) -> bool {
+    if skels.is_empty() {
         return false;
-    };
+    }
     match peer.ip() {
         std::net::IpAddr::V4(ip) => {
             let key_bytes = bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, 32);
-            match skel
-                .maps
-                .recently_banned_ips
-                .lookup(&key_bytes, MapFlags::ANY)
-            {
-                Ok(Some(flag)) => flag == vec![1u8],
-                Ok(None) => false,
-                Err(e) => {
-                    eprintln!("bpf recently_banned_ips lookup error for {peer}: {e}");
-                    false
+            for skel in skels {
+                match skel
+                    .maps
+                    .recently_banned_ips
+                    .lookup(&key_bytes, MapFlags::ANY)
+                {
+                    Ok(Some(flag)) if flag == vec![1u8] => return true,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        log::error!("bpf recently_banned_ips lookup error for {peer}: {e}");
+                        continue;
+                    }
                 }
             }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn is_ipv6_banned(peer: SocketAddr, skels: &Vec<Arc<bpf::FilterSkel<'static>>>) -> bool {
+    if skels.is_empty() {
+        return false;
+    }
+    match peer.ip() {
+        std::net::IpAddr::V6(ip) => {
+            let key_bytes = bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, 128);
+            for skel in skels {
+                match skel
+                    .maps
+                    .recently_banned_ips_v6
+                    .lookup(&key_bytes, MapFlags::ANY)
+                {
+                    Ok(Some(flag)) if flag == vec![1u8] => return true,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        log::error!("bpf recently_banned_ips_v6 lookup error for {peer}: {e}");
+                        continue;
+                    }
+                }
+            }
+            false
         }
         _ => false,
     }
@@ -326,12 +356,7 @@ fn is_ipv4_banned(peer: SocketAddr, skel: &Option<Arc<bpf::FilterSkel<'static>>>
 
 const BANNED_MESSAGE: &str = "blocked: your ip is temporarily banned\n";
 
-pub fn header_json() -> (hyper::header::HeaderName, hyper::header::HeaderValue) {
-    (
-        hyper::header::CONTENT_TYPE,
-        hyper::header::HeaderValue::from_static("application/json"),
-    )
-}
+// header_json moved to proxy_utils
 
 pub fn install_ring_crypto_provider() -> Result<()> {
     static INSTALL: OnceLock<Result<()>> = OnceLock::new();
@@ -382,7 +407,7 @@ pub fn load_acme_client_config(path: Option<&Path>) -> Result<Arc<AcmeClientConf
 
     Ok(Arc::new(client_config))
 }
-type ProxyBody = BoxBody<Bytes, hyper::Error>;
+// ProxyBody moved to proxy_utils
 
 pub fn parse_ip_param(req: &Request<Incoming>) -> Result<Ipv4Addr, String> {
     let uri = req.uri();
@@ -399,12 +424,7 @@ pub fn parse_ip_param(req: &Request<Incoming>) -> Result<Ipv4Addr, String> {
     Err("missing ip parameter".to_string())
 }
 
-pub fn json(s: &str) -> Response<Full<Bytes>> {
-    let mut r = Response::new(Full::<Bytes>::from(Bytes::from(format!("{s}\n"))));
-    let (k, v) = header_json();
-    r.headers_mut().insert(k, v);
-    r
-}
+// json moved to proxy_utils
 
 #[derive(Clone)]
 pub struct ProxyContext {
@@ -550,14 +570,14 @@ async fn load_or_create_account(
         // Deserialize account credentials
         if let Ok(credentials) = serde_json::from_slice::<AccountCredentials>(&account_data) {
             if let Ok(account) = Account::from_credentials(credentials).await {
-                println!("Loaded existing ACME account from cache");
+                log::info!("Loaded existing ACME account from cache");
                 return Ok(account);
             }
         }
     }
 
     // Create new account
-    println!("Creating new ACME account");
+    log::info!("Creating new ACME account");
     let url = if directory_url.contains("staging") || directory_url.contains("pebble") {
         instant_acme::LetsEncrypt::Staging.url()
     } else {
@@ -652,7 +672,7 @@ async fn manage_acme_certificate(
                 if let Ok(Some(private_key)) =
                     load_private_key_from_redis(&cache, &domains, &directory_url).await
                 {
-                    println!("Loaded existing certificate from cache");
+                    log::info!("Loaded existing certificate from cache");
                     let config = ServerConfig::builder()
                         .with_no_client_auth()
                         .with_single_cert(certs.clone(), private_key)?;
@@ -665,7 +685,7 @@ async fn manage_acme_certificate(
     }
 
     // Need to obtain new certificate
-    println!("Obtaining new ACME certificate for {:?}", domains);
+    log::info!("Obtaining new ACME certificate for {:?}", domains);
 
     let account = load_or_create_account(&cache, &directory_url, &contacts).await?;
 
@@ -708,7 +728,7 @@ async fn manage_acme_certificate(
             store.insert(challenge.token.clone(), key_auth.clone());
         }
 
-        println!("✓ Domain '{}': Set HTTP-01 challenge for token: {}", domain, challenge.token);
+        log::info!("Set HTTP-01 challenge for token: {}", challenge.token);
 
         // Notify ACME server to validate
         match order.set_challenge_ready(&challenge.url).await {
@@ -815,6 +835,13 @@ async fn manage_acme_certificate(
         }
     };
 
+    if state.status == OrderStatus::Invalid {
+        log::warn!("Order became invalid after {} tries and status: {:?}", tries, state.status);
+        return Err(anyhow!("Order became invalid after {} tries and status: {:?}", tries, state.status));
+    }
+
+    log::info!("Order status: Ready");
+
     // Generate private key and CSR
     let private_key = rcgen::KeyPair::generate()?;
 
@@ -839,7 +866,7 @@ async fn manage_acme_certificate(
         }
     };
 
-    println!("Successfully obtained ACME certificate!");
+    log::info!("Successfully obtained ACME certificate!");
 
     // Store certificate in Redis
     cache
@@ -946,71 +973,11 @@ pub fn extract_server_cert_info(_config: &ServerConfig) -> Option<ServerCertInfo
     })
 }
 
-pub fn build_upstream_uri(incoming: &Uri, upstream: &Uri) -> Result<Uri> {
-    let mut parts = upstream.clone().into_parts();
-    parts.path_and_query.replace(
-        incoming
-            .path_and_query()
-            .cloned()
-            .unwrap_or_else(|| "/".parse().unwrap()),
-    );
-    Uri::from_parts(parts).map_err(|e| anyhow!("failed to construct upstream uri: {e}"))
-}
+// build_upstream_uri moved to proxy_utils
 
-pub fn build_proxy_error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
-    let body = json!({
-        "ok": false,
-        "error": message,
-    })
-    .to_string();
-    let boxed = Full::new(Bytes::from(body))
-        .map_err(|never| match never {})
-        .boxed();
-    Response::builder()
-        .status(status)
-        .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(boxed)
-        .expect("valid response")
-}
+// build_proxy_error_response moved to proxy_utils
 
-pub async fn forward_to_upstream_with_body(
-    req_parts: &hyper::http::request::Parts,
-    body_bytes: bytes::Bytes,
-    ctx: Arc<ProxyContext>,
-) -> Result<Response<ProxyBody>> {
-    let upstream_uri = build_upstream_uri(&req_parts.uri, &ctx.upstream)?;
-    let mut builder = Request::builder()
-        .method(req_parts.method.clone())
-        .version(req_parts.version)
-        .uri(upstream_uri.clone());
-
-    for (name, value) in req_parts.headers.iter() {
-        if name != HOST {
-            builder = builder.header(name, value.clone());
-        }
-    }
-
-    let mut outbound = builder
-        .body(Full::new(body_bytes))
-        .map_err(|e| anyhow!("failed to build proxy request: {e}"))?;
-
-    if let Some(authority) = upstream_uri.authority() {
-        outbound.headers_mut().insert(
-            HOST,
-            HeaderValue::from_str(authority.as_str())
-                .map_err(|e| anyhow!("invalid upstream authority: {e}"))?,
-        );
-    }
-
-    let response = ctx
-        .client
-        .request(outbound)
-        .await
-        .map_err(|e| anyhow!("upstream request error: {e}"))?;
-    let (parts, body) = response.into_parts();
-    let boxed = body.boxed();
-    Ok(Response::from_parts(parts, boxed))
-}
+// forward_to_upstream_with_body moved to proxy_utils
 
 async fn log_access_request_with_body(
     req_parts: &hyper::http::request::Parts,
@@ -1117,7 +1084,7 @@ async fn log_access_request_with_body(
         }
     });
 
-    println!("{}", serde_json::to_string_pretty(&access_log)?);
+    log::info!("{}", serde_json::to_string(&access_log)?);
     Ok(())
 }
 
@@ -1134,7 +1101,7 @@ pub async fn proxy_http_service(
     let req_body_bytes = match req_body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
-            eprintln!("Failed to read request body: {}", e);
+            log::warn!("Failed to read request body: {}", e);
             return Ok(build_proxy_error_response(
                 StatusCode::BAD_REQUEST,
                 "body_read_error",
@@ -1156,8 +1123,42 @@ pub async fn proxy_http_service(
         }
     }
 
+    // Apply wirefilter rules before forwarding to upstream
+    if let Some(filter) = get_global_http_filter() {
+        match filter.should_block_request_from_parts(&req_parts, &req_body_bytes, peer_addr) {
+            Ok(true) => {
+                log::info!("Request blocked by wirefilter from {}: {} {}",
+                    peer_addr, req_parts.method, req_parts.uri);
+                return Ok(build_proxy_error_response(
+                    StatusCode::FORBIDDEN,
+                    "request_blocked_by_filter",
+                ));
+            }
+            Ok(false) => {
+                // Request allowed, continue processing
+            }
+            Err(e) => {
+                log::warn!("Wirefilter error: {}", e);
+                // On filter error, allow the request to proceed
+            }
+        }
+    }
+
     match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
         Ok(response) => {
+            // Capture response body for logging
+            let (response_parts, response_body) = response.into_parts();
+            let response_body_bytes = match response_body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(e) => {
+                    log::warn!("Failed to read response body: {}", e);
+                    bytes::Bytes::new()
+                }
+            };
+
+            // Reconstruct response
+            let response = Response::from_parts(response_parts, Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
+
             // Log successful requests
             if let Err(e) = log_access_request_with_body(
                 &req_parts,
@@ -1170,12 +1171,12 @@ pub async fn proxy_http_service(
             )
             .await
             {
-                eprintln!("Failed to log access request: {}", e);
+                log::warn!("Failed to log access request: {}", e);
             }
             Ok(response)
         }
         Err(err) => {
-            eprintln!(
+            log::error!(
                 "proxy error from {}: {err:?}",
                 peer.map(|p| p.to_string())
                     .unwrap_or_else(|| "<unknown>".into())
@@ -1215,7 +1216,7 @@ pub async fn run_custom_tls_proxy(
     server_config: ServerConfigWithCert,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     tls_state
@@ -1227,29 +1228,29 @@ pub async fn run_custom_tls_proxy(
                 let (stream, peer) = match accept {
                     Ok(tuple) => tuple,
                     Err(e) => {
-                        eprintln!("tls accept error: {e}");
+                        log::error!("tls accept error: {e}");
                         continue;
                     }
                 };
                 let ctx_clone = ctx.clone();
                 let tls_state_clone = tls_state.clone();
-                let config_with_cert = server_config.clone();
-                let skel_clone = skel.clone();
+                let server_config_clone = server_config.clone();
+                let skels_clone = skels.clone();
                 tokio::spawn(async move {
                     let stream = match FingerprintTcpStream::new(stream).await {
                         Ok(s) => {
                             s
                         }
                         Err(err) => {
-                            eprintln!("failed to prepare TLS stream from {peer}: {err}");
+                            log::error!("failed to prepare TLS stream from {peer}: {err}");
                             return;
                         }
                     };
 
                     let peer_addr = stream.peer_addr();
                     let fingerprint = stream.fingerprint().cloned();
-                    // Pre-TLS ban check
-                    if is_ipv4_banned(peer_addr, &skel_clone) {
+                    // Pre-TLS ban check (both IPv4 and IPv6)
+                    if is_ipv4_banned(peer_addr, &skels_clone) || is_ipv6_banned(peer_addr, &skels_clone) {
                         let mut s = stream.inner;
                         let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                         let _ = s.shutdown().await;
@@ -1277,15 +1278,15 @@ pub async fn run_custom_tls_proxy(
 
                             match start.into_stream(config_with_cert.config.clone()).await {
                                 Ok(tls_stream) => {
-                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone(), fingerprint.as_ref(), config_with_cert.cert_info.clone()).await {
-                                        eprintln!("TLS proxy error from {peer_addr}: {err:?}");
+                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone(), fingerprint.as_ref(), server_config_clone.cert_info.clone()).await {
+                                    log::error!("TLS proxy error from {peer_addr}: {err:?}");
                                         tls_state_clone
                                             .set_error_detail(format!("last connection error: {err}"))
                                             .await;
                                     }
                                 }
                                 Err(err) => {
-                                    eprintln!("TLS handshake error from {peer_addr}: {err}");
+                                    log::warn!("TLS handshake error from {peer_addr}: {err}");
                                     tls_state_clone
                                         .set_error_detail(format!("handshake failure: {err}"))
                                         .await;
@@ -1293,7 +1294,7 @@ pub async fn run_custom_tls_proxy(
                             }
                         }
                         Err(err) => {
-                            eprintln!("TLS handshake error from {peer_addr}: {err}");
+                            log::warn!("TLS handshake error from {peer_addr}: {err}");
                             tls_state_clone
                                 .set_error_detail(format!("handshake failure: {err}"))
                                 .await;
@@ -1303,7 +1304,7 @@ pub async fn run_custom_tls_proxy(
             }
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
-                    println!("custom TLS proxy shutdown signal received");
+                    log::info!("custom TLS proxy shutdown signal received");
                     break;
                 }
             }
@@ -1318,7 +1319,7 @@ pub async fn run_acme_http01_proxy(
     args: &Args,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     if !args.acme_accept_tos {
@@ -1399,7 +1400,7 @@ pub async fn run_acme_http01_proxy(
 
     // Spawn HTTP server for ACME challenges and regular HTTP traffic
     let http_ctx = ctx.clone();
-    let http_skel = skel.clone();
+    let http_skels = skels.clone();
     let mut http_shutdown = shutdown.clone();
     let challenge_store_http = challenge_store.clone();
 
@@ -1409,8 +1410,8 @@ pub async fn run_acme_http01_proxy(
                 accept = http_listener.accept() => {
                     match accept {
                         Ok((stream, peer)) => {
-                            // Check if banned
-                            if is_ipv4_banned(peer, &http_skel) {
+                            // Check if banned (both IPv4 and IPv6)
+                            if is_ipv4_banned(peer, &http_skels) || is_ipv6_banned(peer, &http_skels) {
                                 let mut s = stream;
                                 let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                                 let _ = s.shutdown().await;
@@ -1458,18 +1459,18 @@ pub async fn run_acme_http01_proxy(
                                     .serve_connection(io, service)
                                     .await
                                 {
-                                    eprintln!("HTTP connection error from {peer}: {err}");
+                            log::warn!("HTTP connection error from {peer}: {err}");
                                 }
                             });
                         }
                         Err(err) => {
-                            eprintln!("HTTP accept error: {err}");
+                            log::warn!("HTTP accept error: {err}");
                         }
                     }
                 }
                 changed = http_shutdown.changed() => {
                     if changed.is_ok() && *http_shutdown.borrow() {
-                        println!("HTTP server shutdown signal received");
+                        log::info!("HTTP server shutdown signal received");
                         break;
                     }
                 }
@@ -1483,8 +1484,8 @@ pub async fn run_acme_http01_proxy(
             accept = https_listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        // Check if banned
-                        if is_ipv4_banned(peer, &skel) {
+                        // Check if banned (both IPv4 and IPv6)
+                        if is_ipv4_banned(peer, &skels) || is_ipv6_banned(peer, &skels) {
                             let mut s = stream;
                             let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                             let _ = s.shutdown().await;
@@ -1493,7 +1494,7 @@ pub async fn run_acme_http01_proxy(
 
                         let cert_cfg = cert_config.read().await.clone();
                         let Some(config_with_cert) = cert_cfg else {
-                            eprintln!("HTTPS connection from {peer} but certificate not ready yet");
+                            log::warn!("HTTPS connection from {peer} but certificate not ready yet");
                             continue;
                         };
 
@@ -1522,12 +1523,12 @@ pub async fn run_acme_http01_proxy(
                                         let sni = client_hello.server_name();
                                         if let Some(sni_str) = sni {
                                             if !ctx_clone.domain_filter.is_allowed(sni_str) {
-                                                eprintln!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer);
+                                    log::info!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer);
                                                 return;
                                             }
                                         } else {
                                             // No SNI present - block if filter is enabled
-                                            eprintln!("TLS connection without SNI blocked by domain filter from {}", peer);
+                                            log::info!("TLS connection without SNI blocked by domain filter from {}", peer);
                                             return;
                                         }
                                     }
@@ -1535,31 +1536,31 @@ pub async fn run_acme_http01_proxy(
                                     match start.into_stream(config_with_cert.config.clone()).await {
                                         Ok(tls_stream) => {
                                             if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone, stream.1.as_ref(), config_with_cert.cert_info.clone()).await {
-                                                eprintln!("HTTPS proxy error from {peer}: {err:?}");
+                                                log::error!("HTTPS proxy error from {peer}: {err:?}");
                                                 tls_state_clone.set_error_detail(format!("HTTPS session error: {err}")).await;
                             } else {
                                 tls_state_clone.set_running_detail("ACME certificate active").await;
                                             }
                                         }
                                         Err(err) => {
-                                            eprintln!("TLS handshake error from {peer}: {err}");
+                                            log::warn!("TLS handshake error from {peer}: {err}");
                                         }
                                     }
                                 }
                                 Err(err) => {
-                                    eprintln!("TLS accept error from {peer}: {err}");
+                                    log::warn!("TLS accept error from {peer}: {err}");
                                 }
                             }
                         });
                     }
                     Err(err) => {
-                        eprintln!("HTTPS accept error: {err}");
+                        log::warn!("HTTPS accept error: {err}");
                     }
                 }
             }
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
-                    println!("HTTPS server shutdown signal received");
+                    log::info!("HTTPS server shutdown signal received");
                     break;
                 }
             }
@@ -1572,7 +1573,7 @@ pub async fn run_acme_http01_proxy(
 pub async fn run_http_proxy(
     listener: TcpListener,
     ctx: Arc<ProxyContext>,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    _skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     loop {
@@ -1583,7 +1584,7 @@ pub async fn run_http_proxy(
                     Err(e) => { eprintln!("http accept error: {e}"); continue; }
                 };
                 let ctx_clone = ctx.clone();
-                let skel_clone = skel.clone();
+                let skel_clone = None::<Arc<bpf::FilterSkel<'static>>>; // not used in plain HTTP path
                 tokio::spawn(async move {
                     if let Err(err) = handle_http_connection(stream, peer, ctx_clone, skel_clone).await {
                         eprintln!("http connection error: {err:?}");
@@ -1616,7 +1617,7 @@ async fn handle_http_connection(
     let io = TokioIo::new(stream);
     let conn = http1::Builder::new().serve_connection(io, service);
     if let Err(err) = conn.await {
-        eprintln!("HTTP connection error: {err}");
+        log::warn!("HTTP connection error: {err}");
     }
     Ok(())
 }

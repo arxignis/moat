@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
+use clap::ValueEnum;
 
 use crate::ssl::TlsMode;
 
@@ -15,9 +16,17 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:80")]
     pub http_addr: SocketAddr,
 
+    /// Additional HTTP bind addresses (comma-separated). If set, overrides http_addr.
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    pub http_bind: Vec<SocketAddr>,
+
     /// HTTPS reverse-proxy bind address.
     #[arg(long, default_value = "0.0.0.0:443")]
     pub tls_addr: SocketAddr,
+
+    /// Additional HTTPS bind addresses (comma-separated). If set, overrides tls_addr.
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    pub tls_bind: Vec<SocketAddr>,
 
     /// TLS operating mode.
     #[arg(long, value_enum, default_value_t = TlsMode::Disabled)]
@@ -84,6 +93,10 @@ pub struct Args {
     #[arg(short, long, default_value = "eth0")]
     pub iface: String,
 
+    /// Additional network interfaces for XDP attach (comma-separated). If set, overrides --iface.
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    pub ifaces: Vec<String>,
+
     #[arg(long)]
     pub arxignis_api_key: String,
 
@@ -91,7 +104,39 @@ pub struct Args {
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
     pub arxignis_base_url: String,
 
-    // TODO: make it be able to add a list of ids
-    #[arg(long)]
-    pub arxignis_rule_id: String,
+    /// Domain whitelist (exact matches, comma separated or repeated).
+    /// If specified, only requests to these domains will be allowed.
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    pub domain_whitelist: Vec<String>,
+
+    /// Domain wildcard patterns (comma separated or repeated).
+    /// Supports wildcards: *.example.com, api.*.example.com
+    /// If specified along with whitelist, both are checked (OR logic).
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    pub domain_wildcards: Vec<String>,
+
+    /// Log level (error, warn, info, debug, trace)
+    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    pub log_level: LogLevel,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub fn to_level_filter(self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
 }

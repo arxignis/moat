@@ -61,3 +61,7 @@ chrono = { version = "0.4", features = ["serde"] }
 x509-parser = "0.18"
 gethostname = "1.1.0"
 local-ip-address = "0.6.5"
+wirefilter-engine = { git = "https://github.com/arxignis/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
+flate2 = "1.0"
+log = "0.4.28"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
