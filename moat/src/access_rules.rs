@@ -1,9 +1,9 @@
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::select;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, interval};
@@ -70,11 +70,18 @@ where
 }
 
 async fn fetch_access_rules(
+    base_url: String,
     api_key: String,
     rule_id: String,
 ) -> Result<AccessRulesApiResponse, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let url = format!("https://api.arxignis.com/v1/access-rules/{}", rule_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(false)
+        .user_agent("Moat/1.0")
+        .build()?;
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/access-rules/{}", base, rule_id);
 
     let response = client
         .get(url)
@@ -92,9 +99,12 @@ async fn fetch_access_rules(
             let body: ErrorResponse = response.json().await?;
             Err(format!("API Error: {}", body.error).into())
         }
-        status => {
-            Err(format!("Unexpected API status code: {} - {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown")).into())
-        }
+        status => Err(format!(
+            "Unexpected API status code: {} - {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        )
+        .into()),
     }
 }
 
@@ -108,6 +118,7 @@ async fn fetch_access_rules(
 /// - Behavior: Runs immediately, then every 10s; on fetch error, logs and continues
 /// - Returns: JoinHandle for the spawned task
 pub fn start_access_rules_updater(
+    base_url: String,
     skel: Option<Arc<bpf::FilterSkel<'static>>>,
     api_key: String,
     rule_id: String,
@@ -117,7 +128,7 @@ pub fn start_access_rules_updater(
         let mut ticker = interval(Duration::from_secs(10));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        if let Err(e) = fetch_and_apply(api_key.clone(), rule_id.clone(), skel.as_ref()).await {
+        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), rule_id.clone(), skel.as_ref()).await {
             eprintln!("initial access rules update failed: {e}");
         }
 
@@ -127,7 +138,7 @@ pub fn start_access_rules_updater(
                     if *shutdown.borrow() { break; }
                 }
                 _ = ticker.tick() => {
-                    if let Err(e) = fetch_and_apply(api_key.clone(), rule_id.clone(), skel.as_ref()).await {
+                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), rule_id.clone(), skel.as_ref()).await {
                         eprintln!("periodic access rules update failed: {e}");
                     }
                 }
@@ -137,11 +148,12 @@ pub fn start_access_rules_updater(
 }
 
 async fn fetch_and_apply(
+    base_url: String,
     api_key: String,
     rule_id: String,
     skel: Option<&Arc<bpf::FilterSkel<'static>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = fetch_access_rules(api_key, rule_id).await?;
+    let resp = fetch_access_rules(base_url, api_key, rule_id).await?;
     if let Some(s) = skel {
         apply_rules_to_skel(s, &resp)?;
     }
@@ -153,7 +165,6 @@ fn apply_rules_to_skel(
     resp: &AccessRulesApiResponse,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashSet;
-
     println!("started applying rules");
 
     // Helper: parse IPv4 or IPv4/CIDR into (network, prefix)
@@ -237,7 +248,6 @@ fn apply_rules_to_skel(
     }
 
     println!("applying {} IPv4 prefixes", to_block.len());
-
     let mut fw = MOATFirewall::new(skel);
     for (net, prefix) in to_block {
         println!("adding {}/{} to map", net, prefix);

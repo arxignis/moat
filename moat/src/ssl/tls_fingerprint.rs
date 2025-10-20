@@ -17,7 +17,9 @@ pub struct Fingerprint {
     pub ja4_raw: String,
     pub ja4_unsorted: String,
     pub ja4_raw_unsorted: String,
+    pub ja4l: String,
     pub tls_version: String,
+    pub cipher_suite: Option<String>,
     pub sni: Option<String>,
     pub alpn: Option<String>,
 }
@@ -36,7 +38,9 @@ pub fn fingerprint_client_hello(data: &[u8]) -> Option<Fingerprint> {
                 ja4_raw: sorted.raw.value().to_string(),
                 ja4_unsorted: unsorted.full.value().to_string(),
                 ja4_raw_unsorted: unsorted.raw.value().to_string(),
+                ja4l: calculate_ja4l(data.len()),
                 tls_version: signature.version.to_string(),
+                cipher_suite: signature.preferred_cipher_suite.map(cipher_suite_to_string),
                 sni: signature.sni.clone(),
                 alpn: signature.alpn.clone(),
             });
@@ -110,6 +114,7 @@ struct Ja4Payload {
 struct Signature {
     version: TlsVersion,
     cipher_suites: Vec<u16>,
+    preferred_cipher_suite: Option<u16>,
     extensions: Vec<u16>,
     elliptic_curves: Vec<u16>,
     elliptic_curve_point_formats: Vec<u8>,
@@ -197,6 +202,7 @@ fn extract_tls_signature_from_client_hello(
     client_hello: &TlsClientHelloContents,
 ) -> Result<Signature, ()> {
     let cipher_suites: Vec<u16> = client_hello.ciphers.iter().map(|c| c.0).collect();
+    let preferred_cipher_suite = cipher_suites.first().copied();
 
     let mut extensions = Vec::new();
     let mut sni = None;
@@ -243,6 +249,7 @@ fn extract_tls_signature_from_client_hello(
     Ok(Signature {
         version,
         cipher_suites,
+        preferred_cipher_suite,
         extensions,
         elliptic_curves,
         elliptic_curve_point_formats,
@@ -301,4 +308,41 @@ fn hash12(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     let hex = format!("{:x}", digest);
     hex[..12].to_string()
+}
+
+/// Calculate JA4L (latency-like fingerprint) based on packet size.
+fn calculate_ja4l(packet_size: usize) -> String {
+    let estimated_client_rtt = if packet_size > 1500 {
+        50
+    } else if packet_size > 1000 {
+        30
+    } else {
+        10
+    };
+    let estimated_server_rtt = estimated_client_rtt + 5;
+    format!("{}_{}_{}", estimated_client_rtt, estimated_server_rtt, packet_size)
+}
+
+fn cipher_suite_to_string(cipher_suite: u16) -> String {
+    match cipher_suite {
+        0x1301 => "TLS_AES_128_GCM_SHA256".to_string(),
+        0x1302 => "TLS_AES_256_GCM_SHA384".to_string(),
+        0x1303 => "TLS_CHACHA20_POLY1305_SHA256".to_string(),
+        0x1304 => "TLS_AES_128_CCM_SHA256".to_string(),
+        0x1305 => "TLS_AES_128_CCM_8_SHA256".to_string(),
+        0xc02f => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        0xc030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        0xc02b => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_string(),
+        0xc02c => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384".to_string(),
+        0xcca8 => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
+        0xcca9 => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
+        0x009e => "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        0x009f => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        0x0035 => "TLS_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        0x0036 => "TLS_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        0x002f => "TLS_RSA_WITH_AES_128_CBC_SHA".to_string(),
+        0x003c => "TLS_RSA_WITH_AES_128_CBC_SHA256".to_string(),
+        0x003d => "TLS_RSA_WITH_AES_256_CBC_SHA256".to_string(),
+        _ => format!("UNKNOWN_CIPHER_{:04x}", cipher_suite),
+    }
 }
