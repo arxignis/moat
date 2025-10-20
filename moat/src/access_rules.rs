@@ -8,6 +8,7 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::bpf;
 use crate::config;
+use crate::ssl::update_http_filter_from_config_value;
 use crate::firewall::{Firewall, MOATFirewall};
 
 // Store previous rules state for comparison
@@ -25,7 +26,7 @@ type PreviousRulesV6 = Arc<Mutex<HashSet<(Ipv6Addr, u32)>>>;
 /// - Returns: JoinHandle for the spawned task
 pub fn start_access_rules_updater(
     base_url: String,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     api_key: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -36,7 +37,7 @@ pub fn start_access_rules_updater(
         let mut ticker = interval(Duration::from_secs(10));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
+        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), &skels, &previous_rules, &previous_rules_v6).await {
             eprintln!("initial access rules update failed: {e}");
         }
 
@@ -46,7 +47,7 @@ pub fn start_access_rules_updater(
                     if *shutdown.borrow() { break; }
                 }
                 _ = ticker.tick() => {
-                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
+                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), &skels, &previous_rules, &previous_rules_v6).await {
                         eprintln!("periodic access rules update failed: {e}");
                     }
                 }
@@ -58,15 +59,24 @@ pub fn start_access_rules_updater(
 async fn fetch_and_apply(
     base_url: String,
     api_key: String,
-    skel: Option<&Arc<bpf::FilterSkel<'static>>>,
+    skels: &Vec<Arc<bpf::FilterSkel<'static>>>,
     previous_rules: &PreviousRules,
     previous_rules_v6: &PreviousRulesV6,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = config::fetch_config(base_url.clone(), api_key.clone()).await?;
-    if let Some(s) = skel {
-        apply_rules_to_skel(s, &resp, previous_rules, previous_rules_v6)?;
-    }
-    Ok(())
+    config::fetch_and_apply(base_url, api_key, |resp| {
+        // Update WAF wirefilter when config changes
+        if let Err(e) = update_http_filter_from_config_value(&resp.config) {
+            eprintln!("failed to update HTTP filter from config: {e}");
+        }
+        if skels.is_empty() {
+            return Ok(());
+        }
+        for s in skels.iter() {
+            apply_rules_to_skel(s, resp, previous_rules, previous_rules_v6)?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn apply_rules_to_skel(

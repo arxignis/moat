@@ -1,6 +1,4 @@
 use std::mem::MaybeUninit;
-use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -12,7 +10,6 @@ use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags};
 use nix::net::if_::if_nametoindex;
 use tokio::net::TcpListener;
 
@@ -96,62 +93,52 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let boxed_open: Box<MaybeUninit<libbpf_rs::OpenObject>> = Box::new(MaybeUninit::uninit());
-    let open_object: &'static mut MaybeUninit<libbpf_rs::OpenObject> = Box::leak(boxed_open);
-    let skel_builder = bpf::FilterSkelBuilder::default();
+    // Build list of interfaces to attach
+    let iface_names: Vec<String> = if !args.ifaces.is_empty() {
+        args.ifaces.clone()
+    } else {
+        vec![args.iface.clone()]
+    };
 
-    let state = match skel_builder.open(open_object).and_then(|o| o.load()) {
-        Ok(mut skel) => {
-            let ifindex = match if_nametoindex(args.iface.as_str()) {
-                Ok(index) => index as i32,
-                Err(e) => {
-                    return Err(anyhow!(
-                        "failed to get interface index for '{}': {e}",
-                        args.iface
-                    ));
+    let mut skels: Vec<Arc<bpf::FilterSkel<'static>>> = Vec::new();
+    for iface in iface_names {
+        let boxed_open: Box<MaybeUninit<libbpf_rs::OpenObject>> = Box::new(MaybeUninit::uninit());
+        let open_object: &'static mut MaybeUninit<libbpf_rs::OpenObject> = Box::leak(boxed_open);
+        let skel_builder = bpf::FilterSkelBuilder::default();
+        match skel_builder.open(open_object).and_then(|o| o.load()) {
+            Ok(mut skel) => {
+                let ifindex = match if_nametoindex(iface.as_str()) {
+                    Ok(index) => index as i32,
+                    Err(e) => {
+                        eprintln!("failed to get interface index for '{}': {e}", iface);
+                        continue;
+                    }
+                };
+                if let Err(e) = bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex) {
+                    eprintln!("failed to attach XDP to '{}': {e}", iface);
+                    continue;
                 }
-            };
-
-            bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex).unwrap();
-            println!("BPF sucessfully attached to xdp");
-
-
-            let block_ip: Ipv4Addr = Ipv4Addr::from_str("192.168.215.123").unwrap();
-
-            let my_ip_key_bytes =
-                &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(block_ip, 32);
-
-            let map_val = 1_u8;
-
-            skel.maps.recently_banned_ips.update(
-                my_ip_key_bytes,
-                &map_val.to_le_bytes(),
-                MapFlags::ANY,
-            )?;
-
-            AppState {
-                skel: Some(Arc::new(skel)),
-                tls_state: tls_state.clone(),
+                println!("BPF sucessfully attached to xdp on {}", iface);
+                skels.push(Arc::new(skel));
+            }
+            Err(e) => {
+                eprintln!("WARN: failed to load BPF skeleton for '{}': {e}", iface);
             }
         }
-        Err(e) => {
-            eprintln!("WARN: failed to load BPF skeleton: {e}. Control endpoints will be limited.");
-            AppState {
-                skel: None,
-                tls_state: tls_state.clone(),
-            }
-        }
+    }
+
+    let state = AppState {
+        skels,
+        tls_state: tls_state.clone(),
     };
 
     // Start periodic access rules updater (if BPF is available)
     let access_rules_handle = {
-        let skel_clone = state.skel.clone();
+        let skels = state.skels.clone();
         let api_key = args.arxignis_api_key.clone();
         let base_url = args.arxignis_base_url.clone();
         let shutdown = shutdown_rx.clone();
-        Some(access_rules::start_access_rules_updater(
-            base_url, skel_clone, api_key, shutdown,
-        ))
+        Some(access_rules::start_access_rules_updater(base_url, skels, api_key, shutdown))
     };
 
     // let control_state = state.clone();
@@ -195,78 +182,150 @@ async fn main() -> Result<()> {
                 let cert = args.tls_cert_path.as_ref().unwrap();
                 let key = args.tls_key_path.as_ref().unwrap();
                 let config = load_custom_server_config(cert, key)?;
-                let listener = TcpListener::bind(args.tls_addr)
-                    .await
-                    .context("failed to bind TLS socket")?;
-                println!("HTTPS proxy listening on https://{}", args.tls_addr);
-                let shutdown = shutdown_rx.clone();
-                let tls_state_clone = tls_state.clone();
-                let skel_clone = state.skel.clone();
+                let tls_addrs: Vec<_> = if !args.tls_bind.is_empty() {
+                    args.tls_bind.clone()
+                } else {
+                    vec![args.tls_addr]
+                };
+
+                if tls_addrs.len() > 1 {
+                    println!("Starting {} HTTPS listeners (custom TLS)", tls_addrs.len());
+                }
+
+                let mut tasks = Vec::new();
+                for bind_addr in tls_addrs {
+                    let listener = TcpListener::bind(bind_addr)
+                        .await
+                        .with_context(|| format!("failed to bind TLS socket at {}", bind_addr))?;
+                    println!("HTTPS proxy listening on https://{}", bind_addr);
+                    let shutdown = shutdown_rx.clone();
+                    let tls_state_clone = tls_state.clone();
+                    let skels_clone = state.skels.clone();
+                    let ctx_clone = proxy_ctx.clone();
+                    let cfg = config.clone();
+                    tasks.push(tokio::spawn(async move {
+                        if let Err(err) = run_custom_tls_proxy(
+                            listener,
+                            cfg,
+                            ctx_clone,
+                            tls_state_clone,
+                            skels_clone,
+                            shutdown,
+                        )
+                        .await
+                        {
+                            eprintln!("custom TLS proxy terminated: {err:?}");
+                        }
+                    }));
+                }
+
                 Some(tokio::spawn(async move {
-                    if let Err(err) = run_custom_tls_proxy(
-                        listener,
-                        config.clone(),
-                        proxy_ctx,
-                        tls_state_clone,
-                        skel_clone,
-                        shutdown,
-                    )
-                    .await
-                    {
-                        eprintln!("custom TLS proxy terminated: {err:?}");
+                    for t in tasks {
+                        let _ = t.await;
                     }
                 }))
             }
             TlsMode::Acme => {
-                // Bind both HTTP (for ACME challenges + regular HTTP) and HTTPS
-                let http_listener = TcpListener::bind(args.http_addr)
-                    .await
-                    .context("failed to bind HTTP socket for ACME HTTP-01")?;
-                let https_listener = TcpListener::bind(args.tls_addr)
-                    .await
-                    .context("failed to bind HTTPS socket")?;
+                let http_addrs: Vec<_> = if !args.http_bind.is_empty() {
+                    args.http_bind.clone()
+                } else {
+                    vec![args.http_addr]
+                };
+                let tls_addrs: Vec<_> = if !args.tls_bind.is_empty() {
+                    args.tls_bind.clone()
+                } else {
+                    vec![args.tls_addr]
+                };
 
-                println!("HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)", args.http_addr);
-                println!("HTTPS server (ACME) listening on https://{}", args.tls_addr);
+                if http_addrs.len() != tls_addrs.len() {
+                    eprintln!("ACME mode: number of HTTP bind addresses ({}) does not match HTTPS ({}) - pairing will use min length; extras will be ignored", http_addrs.len(), tls_addrs.len());
+                }
+                let pair_count = http_addrs.len().min(tls_addrs.len());
+                if pair_count == 0 {
+                    eprintln!("ACME mode: no bind addresses provided; using defaults http={} https={}", args.http_addr, args.tls_addr);
+                }
 
-                let tls_state_clone = tls_state.clone();
-                let shutdown = shutdown_rx.clone();
-                let args_clone = args.clone();
-                let skel_clone = state.skel.clone();
+                let mut tasks = Vec::new();
+                for i in 0..pair_count.max(1) {
+                    let http_addr = http_addrs.get(i).cloned().unwrap_or(args.http_addr);
+                    let https_addr = tls_addrs.get(i).cloned().unwrap_or(args.tls_addr);
+
+                    let http_listener = TcpListener::bind(http_addr)
+                        .await
+                        .with_context(|| format!("failed to bind HTTP socket for ACME HTTP-01 at {}", http_addr))?;
+                    let https_listener = TcpListener::bind(https_addr)
+                        .await
+                        .with_context(|| format!("failed to bind HTTPS socket at {}", https_addr))?;
+
+                    println!("HTTP server listening on http://{} (ACME HTTP-01 + HTTP)", http_addr);
+                    println!("HTTPS server (ACME) listening on https://{}", https_addr);
+
+                    let tls_state_clone = tls_state.clone();
+                    let shutdown = shutdown_rx.clone();
+                    let args_clone = args.clone();
+                    let skels_clone = state.skels.clone();
+                    let ctx_clone = proxy_ctx.clone();
+                    tasks.push(tokio::spawn(async move {
+                        if let Err(err) = run_acme_http01_proxy(
+                            https_listener,
+                            http_listener,
+                            &args_clone,
+                            ctx_clone,
+                            tls_state_clone,
+                            skels_clone,
+                            shutdown,
+                        )
+                        .await
+                        {
+                            eprintln!("ACME HTTP-01 proxy terminated: {err:?}");
+                        }
+                    }));
+                }
+
                 Some(tokio::spawn(async move {
-                    if let Err(err) = run_acme_http01_proxy(
-                        https_listener,
-                        http_listener,
-                        &args_clone,
-                        proxy_ctx,
-                        tls_state_clone,
-                        skel_clone,
-                        shutdown,
-                    )
-                    .await
-                    {
-                        eprintln!("ACME HTTP-01 proxy terminated: {err:?}");
+                    for t in tasks {
+                        let _ = t.await;
                     }
                 }))
             }
             TlsMode::Disabled => {
-                // HTTP proxy for disabled TLS mode
-                let listener = TcpListener::bind(args.http_addr)
-                    .await
-                    .context("failed to bind HTTP socket")?;
-                println!("HTTP proxy listening on http://{}", args.http_addr);
-                let shutdown = shutdown_rx.clone();
-                let skel_clone = state.skel.clone();
+                // HTTP proxy for disabled TLS mode (multiple bind support)
+                let http_addrs: Vec<_> = if !args.http_bind.is_empty() {
+                    args.http_bind.clone()
+                } else {
+                    vec![args.http_addr]
+                };
+
+                if http_addrs.len() > 1 {
+                    println!("Starting {} HTTP listeners", http_addrs.len());
+                }
+
+                let mut tasks = Vec::new();
+                for bind_addr in http_addrs {
+                    let listener = TcpListener::bind(bind_addr)
+                        .await
+                        .with_context(|| format!("failed to bind HTTP socket at {}", bind_addr))?;
+                    println!("HTTP proxy listening on http://{}", bind_addr);
+                    let shutdown = shutdown_rx.clone();
+                    let skels_clone = state.skels.clone();
+                    let ctx_clone = proxy_ctx.clone();
+                    tasks.push(tokio::spawn(async move {
+                        if let Err(err) = run_http_proxy(
+                            listener,
+                            ctx_clone,
+                            skels_clone,
+                            shutdown,
+                        )
+                        .await
+                        {
+                            eprintln!("HTTP proxy terminated: {err:?}");
+                        }
+                    }));
+                }
+
                 Some(tokio::spawn(async move {
-                    if let Err(err) = run_http_proxy(
-                        listener,
-                        proxy_ctx,
-                        skel_clone,
-                        shutdown,
-                    )
-                    .await
-                    {
-                        eprintln!("HTTP proxy terminated: {err:?}");
+                    for t in tasks {
+                        let _ = t.await;
                     }
                 }))
             }

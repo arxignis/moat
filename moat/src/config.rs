@@ -138,3 +138,18 @@ pub async fn fetch_config(
 
     }
 }
+
+/// Fetch config and run a user-provided callback to apply it.
+/// The callback can update WAF rules, BPF maps, caches, etc.
+pub async fn fetch_and_apply<F>(
+    base_url: String,
+    api_key: String,
+    mut on_config: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnMut(&ConfigApiResponse) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let resp = fetch_config(base_url, api_key).await?;
+    on_config(&resp)?;
+    Ok(())
+}

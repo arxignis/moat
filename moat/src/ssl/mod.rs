@@ -12,6 +12,7 @@ use local_ip_address::local_ip;
 
 use crate::cli::Args;
 use crate::config::fetch_config;
+use crate::config::Config;
 use crate::domain_filter::DomainFilter;
 use crate::wirefilter::HttpFilter;
 use crate::{bpf, utils::bpf_utils};
@@ -100,6 +101,21 @@ pub async fn update_http_filter_with_config(base_url: String, api_key: String) -
             eprintln!("Failed to fetch config for HTTP filter update: {}", e);
             Err(anyhow!("Failed to fetch config: {}", e))
         }
+    }
+}
+
+/// Update the global HTTP filter using an already-fetched Config value
+pub fn update_http_filter_from_config_value(config: &Config) -> Result<()> {
+    if let Some(filter) = HTTP_FILTER.get() {
+        filter.update_from_config(config)?;
+        println!(
+            "HTTP filter updated with {} WAF rules from config",
+            config.waf_rules.rules.len()
+        );
+        Ok(())
+    } else {
+        eprintln!("HTTP filter not initialized, cannot update");
+        Ok(())
     }
 }
 
@@ -349,25 +365,55 @@ pub fn ipv4_to_u32_be(ip: Ipv4Addr) -> u32 {
     u32::from_be_bytes(ip.octets())
 }
 
-fn is_ipv4_banned(peer: SocketAddr, skel: &Option<Arc<bpf::FilterSkel<'static>>>) -> bool {
-    let Some(skel) = skel.as_ref() else {
+fn is_ipv4_banned(peer: SocketAddr, skels: &Vec<Arc<bpf::FilterSkel<'static>>>) -> bool {
+    if skels.is_empty() {
         return false;
-    };
+    }
     match peer.ip() {
         std::net::IpAddr::V4(ip) => {
             let key_bytes = bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, 32);
-            match skel
-                .maps
-                .recently_banned_ips
-                .lookup(&key_bytes, MapFlags::ANY)
-            {
-                Ok(Some(flag)) => flag == vec![1u8],
-                Ok(None) => false,
-                Err(e) => {
-                    eprintln!("bpf recently_banned_ips lookup error for {peer}: {e}");
-                    false
+            for skel in skels {
+                match skel
+                    .maps
+                    .recently_banned_ips
+                    .lookup(&key_bytes, MapFlags::ANY)
+                {
+                    Ok(Some(flag)) if flag == vec![1u8] => return true,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("bpf recently_banned_ips lookup error for {peer}: {e}");
+                        continue;
+                    }
                 }
             }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn is_ipv6_banned(peer: SocketAddr, skels: &Vec<Arc<bpf::FilterSkel<'static>>>) -> bool {
+    if skels.is_empty() {
+        return false;
+    }
+    match peer.ip() {
+        std::net::IpAddr::V6(ip) => {
+            let key_bytes = bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, 128);
+            for skel in skels {
+                match skel
+                    .maps
+                    .recently_banned_ips_v6
+                    .lookup(&key_bytes, MapFlags::ANY)
+                {
+                    Ok(Some(flag)) if flag == vec![1u8] => return true,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("bpf recently_banned_ips_v6 lookup error for {peer}: {e}");
+                        continue;
+                    }
+                }
+            }
+            false
         }
         _ => false,
     }
@@ -1226,7 +1272,7 @@ pub async fn run_custom_tls_proxy(
     server_config: ServerConfigWithCert,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     tls_state
@@ -1245,7 +1291,7 @@ pub async fn run_custom_tls_proxy(
                 let ctx_clone = ctx.clone();
                 let tls_state_clone = tls_state.clone();
                 let server_config_clone = server_config.clone();
-                let skel_clone = skel.clone();
+                let skels_clone = skels.clone();
                 tokio::spawn(async move {
                     let stream = match FingerprintTcpStream::new(stream).await {
                         Ok(s) => {
@@ -1259,8 +1305,8 @@ pub async fn run_custom_tls_proxy(
 
                     let peer_addr = stream.peer_addr();
                     let fingerprint = stream.fingerprint().cloned();
-                    // Pre-TLS ban check
-                    if is_ipv4_banned(peer_addr, &skel_clone) {
+                    // Pre-TLS ban check (both IPv4 and IPv6)
+                    if is_ipv4_banned(peer_addr, &skels_clone) || is_ipv6_banned(peer_addr, &skels_clone) {
                         let mut s = stream.inner;
                         let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                         let _ = s.shutdown().await;
@@ -1329,7 +1375,7 @@ pub async fn run_acme_http01_proxy(
     args: &Args,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     if !args.acme_accept_tos {
@@ -1410,7 +1456,7 @@ pub async fn run_acme_http01_proxy(
 
     // Spawn HTTP server for ACME challenges and regular HTTP traffic
     let http_ctx = ctx.clone();
-    let http_skel = skel.clone();
+    let http_skels = skels.clone();
     let mut http_shutdown = shutdown.clone();
     let challenge_store_http = challenge_store.clone();
 
@@ -1420,8 +1466,8 @@ pub async fn run_acme_http01_proxy(
                 accept = http_listener.accept() => {
                     match accept {
                         Ok((stream, peer)) => {
-                            // Check if banned
-                            if is_ipv4_banned(peer, &http_skel) {
+                            // Check if banned (both IPv4 and IPv6)
+                            if is_ipv4_banned(peer, &http_skels) || is_ipv6_banned(peer, &http_skels) {
                                 let mut s = stream;
                                 let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                                 let _ = s.shutdown().await;
@@ -1494,8 +1540,8 @@ pub async fn run_acme_http01_proxy(
             accept = https_listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        // Check if banned
-                        if is_ipv4_banned(peer, &skel) {
+                        // Check if banned (both IPv4 and IPv6)
+                        if is_ipv4_banned(peer, &skels) || is_ipv6_banned(peer, &skels) {
                             let mut s = stream;
                             let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                             let _ = s.shutdown().await;
@@ -1582,7 +1628,7 @@ pub async fn run_acme_http01_proxy(
 pub async fn run_http_proxy(
     listener: TcpListener,
     ctx: Arc<ProxyContext>,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    _skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     loop {
@@ -1597,7 +1643,7 @@ pub async fn run_http_proxy(
                 };
 
                 let ctx_clone = ctx.clone();
-                let skel_clone = skel.clone();
+                let skel_clone = None::<Arc<bpf::FilterSkel<'static>>>; // not used in plain HTTP path
                 tokio::spawn(async move {
                     if let Err(err) = handle_http_connection(stream, peer, ctx_clone, skel_clone).await {
                         eprintln!("http connection error: {err:?}");

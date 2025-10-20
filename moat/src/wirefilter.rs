@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use wirefilter::{ExecutionContext, Scheme};
+use wirefilter::{ExecutionContext, Scheme, TypedArray, TypedMap};
 use crate::config::Config;
 
 /// Wirefilter-based HTTP request filtering engine
@@ -15,7 +15,7 @@ pub struct HttpFilter {
 impl HttpFilter {
     /// Create the wirefilter scheme with HTTP request fields
     fn create_scheme() -> Scheme {
-        Scheme! {
+        let mut builder = Scheme! {
             http.request.method: Bytes,
             http.request.scheme: Bytes,
             http.request.host: Bytes,
@@ -28,9 +28,15 @@ impl HttpFilter {
             http.request.content_length: Int,
             http.request.body: Bytes,
             http.request.body_sha256: Bytes,
+            http.request.headers: Map(Array(Bytes)),
             ip.src: Ip,
-        }
-        .build()
+        };
+
+        // Register functions used in Cloudflare-style expressions
+        builder.add_function("any", wirefilter::AnyFunction::default()).unwrap();
+        builder.add_function("all", wirefilter::AllFunction::default()).unwrap();
+
+        builder.build()
     }
 
     /// Create a new HTTP filter with the given filter expression (static version)
@@ -80,8 +86,8 @@ impl HttpFilter {
 
             // Try to parse the expression to validate it
             let scheme = Self::create_scheme();
-            if scheme.parse(&rule.expression).is_err() {
-                eprintln!("Warning: Invalid WAF rule expression for rule '{}': {}", rule.name, rule.expression);
+            if let Err(error) = scheme.parse(&rule.expression) {
+                eprintln!("Warning: Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
@@ -117,8 +123,8 @@ impl HttpFilter {
             }
 
             // Try to parse the expression to validate it
-            if self.scheme.parse(&rule.expression).is_err() {
-                eprintln!("Warning: Invalid WAF rule expression for rule '{}': {}", rule.name, rule.expression);
+            if let Err(error) = self.scheme.parse(&rule.expression) {
+                eprintln!("Warning: Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
@@ -234,6 +240,21 @@ impl HttpFilter {
         ctx.set_field_value(
             self.scheme.get_field("http.request.content_type").unwrap(),
             content_type,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("http.request.headers").unwrap(),
+            {
+                let mut headers_map: TypedMap<'_, TypedArray<'_, &[u8]>> = TypedMap::new();
+                for (name, value) in req_parts.headers.iter() {
+                    let key = name.as_str().to_ascii_lowercase().into_bytes().into_boxed_slice();
+                    let entry = headers_map.get_or_insert(key, TypedArray::new());
+                    match value.to_str() {
+                        Ok(s) => entry.push(s.as_bytes()),
+                        Err(_) => entry.push(value.as_bytes()),
+                    }
+                }
+                headers_map
+            },
         )?;
         ctx.set_field_value(
             self.scheme.get_field("http.request.content_length").unwrap(),
