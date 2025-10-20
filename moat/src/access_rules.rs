@@ -1,6 +1,4 @@
-use hyper::StatusCode;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -9,115 +7,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::bpf;
+use crate::config;
 use crate::firewall::{Firewall, MOATFirewall};
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct AccessRulesApiResponse {
-    #[serde(deserialize_with = "deserialize_rules_data")]
-    pub data: Vec<Rule>,
-    pub limit: Option<i32>,
-    pub page: Option<i32>,
-    pub success: bool,
-    pub total: Option<i32>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct Rule {
-    pub allow: RuleSet,
-    pub block: RuleSet,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub description: String,
-    pub id: String,
-    #[serde(rename = "is_active")]
-    pub is_active: bool,
-    pub name: String,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct RuleSet {
-    pub asn: Vec<HashMap<String, Vec<String>>>,
-    pub country: Vec<HashMap<String, Vec<String>>>,
-    pub ips: Vec<String>,
-}
-
-pub type Details = serde_json::Value;
 
 // Store previous rules state for comparison
 type PreviousRules = Arc<Mutex<HashSet<(Ipv4Addr, u32)>>>;
 type PreviousRulesV6 = Arc<Mutex<HashSet<(Ipv6Addr, u32)>>>;
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct ErrorResponse {
-    pub details: Details,
-    pub error: String,
-    pub success: bool,
-}
-
-// Accept both list and single-object shapes for `data` and normalize to Vec<Rule>
-fn deserialize_rules_data<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RulesDataInternal {
-        Many(Vec<Rule>),
-        One(Rule),
-    }
-
-    let v = RulesDataInternal::deserialize(deserializer)?;
-    Ok(match v {
-        RulesDataInternal::Many(rules) => rules,
-        RulesDataInternal::One(rule) => vec![rule],
-    })
-}
-
-async fn fetch_access_rules(
-    base_url: String,
-    api_key: String,
-    rule_id: String,
-) -> Result<AccessRulesApiResponse, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .danger_accept_invalid_certs(false)
-        .user_agent("Moat/1.0")
-        .build()?;
-    let url = format!("{}/access-rules/{}", base_url, rule_id);
-
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .query(&[("resolve", "true")])
-        .send()
-        .await?;
-
-    // let status = response.status();
-    // eprintln!("response: {:?}", status);
-
-    // let response_text = response.text().await?;
-    // eprintln!("response: {:?}", response_text);
-
-    match response.status() {
-        StatusCode::OK => {
-            let body: AccessRulesApiResponse = serde_json::from_str(&response.text().await?)?;
-            Ok(body)
-        }
-        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::INTERNAL_SERVER_ERROR => {
-            let body: ErrorResponse = serde_json::from_str(&response.text().await?)?;
-            Err(format!("API Error: {}", body.error).into())
-        }
-
-        status => Err(format!(
-            "Unexpected API status code: {} - {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("Unknown")
-        )
-        .into()),
-
-    }
-}
 
 /// Start a background task that fetches access rules every 10 seconds and
 /// applies them to the `banned_ips` BPF map in the provided skeleton.
@@ -132,7 +27,6 @@ pub fn start_access_rules_updater(
     base_url: String,
     skel: Option<Arc<bpf::FilterSkel<'static>>>,
     api_key: String,
-    rule_id: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     // Initialize previous rules state
@@ -142,7 +36,7 @@ pub fn start_access_rules_updater(
         let mut ticker = interval(Duration::from_secs(10));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), rule_id.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
+        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
             eprintln!("initial access rules update failed: {e}");
         }
 
@@ -152,7 +46,7 @@ pub fn start_access_rules_updater(
                     if *shutdown.borrow() { break; }
                 }
                 _ = ticker.tick() => {
-                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), rule_id.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
+                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
                         eprintln!("periodic access rules update failed: {e}");
                     }
                 }
@@ -164,12 +58,11 @@ pub fn start_access_rules_updater(
 async fn fetch_and_apply(
     base_url: String,
     api_key: String,
-    rule_id: String,
     skel: Option<&Arc<bpf::FilterSkel<'static>>>,
     previous_rules: &PreviousRules,
     previous_rules_v6: &PreviousRulesV6,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = fetch_access_rules(base_url.clone(), api_key.clone(), rule_id.clone()).await?;
+    let resp = config::fetch_config(base_url.clone(), api_key.clone()).await?;
     if let Some(s) = skel {
         apply_rules_to_skel(s, &resp, previous_rules, previous_rules_v6)?;
     }
@@ -178,7 +71,7 @@ async fn fetch_and_apply(
 
 fn apply_rules_to_skel(
     skel: &bpf::FilterSkel<'_>,
-    resp: &AccessRulesApiResponse,
+    resp: &config::ConfigApiResponse,
     previous_rules: &PreviousRules,
     previous_rules_v6: &PreviousRulesV6,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -247,71 +140,67 @@ fn apply_rules_to_skel(
     let mut current_rules: HashSet<(Ipv4Addr, u32)> = HashSet::new();
     let mut current_rules_v6: HashSet<(Ipv6Addr, u32)> = HashSet::new();
 
-    for rule in &resp.data {
-        if !rule.is_active {
-            continue;
-        }
+    let rule = &resp.config.access_rules;
 
-        // Parse block.ips
-        for ip_str in &rule.block.ips {
-            if ip_str.contains(':') {
-                // IPv6 address
-                if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
-                    current_rules_v6.insert((net, prefix));
-                } else {
-                    eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
-                }
+    // Parse block.ips
+    for ip_str in &rule.block.ips {
+        if ip_str.contains(':') {
+            // IPv6 address
+            if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
+                current_rules_v6.insert((net, prefix));
             } else {
-                // IPv4 address
-                if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
-                    current_rules.insert((net, prefix));
-                } else {
-                    eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
-                }
+                eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
+            }
+        } else {
+            // IPv4 address
+            if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
+                current_rules.insert((net, prefix));
+            } else {
+                eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
             }
         }
+    }
 
-        // Parse block.country values
-        for country_map in &rule.block.country {
-            for (_cc, list) in country_map.iter() {
-                for ip_str in list {
-                    if ip_str.contains(':') {
-                        // IPv6 address
-                        if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
-                            current_rules_v6.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
-                        }
+    // Parse block.country values
+    for country_map in &rule.block.country {
+        for (_cc, list) in country_map.iter() {
+            for ip_str in list {
+                if ip_str.contains(':') {
+                    // IPv6 address
+                    if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
+                        current_rules_v6.insert((net, prefix));
                     } else {
-                        // IPv4 address
-                        if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
-                            current_rules.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
-                        }
+                        eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
+                    }
+                } else {
+                    // IPv4 address
+                    if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
+                        current_rules.insert((net, prefix));
+                    } else {
+                        eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
                     }
                 }
             }
         }
+    }
 
-        // Parse block.asn values
-        for asn_map in &rule.block.asn {
-            for (_asn, list) in asn_map.iter() {
-                for ip_str in list {
-                    if ip_str.contains(':') {
-                        // IPv6 address
-                        if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
-                            current_rules_v6.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
-                        }
+    // Parse block.asn values
+    for asn_map in &rule.block.asn {
+        for (_asn, list) in asn_map.iter() {
+            for ip_str in list {
+                if ip_str.contains(':') {
+                    // IPv6 address
+                    if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
+                        current_rules_v6.insert((net, prefix));
                     } else {
-                        // IPv4 address
-                        if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
-                            current_rules.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
-                        }
+                        eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
+                    }
+                } else {
+                    // IPv4 address
+                    if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
+                        current_rules.insert((net, prefix));
+                    } else {
+                        eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
                     }
                 }
             }

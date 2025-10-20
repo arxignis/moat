@@ -1,36 +1,21 @@
-<div align="center">
-  <img height=100 weight=100 src="images/logo.svg" alt="arxgnis logo" />
-</div>
+🌋 The Legend of Arxignis and the Moat
 
-<p align="center">
-  <a href="https://github.com/arxignis/moat/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-ELv2-green" alt="License - Elastic 2.0"></a> &nbsp;
-  <a href="https://github.com/arxignis/moat/actions?query=branch%3Amain"><img src="https://github.com/arxignis/moat/actions/workflows/build.yml/badge.svg" alt="CI Build"></a> &nbsp;
-  <a href="https://github.com/arxignis/moat/releases"><img src="https://img.shields.io/github/release/arxignis/moat.svg?label=Release" alt="Release"></a> &nbsp;
-  <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/arxignis/moat/total"> &nbsp;
-  <a href="https://docs.arxignis.com/"><img alt="Static Badge" src="https://img.shields.io/badge/arxignis-documentation-page?style=flat&link=https%3A%2F%2Fdocs.arxignis.com%2F"></a> &nbsp;
-  <a href="https://discord.gg/jzsW5Q6s9q"><img src="https://img.shields.io/discord/1377189913849757726?label=Discord" alt="Discord"></a> &nbsp;
-  <a href="https://x.com/arxignis"><img src="https://img.shields.io/twitter/follow/arxignis?style=flat" alt="X (formerly Twitter) Follow" /> </a>
-</p>
+In the age of digital kingdoms, where empires rise and fall at the speed of code, there stands a fortress unlike any other — Arxignis, the Citadel of Fire.
 
-# Community
-[![Join us on Discord](https://img.shields.io/badge/Join%20Us%20on-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/jzsW5Q6s9q)
-[![Substack](https://img.shields.io/badge/Substack-FF6719?logo=substack&logoColor=fff)](https://arxignis.substack.com/)
+Forged from lines of code and tempered by the flames of countless cyber battles, Arxignis was built for one purpose: to protect your realm.
 
-## What is moat ancient story?
-You can read [here](./STORY.md).
+But no fortress stands alone.
 
-# Core features
-- [x] SSL termination
-- [x] ACME support
-- [x] Firewall with eBPF
-- [x] Threat detection by IP and JA4+ hashes
-- [x] WAF by Wirefilter
-- [x] Content scanning by ClamAV
-- [x] Metrics
-- [x] Access Logs
+Surrounding Arxignis is Moat — not water, but an invisible, intelligent barrier that shifts and shimmers like living magic. It sees threats before they even know they exist. When invaders approach — bot armies, malicious payloads, or the darkest zero-day beasts — Moat awakens.
 
-## Alpha features
-- Anomaly detection
+With a whisper of algorithmic incantation, it analyzes intent, bends logic, and casts away the unworthy.
+
+Attackers see nothing but endless reflection — their own attacks bouncing back into the void. To them, it’s as if your citadel never existed. To you, it’s silent peace behind walls of flame and light.
+
+Because this is your Citadel, your Arx, your Ignis.
+And with Moat, the fire never reaches your gates. 🔥
+
+![Story](./images/story.png)
 
 ## Docker build
 ```
@@ -158,11 +143,3 @@ moat --iface eth0 --tls-only --upstream "http://127.0.0.1:8081" --arxignis-api-k
 - Domain filtering supports both exact matches (whitelist) and wildcard patterns
 - When using Docker, ensure the required capabilities (`SYS_ADMIN`, `BPF`, `NET_ADMIN`) are added
 - The XDP program attaches to the specified network interface for packet filtering
-
-### License
-
-This repository includes proprietary software components. Our company holds a license for JA4+, which is only available to users with valid Arxignis subscriptions.
-
-[JA4+ License](https://github.com/FoxIO-LLC/ja4/blob/main/LICENSE-JA4)
-[JA4+ License FAQ](https://github.com/FoxIO-LLC/ja4/blob/main/License%20FAQ.md)
-

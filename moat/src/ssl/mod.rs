@@ -11,7 +11,9 @@ use gethostname::gethostname;
 use local_ip_address::local_ip;
 
 use crate::cli::Args;
+use crate::config::fetch_config;
 use crate::domain_filter::DomainFilter;
+use crate::wirefilter::HttpFilter;
 use crate::{bpf, utils::bpf_utils};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -51,6 +53,55 @@ use tokio_rustls::LazyConfigAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
 
 use self::tls_fingerprint::{fingerprint_client_hello, Fingerprint as TlsFingerprint};
+
+// Global wirefilter instance for HTTP request filtering
+static HTTP_FILTER: OnceLock<HttpFilter> = OnceLock::new();
+
+/// Initialize the global HTTP filter with a test rule that blocks POST requests
+pub fn init_http_filter() -> Result<()> {
+    let filter = HttpFilter::new_test_filter()?;
+    HTTP_FILTER.set(filter).map_err(|_| anyhow!("Failed to initialize HTTP filter"))?;
+    println!("HTTP filter initialized with test rule: blocking POST requests");
+    Ok(())
+}
+
+/// Initialize the global HTTP filter with config from API
+pub async fn init_http_filter_with_config(base_url: String, api_key: String) -> Result<()> {
+    match fetch_config(base_url, api_key).await {
+        Ok(config_response) => {
+            let filter = HttpFilter::new_from_config(&config_response.config)?;
+            HTTP_FILTER.set(filter).map_err(|_| anyhow!("Failed to initialize HTTP filter"))?;
+            println!("HTTP filter initialized with {} WAF rules from config",
+                config_response.config.waf_rules.rules.len());
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch config for HTTP filter: {}", e);
+            // Fallback to test filter
+            init_http_filter()
+        }
+    }
+}
+
+/// Update the global HTTP filter with new config
+pub async fn update_http_filter_with_config(base_url: String, api_key: String) -> Result<()> {
+    match fetch_config(base_url, api_key).await {
+        Ok(config_response) => {
+            if let Some(filter) = HTTP_FILTER.get() {
+                filter.update_from_config(&config_response.config)?;
+                println!("HTTP filter updated with {} WAF rules from config",
+                    config_response.config.waf_rules.rules.len());
+            } else {
+                eprintln!("HTTP filter not initialized, cannot update");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch config for HTTP filter update: {}", e);
+            Err(anyhow!("Failed to fetch config: {}", e))
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ServerCertInfo {
@@ -1078,6 +1129,27 @@ pub async fn proxy_http_service(
                 StatusCode::UPGRADE_REQUIRED,
                 "tls_required",
             ));
+        }
+    }
+
+    // Apply wirefilter rules before forwarding to upstream
+    if let Some(filter) = HTTP_FILTER.get() {
+        match filter.should_block_request_from_parts(&req_parts, &req_body_bytes, peer_addr) {
+            Ok(true) => {
+                println!("Request blocked by wirefilter from {}: {} {}",
+                    peer_addr, req_parts.method, req_parts.uri);
+                return Ok(build_proxy_error_response(
+                    StatusCode::FORBIDDEN,
+                    "request_blocked_by_filter",
+                ));
+            }
+            Ok(false) => {
+                // Request allowed, continue processing
+            }
+            Err(e) => {
+                eprintln!("Wirefilter error: {}", e);
+                // On filter error, allow the request to proceed
+            }
         }
     }
 

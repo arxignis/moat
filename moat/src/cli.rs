@@ -81,10 +81,6 @@ pub struct Args {
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
     pub arxignis_base_url: String,
 
-    // TODO: make it be able to add a list of ids
-    #[arg(long)]
-    pub arxignis_rule_id: String,
-
     /// Domain whitelist (exact matches, comma separated or repeated).
     /// If specified, only requests to these domains will be allowed.
     #[arg(long, value_delimiter = ',', num_args = 0..)]
