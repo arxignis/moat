@@ -58,3 +58,6 @@ futures-rustls = "0.26.0"
 tls-parser = "0.12.2"
 reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
+x509-parser = "0.18"
+gethostname = "1.1.0"
+local-ip-address = "0.6.5"

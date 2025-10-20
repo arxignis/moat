@@ -56,6 +56,7 @@ enum TlsVersion {
     V1_1,
     V1_0,
     Ssl3_0,
+    #[allow(dead_code)]
     Ssl2_0,
     Unknown(u16),
 }

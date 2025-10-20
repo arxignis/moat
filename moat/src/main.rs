@@ -16,6 +16,7 @@ use libbpf_rs::{MapCore, MapFlags};
 use nix::net::if_::if_nametoindex;
 use tokio::net::TcpListener;
 
+pub mod access_log;
 pub mod access_rules;
 pub mod app_state;
 pub mod cli;
@@ -47,23 +48,17 @@ async fn main() -> Result<()> {
     install_ring_crypto_provider()?;
     let args = Args::parse();
 
-    let upstream_uri = match args.tls_mode {
-        TlsMode::Disabled => None,
-        _ => {
-            let upstream = args
-                .upstream
-                .as_ref()
-                .ok_or_else(|| anyhow!("--upstream is required when TLS mode is not disabled"))?;
-            let parsed = upstream
-                .parse::<Uri>()
-                .context("failed to parse --upstream as URI")?;
-            if parsed.scheme().is_none() || parsed.authority().is_none() {
-                return Err(anyhow!(
-                    "upstream URI must be absolute (e.g. http://127.0.0.1:8081)",
-                ));
-            }
-            Some(parsed)
+    let upstream_uri = {
+        let parsed = args
+            .upstream
+            .parse::<Uri>()
+            .context("failed to parse --upstream as URI")?;
+        if parsed.scheme().is_none() || parsed.authority().is_none() {
+            return Err(anyhow!(
+                "upstream URI must be absolute (e.g. http://127.0.0.1:8081)",
+            ));
         }
+        parsed
     };
 
     if args.tls_mode == TlsMode::Custom
@@ -149,9 +144,7 @@ async fn main() -> Result<()> {
     //     }
     // });
 
-    let tls_handle = if let (Some(upstream), TlsMode::Disabled) = (&upstream_uri, args.tls_mode) {
-        unreachable!("TLS mode disabled but upstream parsed: {upstream}");
-    } else if let Some(upstream) = upstream_uri.clone() {
+    let tls_handle = {
         let mut builder = Client::builder(TokioExecutor::new());
         builder.timer(TokioTimer::new());
         builder.pool_timer(TokioTimer::new());
@@ -174,10 +167,11 @@ async fn main() -> Result<()> {
 
         let proxy_ctx = Arc::new(ProxyContext {
             client,
-            upstream,
+            upstream: upstream_uri.clone(),
             domain_filter,
             tls_only: args.tls_only,
         });
+
         match args.tls_mode {
             TlsMode::Custom => {
                 let cert = args.tls_cert_path.as_ref().unwrap();
@@ -259,8 +253,6 @@ async fn main() -> Result<()> {
                 }))
             }
         }
-    } else {
-        None
     };
 
     signal::ctrl_c().await?;
@@ -285,89 +277,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
-// #[tokio::main]
-// async fn main() -> Result<()> {
-//     let args = Args::parse();
-
-//     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
-//     let listener = TcpListener::bind(addr).await?;
-//     println!("HTTP server listening on http://{addr}");
-//     // Load and open BPF skeleton
-//     // Allocate the open object on the heap and leak it to extend lifetime
-//     let boxed_open: Box<MaybeUninit<libbpf_rs::OpenObject>> = Box::new(MaybeUninit::uninit());
-//     let open_object: &'static mut MaybeUninit<libbpf_rs::OpenObject> = Box::leak(boxed_open);
-//     let skel_builder = bpf::FilterSkelBuilder::default();
-
-//     let state = match skel_builder.open(open_object).and_then(|o| o.load()) {
-//         Ok(mut skel) => {
-//             // Get ifindex from interface name
-//             let ifindex = match if_nametoindex(args.iface.as_str()) {
-//                 Ok(index) => index as i32,
-//                 Err(e) => {
-//                     eprintln!(
-//                         "ERROR: failed to get interface index for '{}': {}",
-//                         args.iface, e
-//                     );
-//                     panic!("failed to get interface index");
-//                 }
-//             };
-
-//             // let link = skel.progs.firewall.attach_xdp(ifindex)?;
-//             bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex).unwrap();
-
-//             AppState {
-//                 skel: Some(std::sync::Arc::new(skel)),
-//             }
-//         }
-//         Err(e) => {
-//             eprintln!(
-//                 "WARN: failed to load BPF skeleton: {e}. Endpoints will return 503 for map ops."
-//             );
-//             panic!("failed to load skeleton");
-//         }
-//     };
-
-//     let block_ip: Ipv4Addr = Ipv4Addr::from_str("192.168.215.0").unwrap();
-
-//     let my_ip_key_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(block_ip, 32);
-
-//     let map_val = 1_u8;
-
-//     state
-//         .skel
-//         .as_ref()
-//         .unwrap()
-//         .maps
-//         .recently_banned_ips
-//         .update(my_ip_key_bytes, &map_val.to_le_bytes(), MapFlags::ANY)?;
-
-//     loop {
-//         tokio::select! {
-//             res = listener.accept() => {
-//                 let (stream, peer) = match res {
-//                     Ok(s) => s,
-//                     Err(e) => { eprintln!("accept error: {e}"); continue; }
-//                 };
-
-//                 let state = state.clone();
-//                 tokio::spawn(async move {
-//                     let io = TokioIo::new(stream);
-//                     if let Err(e) = http1::Builder::new()
-//                         .serve_connection(io, service_fn(move |req| handle(req, peer, state.clone())))
-//                         .with_upgrades()
-//                         .await
-//                     {
-//                         eprintln!("connection error from {peer}: {e}");
-//                     }
-//                 });
-//             }
-//             _ = tokio::signal::ctrl_c() => {
-//                 println!("Shutting down HTTP server (Ctrl-C) ...");
-//                 break;
-//             }
-//         }
-//     }
-
-//     Ok(())
-// }

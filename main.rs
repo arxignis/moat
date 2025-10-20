@@ -198,17 +198,17 @@ mod ebpf_backend {
             let guard = self.skel.lock().await;
             let key_bytes = key.to_ne_bytes();
             let banned_hit = guard
-                .maps
-                .banned_ips
+                    .maps
+                    .banned_ips
                 .lookup(&key_bytes, MapFlags::ANY)?
                 .map(|_| true)
-                .unwrap_or(false);
+                    .unwrap_or(false);
             let recent_hit = guard
-                .maps
-                .recently_banned_ips
+                    .maps
+                    .recently_banned_ips
                 .lookup(&key_bytes, MapFlags::ANY)?
                 .map(|_| true)
-                .unwrap_or(false);
+                    .unwrap_or(false);
             Ok((banned_hit, recent_hit))
         }
     }
@@ -433,8 +433,8 @@ async fn proxy_request(req: Request<Incoming>, state: AppState) -> Result<HttpRe
 
     for (name, value) in parts.headers.iter() {
         if is_hop_header_name(name.as_str()) || name == header::HOST {
-            continue;
-        }
+                        continue;
+                    }
         if let (Ok(header_name), Ok(header_value)) = (
             ReqwestHeaderName::from_bytes(name.as_str().as_bytes()),
             ReqwestHeaderValue::from_bytes(value.as_bytes()),

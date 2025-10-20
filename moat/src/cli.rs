@@ -30,7 +30,7 @@ pub struct Args {
 
     /// Upstream origin URL (required unless TLS is disabled).
     #[arg(long)]
-    pub upstream: Option<String>,
+    pub upstream: String,
 
     /// Path to custom certificate (PEM) when using custom TLS mode.
     #[arg(long)]
@@ -77,7 +77,7 @@ pub struct Args {
     pub redis_url: String,
 
     /// Namespace prefix for Redis ACME cache entries.
-    #[arg(long, default_value = "bpf-firewall:acme")]
+    #[arg(long, default_value = "arxignis:acme")]
     pub redis_prefix: String,
 
     /// The network interface to attach the XDP program to.

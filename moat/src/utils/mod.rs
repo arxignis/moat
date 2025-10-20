@@ -1,5 +1,5 @@
 pub mod bpf_utils {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     use crate::bpf::{self, FilterSkel};
 
@@ -30,6 +30,18 @@ pub mod bpf_utils {
         let my_ip_key: bpf::types::lpm_key = bpf::types::lpm_key {
             prefixlen,
             addr: ip_be,
+        };
+
+        let my_ip_key_bytes = unsafe { plain::as_bytes(&my_ip_key) };
+        my_ip_key_bytes.to_vec().into_boxed_slice()
+    }
+
+    pub fn convert_ipv6_into_bpf_map_key_bytes(ip: Ipv6Addr, prefixlen: u32) -> Box<[u8]> {
+        let ip_bytes = ip.octets();
+
+        let my_ip_key: bpf::types::lpm_key_v6 = bpf::types::lpm_key_v6 {
+            prefixlen,
+            addr: ip_bytes,
         };
 
         let my_ip_key_bytes = unsafe { plain::as_bytes(&my_ip_key) };

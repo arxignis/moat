@@ -13,7 +13,7 @@ pub struct DomainFilter {
 
 #[derive(Debug, Clone)]
 struct WildcardPattern {
-    original: String,
+    _original: String,
     parts: Vec<PatternPart>,
 }
 
@@ -93,7 +93,7 @@ impl WildcardPattern {
         }
 
         Self {
-            original: pattern.to_string(),
+            _original: pattern.to_string(),
             parts,
         }
     }
@@ -106,7 +106,7 @@ impl WildcardPattern {
             match part {
                 PatternPart::Literal(literal) => {
                     let literal_bytes = literal.as_bytes();
-                    
+
                     // Check if there's enough space left in domain
                     if domain_pos + literal_bytes.len() > domain_bytes.len() {
                         return false;

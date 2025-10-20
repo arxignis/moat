@@ -9,6 +9,8 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
+use gethostname::gethostname;
+use local_ip_address::local_ip;
 
 use crate::cli::Args;
 use crate::domain_filter::DomainFilter;
@@ -225,7 +227,7 @@ impl AsRef<TcpStream> for FingerprintTcpStream {
 // Custom stream wrapper that implements Unpin for use with rustls-acme
 pub struct FingerprintingTcpListener {
     inner: TcpListenerStream,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    _skel: Option<Arc<bpf::FilterSkel<'static>>>,
     pending: Option<
         Pin<
             Box<
@@ -241,7 +243,7 @@ impl FingerprintingTcpListener {
     pub fn new(inner: TcpListenerStream, skel: Option<Arc<bpf::FilterSkel<'static>>>) -> Self {
         Self {
             inner,
-            skel,
+            _skel: skel,
             pending: None,
         }
     }
@@ -254,8 +256,7 @@ impl futures::Stream for FingerprintingTcpListener {
         // If we have a pending fingerprinting task, poll it
         if let Some(mut fut) = self.pending.take() {
             match fut.as_mut().poll(cx) {
-                Poll::Ready(Ok((stream, fp, peer))) => {
-                    log_tls_fingerprint(peer, fp.as_ref());
+                Poll::Ready(Ok((stream, _fp, _peer))) => {
                     return Poll::Ready(Some(Ok(stream)));
                 }
                 Poll::Ready(Err(e)) => {
@@ -294,21 +295,6 @@ impl futures::Stream for FingerprintingTcpListener {
 
 // Implement Unpin so it works with rustls-acme
 impl Unpin for FingerprintingTcpListener {}
-
-pub fn log_tls_fingerprint(peer: SocketAddr, fingerprint: Option<&TlsFingerprint>) {
-    if let Some(fp) = fingerprint {
-        println!(
-            "TLS client {peer}: ja4={} ja4_raw={} ja4_unsorted={} ja4_raw_unsorted={} version={} sni={} alpn={}",
-            fp.ja4,
-            fp.ja4_raw,
-            fp.ja4_unsorted,
-            fp.ja4_raw_unsorted,
-            fp.tls_version,
-            fp.sni.as_deref().unwrap_or("-"),
-            fp.alpn.as_deref().unwrap_or("-")
-        );
-    }
-}
 
 pub fn ipv4_to_u32_be(ip: Ipv4Addr) -> u32 {
     u32::from_be_bytes(ip.octets())
@@ -886,6 +872,10 @@ async fn manage_acme_certificate(
 pub fn load_custom_server_config(cert: &Path, key: &Path) -> Result<ServerConfigWithCert> {
     let certs = load_certificates(cert)?;
     let key = load_private_key(key)?;
+
+    // Extract certificate info from the first certificate
+    let cert_info = extract_cert_info_from_der(&certs[0]);
+
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs.clone(), key)
@@ -904,6 +894,56 @@ pub fn ensure_mailto(contact: &str) -> String {
     } else {
         format!("mailto:{contact}")
     }
+}
+
+pub fn extract_cert_info_from_der(cert_der: &CertificateDer<'static>) -> Option<ServerCertInfo> {
+    use x509_parser::prelude::*;
+
+    // Parse the X.509 certificate
+    let (_, cert) = X509Certificate::from_der(cert_der.as_ref()).ok()?;
+
+    // Extract subject
+    let subject = cert.subject().to_string();
+
+    // Extract issuer
+    let issuer = cert.issuer().to_string();
+
+    // Extract serial number
+    let serial_number = format!("{:X}", cert.serial);
+
+    // Extract validity dates
+    let validity = cert.validity();
+    let not_before = validity.not_before.to_string();
+    let not_after = validity.not_after.to_string();
+
+    // Calculate SHA256 fingerprint
+    let fingerprint_sha256 = format!("{:x}", sha2::Sha256::digest(cert_der.as_ref()));
+
+    Some(ServerCertInfo {
+        subject,
+        issuer,
+        serial_number,
+        not_before,
+        not_after,
+        fingerprint_sha256,
+    })
+}
+
+pub fn extract_server_cert_info(_config: &ServerConfig) -> Option<ServerCertInfo> {
+    // For now, we'll create a basic certificate info with a placeholder fingerprint
+    // The actual certificate parsing would require additional dependencies
+    // In a production system, you'd want to parse the X.509 certificate properly
+
+    // Create a placeholder certificate info
+    // TODO: Parse actual X.509 certificate to extract real subject, issuer, etc.
+    Some(ServerCertInfo {
+        subject: "CN=placeholder".to_string(),
+        issuer: "CN=placeholder-issuer".to_string(),
+        serial_number: "0000000000000000000000000000000000000000".to_string(),
+        not_before: "2024-01-01T00:00:00Z".to_string(),
+        not_after: "2025-01-01T00:00:00Z".to_string(),
+        fingerprint_sha256: "placeholder_fingerprint".to_string(),
+    })
 }
 
 pub fn build_upstream_uri(incoming: &Uri, upstream: &Uri) -> Result<Uri> {
@@ -1198,7 +1238,6 @@ pub async fn run_custom_tls_proxy(
                 tokio::spawn(async move {
                     let stream = match FingerprintTcpStream::new(stream).await {
                         Ok(s) => {
-                            log_tls_fingerprint(s.peer_addr(), s.fingerprint());
                             s
                         }
                         Err(err) => {
