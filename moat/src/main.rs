@@ -1,6 +1,4 @@
 use std::mem::MaybeUninit;
-use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -12,14 +10,12 @@ use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags};
 use nix::net::if_::if_nametoindex;
 use tokio::net::TcpListener;
 
 pub mod access_rules;
 pub mod app_state;
 pub mod cli;
-pub mod domain_filter;
 pub mod firewall;
 pub mod http;
 pub mod ssl;
@@ -35,10 +31,9 @@ use tokio::sync::watch;
 
 use crate::app_state::AppState;
 use crate::cli::Args;
-use crate::domain_filter::DomainFilter;
 use crate::ssl::{
     ProxyContext, SharedTlsState, TlsMode, install_ring_crypto_provider, load_custom_server_config,
-    run_acme_http01_proxy, run_custom_tls_proxy,
+    run_acme_tls_proxy, run_custom_tls_proxy,
 };
 use crate::utils::bpf_utils;
 
@@ -101,19 +96,6 @@ async fn main() -> Result<()> {
             bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex).unwrap();
             println!("BPF sucessfully attached to xdp");
 
-            let block_ip: Ipv4Addr = Ipv4Addr::from_str("192.168.215.0").unwrap();
-
-            let my_ip_key_bytes =
-                &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(block_ip, 32);
-
-            let map_val = 1_u8;
-
-            skel.maps.recently_banned_ips.update(
-                my_ip_key_bytes,
-                &map_val.to_le_bytes(),
-                MapFlags::ANY,
-            )?;
-
             AppState {
                 skel: Some(Arc::new(skel)),
                 tls_state: tls_state.clone(),
@@ -126,17 +108,6 @@ async fn main() -> Result<()> {
                 tls_state: tls_state.clone(),
             }
         }
-    };
-
-    // Start periodic access rules updater (if BPF is available)
-    let access_rules_handle = {
-        let skel_clone = state.skel.clone();
-        let api_key = args.arxignis_api_key.clone();
-        let rule_id = args.arxignis_rule_id.clone();
-        let shutdown = shutdown_rx.clone();
-        Some(access_rules::start_access_rules_updater(
-            skel_clone, api_key, rule_id, shutdown,
-        ))
     };
 
     // let control_state = state.clone();
@@ -155,26 +126,7 @@ async fn main() -> Result<()> {
         builder.timer(TokioTimer::new());
         builder.pool_timer(TokioTimer::new());
         let client: Client<_, Full<Bytes>> = builder.build_http();
-        
-        // Create domain filter from CLI arguments
-        let domain_filter = DomainFilter::new(
-            args.domain_whitelist.clone(),
-            args.domain_wildcards.clone(),
-        );
-        
-        if domain_filter.is_enabled() {
-            println!(
-                "Domain filtering enabled: {} whitelist entries, {} wildcard patterns",
-                args.domain_whitelist.len(),
-                args.domain_wildcards.len()
-            );
-        }
-        
-        let proxy_ctx = Arc::new(ProxyContext {
-            client,
-            upstream,
-            domain_filter,
-        });
+        let proxy_ctx = Arc::new(ProxyContext { client, upstream });
         match args.tls_mode {
             TlsMode::Custom => {
                 let cert = args.tls_cert_path.as_ref().unwrap();
@@ -186,14 +138,12 @@ async fn main() -> Result<()> {
                 println!("HTTPS proxy listening on https://{}", args.tls_addr);
                 let shutdown = shutdown_rx.clone();
                 let tls_state_clone = tls_state.clone();
-                let skel_clone = state.skel.clone();
                 Some(tokio::spawn(async move {
                     if let Err(err) = run_custom_tls_proxy(
                         listener,
                         config.clone(),
                         proxy_ctx,
                         tls_state_clone,
-                        skel_clone,
                         shutdown,
                     )
                     .await
@@ -203,34 +153,24 @@ async fn main() -> Result<()> {
                 }))
             }
             TlsMode::Acme => {
-                // Bind both HTTP (for ACME challenges + regular HTTP) and HTTPS
-                let http_listener = TcpListener::bind(args.http_addr)
+                let listener = TcpListener::bind(args.tls_addr)
                     .await
-                    .context("failed to bind HTTP socket for ACME HTTP-01")?;
-                let https_listener = TcpListener::bind(args.tls_addr)
-                    .await
-                    .context("failed to bind HTTPS socket")?;
-                    
-                println!("HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)", args.http_addr);
-                println!("HTTPS server (ACME) listening on https://{}", args.tls_addr);
-                
+                    .context("failed to bind TLS socket")?;
+                println!("HTTPS proxy (ACME) listening on https://{}", args.tls_addr);
                 let tls_state_clone = tls_state.clone();
                 let shutdown = shutdown_rx.clone();
                 let args_clone = args.clone();
-                let skel_clone = state.skel.clone();
                 Some(tokio::spawn(async move {
-                    if let Err(err) = run_acme_http01_proxy(
-                        https_listener,
-                        http_listener,
+                    if let Err(err) = run_acme_tls_proxy(
+                        listener,
                         &args_clone,
                         proxy_ctx,
                         tls_state_clone,
-                        skel_clone,
                         shutdown,
                     )
                     .await
                     {
-                        eprintln!("ACME HTTP-01 proxy terminated: {err:?}");
+                        eprintln!("ACME TLS proxy terminated: {err:?}");
                     }
                 }))
             }
@@ -248,12 +188,6 @@ async fn main() -> Result<()> {
         && let Err(err) = handle.await
     {
         eprintln!("TLS task join error: {err}");
-    }
-
-    if let Some(handle) = access_rules_handle
-        && let Err(err) = handle.await
-    {
-        eprintln!("access-rules task join error: {err}");
     }
 
     // if let Err(err) = control_handle.await {
