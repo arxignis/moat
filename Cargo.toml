@@ -40,3 +40,5 @@ bytes = "1.7.1"
 futures = "0.3.31"
 futures-rustls = "0.26.0"
 tls-parser = "0.12.2"
+log = "0.4.28"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }

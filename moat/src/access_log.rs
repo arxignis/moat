@@ -261,7 +261,7 @@ mod tests {
             .method("GET")
             .uri("https://example.com/test?param=value")
             .header("User-Agent", "TestAgent/1.0")
-            .body(Incoming::new())
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
             .unwrap();
 
         // Create a simple response

@@ -1,6 +1,4 @@
-use hyper::StatusCode;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -9,115 +7,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::bpf;
+use crate::config;
+use crate::config::{fetch_config, global_config};
+use crate::wirefilter::update_http_filter_from_config_value;
 use crate::firewall::{Firewall, MOATFirewall};
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct AccessRulesApiResponse {
-    #[serde(deserialize_with = "deserialize_rules_data")]
-    pub data: Vec<Rule>,
-    pub limit: Option<i32>,
-    pub page: Option<i32>,
-    pub success: bool,
-    pub total: Option<i32>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct Rule {
-    pub allow: RuleSet,
-    pub block: RuleSet,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub description: String,
-    pub id: String,
-    #[serde(rename = "is_active")]
-    pub is_active: bool,
-    pub name: String,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct RuleSet {
-    pub asn: Vec<HashMap<String, Vec<String>>>,
-    pub country: Vec<HashMap<String, Vec<String>>>,
-    pub ips: Vec<String>,
-}
-
-pub type Details = serde_json::Value;
 
 // Store previous rules state for comparison
 type PreviousRules = Arc<Mutex<HashSet<(Ipv4Addr, u32)>>>;
 type PreviousRulesV6 = Arc<Mutex<HashSet<(Ipv6Addr, u32)>>>;
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct ErrorResponse {
-    pub details: Details,
-    pub error: String,
-    pub success: bool,
-}
-
-// Accept both list and single-object shapes for `data` and normalize to Vec<Rule>
-fn deserialize_rules_data<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RulesDataInternal {
-        Many(Vec<Rule>),
-        One(Rule),
-    }
-
-    let v = RulesDataInternal::deserialize(deserializer)?;
-    Ok(match v {
-        RulesDataInternal::Many(rules) => rules,
-        RulesDataInternal::One(rule) => vec![rule],
-    })
-}
-
-async fn fetch_access_rules(
-    base_url: String,
-    api_key: String,
-    rule_id: String,
-) -> Result<AccessRulesApiResponse, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .danger_accept_invalid_certs(false)
-        .user_agent("Moat/1.0")
-        .build()?;
-    let url = format!("{}/access-rules/{}", base_url, rule_id);
-
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .query(&[("resolve", "true")])
-        .send()
-        .await?;
-
-    // let status = response.status();
-    // eprintln!("response: {:?}", status);
-
-    // let response_text = response.text().await?;
-    // eprintln!("response: {:?}", response_text);
-
-    match response.status() {
-        StatusCode::OK => {
-            let body: AccessRulesApiResponse = serde_json::from_str(&response.text().await?)?;
-            Ok(body)
-        }
-        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::INTERNAL_SERVER_ERROR => {
-            let body: ErrorResponse = serde_json::from_str(&response.text().await?)?;
-            Err(format!("API Error: {}", body.error).into())
-        }
-
-        status => Err(format!(
-            "Unexpected API status code: {} - {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("Unknown")
-        )
-        .into()),
-
-    }
-}
 
 /// Start a background task that fetches access rules every 10 seconds and
 /// applies them to the `banned_ips` BPF map in the provided skeleton.
@@ -130,9 +27,8 @@ async fn fetch_access_rules(
 /// - Returns: JoinHandle for the spawned task
 pub fn start_access_rules_updater(
     base_url: String,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     api_key: String,
-    rule_id: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     // Initialize previous rules state
@@ -142,8 +38,8 @@ pub fn start_access_rules_updater(
         let mut ticker = interval(Duration::from_secs(10));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), rule_id.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
-            eprintln!("initial access rules update failed: {e}");
+        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), &skels, &previous_rules, &previous_rules_v6).await {
+            log::error!("initial access rules update failed: {e}");
         }
 
         loop {
@@ -152,8 +48,8 @@ pub fn start_access_rules_updater(
                     if *shutdown.borrow() { break; }
                 }
                 _ = ticker.tick() => {
-                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), rule_id.clone(), skel.as_ref(), &previous_rules, &previous_rules_v6).await {
-                        eprintln!("periodic access rules update failed: {e}");
+                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), &skels, &previous_rules, &previous_rules_v6).await {
+                        log::error!("periodic access rules update failed: {e}");
                     }
                 }
             }
@@ -161,24 +57,63 @@ pub fn start_access_rules_updater(
     })
 }
 
-async fn fetch_and_apply(
-    base_url: String,
-    api_key: String,
-    rule_id: String,
-    skel: Option<&Arc<bpf::FilterSkel<'static>>>,
-    previous_rules: &PreviousRules,
-    previous_rules_v6: &PreviousRulesV6,
+/// Apply access rules once using the current global config snapshot
+pub fn init_access_rules_from_global(
+    skels: &Vec<Arc<bpf::FilterSkel<'static>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = fetch_access_rules(base_url.clone(), api_key.clone(), rule_id.clone()).await?;
-    if let Some(s) = skel {
-        apply_rules_to_skel(s, &resp, previous_rules, previous_rules_v6)?;
+    if skels.is_empty() {
+        return Ok(());
+    }
+    if let Ok(guard) = global_config().read() {
+        if let Some(cfg) = guard.as_ref() {
+            // Update WAF wirefilter too to stay consistent
+            if let Err(e) = update_http_filter_from_config_value(cfg) {
+                log::error!("failed to update HTTP filter from config: {e}");
+            }
+            let previous_rules: PreviousRules = Arc::new(Mutex::new(std::collections::HashSet::new()));
+            let previous_rules_v6: PreviousRulesV6 = Arc::new(Mutex::new(std::collections::HashSet::new()));
+            let resp = config::ConfigApiResponse { success: true, config: cfg.clone() };
+            apply_rules(skels, &resp, &previous_rules, &previous_rules_v6)?;
+        }
     }
     Ok(())
 }
 
-fn apply_rules_to_skel(
-    skel: &bpf::FilterSkel<'_>,
-    resp: &AccessRulesApiResponse,
+async fn fetch_and_apply(
+    base_url: String,
+    api_key: String,
+    skels: &Vec<Arc<bpf::FilterSkel<'static>>>,
+    previous_rules: &PreviousRules,
+    previous_rules_v6: &PreviousRulesV6,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Refresh global config from API
+    let _ = fetch_config(base_url, api_key).await;
+
+    // Read from global config and apply if available
+    if let Ok(guard) = global_config().read() {
+        if let Some(cfg) = guard.as_ref() {
+            // Update WAF wirefilter when config changes
+            if let Err(e) = update_http_filter_from_config_value(cfg) {
+                log::error!("failed to update HTTP filter from config: {e}");
+            }
+            if skels.is_empty() {
+                return Ok(());
+            }
+            apply_rules(
+                skels,
+                &config::ConfigApiResponse { success: true, config: cfg.clone() },
+                previous_rules,
+                previous_rules_v6,
+            )?;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn apply_rules(
+    skels: &Vec<Arc<bpf::FilterSkel<'_>>>,
+    resp: &config::ConfigApiResponse,
     previous_rules: &PreviousRules,
     previous_rules_v6: &PreviousRulesV6,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -247,71 +182,67 @@ fn apply_rules_to_skel(
     let mut current_rules: HashSet<(Ipv4Addr, u32)> = HashSet::new();
     let mut current_rules_v6: HashSet<(Ipv6Addr, u32)> = HashSet::new();
 
-    for rule in &resp.data {
-        if !rule.is_active {
-            continue;
-        }
+    let rule = &resp.config.access_rules;
 
-        // Parse block.ips
-        for ip_str in &rule.block.ips {
-            if ip_str.contains(':') {
-                // IPv6 address
-                if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
-                    current_rules_v6.insert((net, prefix));
-                } else {
-                    eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
-                }
+    // Parse block.ips
+    for ip_str in &rule.block.ips {
+        if ip_str.contains(':') {
+            // IPv6 address
+            if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
+                current_rules_v6.insert((net, prefix));
             } else {
-                // IPv4 address
-                if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
-                    current_rules.insert((net, prefix));
-                } else {
-                    eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
-                }
+                log::warn!("invalid IPv6 ip/cidr ignored: {}", ip_str);
+            }
+        } else {
+            // IPv4 address
+            if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
+                current_rules.insert((net, prefix));
+            } else {
+                log::warn!("invalid IPv4 ip/cidr ignored: {}", ip_str);
             }
         }
+    }
 
-        // Parse block.country values
-        for country_map in &rule.block.country {
-            for (_cc, list) in country_map.iter() {
-                for ip_str in list {
-                    if ip_str.contains(':') {
-                        // IPv6 address
-                        if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
-                            current_rules_v6.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
-                        }
+    // Parse block.country values
+    for country_map in &rule.block.country {
+        for (_cc, list) in country_map.iter() {
+            for ip_str in list {
+                if ip_str.contains(':') {
+                    // IPv6 address
+                    if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
+                        current_rules_v6.insert((net, prefix));
                     } else {
-                        // IPv4 address
-                        if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
-                            current_rules.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
-                        }
+                        log::warn!("invalid IPv6 ip/cidr ignored: {}", ip_str);
+                    }
+                } else {
+                    // IPv4 address
+                    if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
+                        current_rules.insert((net, prefix));
+                    } else {
+                        log::warn!("invalid IPv4 ip/cidr ignored: {}", ip_str);
                     }
                 }
             }
         }
+    }
 
-        // Parse block.asn values
-        for asn_map in &rule.block.asn {
-            for (_asn, list) in asn_map.iter() {
-                for ip_str in list {
-                    if ip_str.contains(':') {
-                        // IPv6 address
-                        if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
-                            current_rules_v6.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv6 ip/cidr ignored: {}", ip_str);
-                        }
+    // Parse block.asn values
+    for asn_map in &rule.block.asn {
+        for (_asn, list) in asn_map.iter() {
+            for ip_str in list {
+                if ip_str.contains(':') {
+                    // IPv6 address
+                    if let Some((net, prefix)) = parse_ipv6_ip_or_cidr(ip_str) {
+                        current_rules_v6.insert((net, prefix));
                     } else {
-                        // IPv4 address
-                        if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
-                            current_rules.insert((net, prefix));
-                        } else {
-                            eprintln!("invalid IPv4 ip/cidr ignored: {}", ip_str);
-                        }
+                        log::warn!("invalid IPv6 ip/cidr ignored: {}", ip_str);
+                    }
+                } else {
+                    // IPv4 address
+                    if let Some((net, prefix)) = parse_ipv4_ip_or_cidr(ip_str) {
+                        current_rules.insert((net, prefix));
+                    } else {
+                        log::warn!("invalid IPv4 ip/cidr ignored: {}", ip_str);
                     }
                 }
             }
@@ -326,52 +257,54 @@ fn apply_rules_to_skel(
     let ipv4_changed = *previous_rules_guard != current_rules;
     let ipv6_changed = *previous_rules_v6_guard != current_rules_v6;
 
+    // If neither family changed, skip quietly with a single log entry
     if !ipv4_changed && !ipv6_changed {
-        println!("No changes detected, skipping BPF map updates");
+        log::debug!("No IPv4 or IPv6 access rule changes detected, skipping BPF map updates");
         return Ok(());
     }
 
-    println!("Rules changed, applying updates to BPF maps");
+    log::info!("Access rules changed, applying updates to BPF maps");
 
-    let mut fw = MOATFirewall::new(skel);
+    // Compute diffs once against snapshots
+    let prev_v4_snapshot = previous_rules_guard.clone();
+    let prev_v6_snapshot = previous_rules_v6_guard.clone();
+    let removed_v4: Vec<(Ipv4Addr, u32)> = prev_v4_snapshot.difference(&current_rules).cloned().collect();
+    let added_v4: Vec<(Ipv4Addr, u32)> = current_rules.difference(&prev_v4_snapshot).cloned().collect();
+    let removed_v6: Vec<(Ipv6Addr, u32)> = prev_v6_snapshot.difference(&current_rules_v6).cloned().collect();
+    let added_v6: Vec<(Ipv6Addr, u32)> = current_rules_v6.difference(&prev_v6_snapshot).cloned().collect();
 
-    if ipv4_changed {
-        // Remove old IPv4 rules that are no longer needed
-        for (net, prefix) in previous_rules_guard.difference(&current_rules) {
-            if let Err(e) = fw.unban_ip(*net, *prefix) {
-                eprintln!("IPv4 unban failed for {}/{}: {}", net, prefix, e);
+    // Apply to all BPF skeletons
+    for s in skels.iter() {
+        let mut fw = MOATFirewall::new(s);
+        if ipv4_changed {
+            for (net, prefix) in &removed_v4 {
+                if let Err(e) = fw.unban_ip(*net, *prefix) {
+                    log::error!("IPv4 unban failed for {}/{}: {}", net, prefix, e);
+                }
+            }
+            for (net, prefix) in &added_v4 {
+                if let Err(e) = fw.ban_ip(*net, *prefix) {
+                    log::error!("IPv4 ban failed for {}/{}: {}", net, prefix, e);
+                }
             }
         }
-
-        // Add new IPv4 rules
-        for (net, prefix) in current_rules.difference(&*previous_rules_guard) {
-            if let Err(e) = fw.ban_ip(*net, *prefix) {
-                eprintln!("IPv4 ban failed for {}/{}: {}", net, prefix, e);
+        if ipv6_changed {
+            for (net, prefix) in &removed_v6 {
+                if let Err(e) = fw.unban_ipv6(*net, *prefix) {
+                    log::error!("IPv6 unban failed for {}/{}: {}", net, prefix, e);
+                }
+            }
+            for (net, prefix) in &added_v6 {
+                if let Err(e) = fw.ban_ipv6(*net, *prefix) {
+                    log::error!("IPv6 ban failed for {}/{}: {}", net, prefix, e);
+                }
             }
         }
-
-        // Update previous rules
-        *previous_rules_guard = current_rules;
     }
 
-    if ipv6_changed {
-        // Remove old IPv6 rules that are no longer needed
-        for (net, prefix) in previous_rules_v6_guard.difference(&current_rules_v6) {
-            if let Err(e) = fw.unban_ipv6(*net, *prefix) {
-                eprintln!("IPv6 unban failed for {}/{}: {}", net, prefix, e);
-            }
-        }
-
-        // Add new IPv6 rules
-        for (net, prefix) in current_rules_v6.difference(&*previous_rules_v6_guard) {
-            if let Err(e) = fw.ban_ipv6(*net, *prefix) {
-                eprintln!("IPv6 ban failed for {}/{}: {}", net, prefix, e);
-            }
-        }
-
-        // Update previous rules
-        *previous_rules_v6_guard = current_rules_v6;
-    }
+    // Update previous snapshots once after applying to all skels
+    if ipv4_changed { *previous_rules_guard = current_rules; }
+    if ipv6_changed { *previous_rules_v6_guard = current_rules_v6; }
 
     Ok(())
 }
