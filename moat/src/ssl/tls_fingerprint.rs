@@ -56,6 +56,7 @@ enum TlsVersion {
     V1_1,
     V1_0,
     Ssl3_0,
+    #[allow(dead_code)]
     Ssl2_0,
     Unknown(u16),
 }
@@ -351,8 +352,6 @@ fn cipher_suite_to_string(cipher_suite: u16) -> String {
         0xc02c => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384".to_string(),
         0xcca8 => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
         0xcca9 => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
-        0xc02f => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
-        0xc030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         0x009e => "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         0x009f => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         0x0035 => "TLS_RSA_WITH_AES_128_GCM_SHA256".to_string(),
@@ -360,7 +359,6 @@ fn cipher_suite_to_string(cipher_suite: u16) -> String {
 
         // Legacy cipher suites
         0x002f => "TLS_RSA_WITH_AES_128_CBC_SHA".to_string(),
-        0x0035 => "TLS_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         0x003c => "TLS_RSA_WITH_AES_128_CBC_SHA256".to_string(),
         0x003d => "TLS_RSA_WITH_AES_256_CBC_SHA256".to_string(),
 

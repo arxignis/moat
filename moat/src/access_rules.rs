@@ -78,7 +78,12 @@ async fn fetch_access_rules(
     api_key: String,
     rule_id: String,
 ) -> Result<AccessRulesApiResponse, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(false)
+        .user_agent("Moat/1.0")
+        .build()?;
     let url = format!("{}/access-rules/{}", base_url, rule_id);
 
     let response = client

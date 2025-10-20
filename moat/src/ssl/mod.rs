@@ -7,7 +7,6 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
-use std::env;
 use gethostname::gethostname;
 use local_ip_address::local_ip;
 
@@ -30,7 +29,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
+    Account, AccountCredentials, ChallengeType, Identifier, LetsEncrypt,
     NewAccount, NewOrder, OrderStatus,
 };
 use libbpf_rs::{MapCore, MapFlags};
@@ -226,7 +225,7 @@ impl AsRef<TcpStream> for FingerprintTcpStream {
 // Custom stream wrapper that implements Unpin for use with rustls-acme
 pub struct FingerprintingTcpListener {
     inner: TcpListenerStream,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    _skel: Option<Arc<bpf::FilterSkel<'static>>>,
     pending: Option<
         Pin<
             Box<
@@ -242,7 +241,7 @@ impl FingerprintingTcpListener {
     pub fn new(inner: TcpListenerStream, skel: Option<Arc<bpf::FilterSkel<'static>>>) -> Self {
         Self {
             inner,
-            skel,
+            _skel: skel,
             pending: None,
         }
     }
@@ -255,7 +254,7 @@ impl futures::Stream for FingerprintingTcpListener {
         // If we have a pending fingerprinting task, poll it
         if let Some(mut fut) = self.pending.take() {
             match fut.as_mut().poll(cx) {
-                Poll::Ready(Ok((stream, fp, peer))) => {
+                Poll::Ready(Ok((stream, _fp, _peer))) => {
                     return Poll::Ready(Some(Ok(stream)));
                 }
                 Poll::Ready(Err(e)) => {
@@ -1083,7 +1082,7 @@ pub async fn proxy_http_service(
     }
 
     match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
-        Ok(mut response) => {
+        Ok(response) => {
             // Capture response body for logging
             let (response_parts, response_body) = response.into_parts();
             let response_body_bytes = match response_body.collect().await {
@@ -1553,12 +1552,12 @@ async fn handle_http_connection(
     // Simple HTTP proxy without TLS
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
-    use hyper_util::rt::TokioExecutor;
+
     use hyper_util::rt::TokioIo;
 
     let service = service_fn(move |req| {
         let ctx = ctx.clone();
-        let skel = skel.clone();
+        let _skel = skel.clone();
         async move {
             proxy_http_service(req, ctx, Some(peer), None, None).await
         }
