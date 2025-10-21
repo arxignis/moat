@@ -218,7 +218,7 @@ impl HttpAccessLog {
 
     pub fn log_to_stdout(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = self.to_json()?;
-        println!("{}", json);
+        log::info!("{}", json);
         Ok(())
     }
 }
