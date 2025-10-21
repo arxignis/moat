@@ -1,6 +1,4 @@
 use std::mem::MaybeUninit;
-use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -12,7 +10,6 @@ use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags};
 use nix::net::if_::if_nametoindex;
 use tokio::net::TcpListener;
 
@@ -46,11 +43,13 @@ use crate::ssl::{
     run_acme_http01_proxy, run_custom_tls_proxy, run_http_proxy,
 };
 use crate::arxignis::{ArxignisClient, ArxignisMode, CaptchaConfig, CaptchaProvider};
+use crate::wirefilter::init_config;
 use crate::utils::bpf_utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     install_ring_crypto_provider()?;
+
     let args = Args::parse();
 
     // Initialize logger using CLI level
@@ -62,23 +61,12 @@ async fn main() -> Result<()> {
         builder.try_init().ok();
     }
 
-    // TLS custom mode sanity check
-    if args.tls_mode == TlsMode::Custom
-        && (args.tls_cert_path.is_none() || args.tls_key_path.is_none())
-    {
-        return Err(anyhow!(
-            "--tls-cert-path and --tls-key-path are required for custom TLS mode",
-        ));
-    }
-
-    // Determine which interfaces to attach XDP on
     let iface_names: Vec<String> = if !args.iface.is_empty() {
         vec![args.iface.clone()]
     } else {
         vec![args.iface.clone()]
     };
 
-    // Attach BPF/XDP to one or more interfaces; keep all skels alive
     let mut skels: Vec<Arc<bpf::FilterSkel<'static>>> = Vec::new();
 
     if args.disable_xdp {
@@ -101,20 +89,7 @@ async fn main() -> Result<()> {
                         log::error!("failed to attach XDP to '{}': {e}", iface);
                         continue;
                     }
-                    println!("BPF sucessfully attached to xdp on {}", iface);
-
-                    // Example: write an entry into the recently_banned_ips map (from incoming branch)
-                    let block_ip: Ipv4Addr = Ipv4Addr::from_str("192.168.215.123").unwrap();
-                    let my_ip_key_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(block_ip, 32);
-                    let map_val = 1_u8;
-                    if let Err(e) = skel.maps.recently_banned_ips.update(
-                        my_ip_key_bytes,
-                        &map_val.to_le_bytes(),
-                        MapFlags::ANY,
-                    ) {
-                        log::warn!("failed to update recently_banned_ips map on '{}': {e}", iface);
-                    }
-
+                    log::info!("BPF sucessfully attached to xdp on {}", iface);
                     skels.push(Arc::new(skel));
                 }
                 Err(e) => {
@@ -122,16 +97,26 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        // Initialize access rules immediately after XDP attachment
+        if !skels.is_empty() {
+            let _ = access_rules::init_access_rules_from_global(&skels);
+        }
     }
 
-    // Shared TLS state
+    if args.tls_mode == TlsMode::Custom
+        && (args.tls_cert_path.is_none() || args.tls_key_path.is_none())
+    {
+        return Err(anyhow!(
+            "--tls-cert-path and --tls-key-path are required for custom TLS mode",
+        ));
+    }
     let tls_state = SharedTlsState::new(
         args.tls_mode,
         args.acme_domains.clone(),
         args.tls_cert_path.as_ref().map(|p| p.display().to_string()),
     );
 
-    // App state: prefer the first attached skel as "primary" for control-plane integrations
     let state = AppState {
         skels: skels.clone(),
         tls_state: tls_state.clone(),
@@ -139,9 +124,22 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Parse upstream URI if provided
-    let upstream_uri = if let Some(upstream) = args.upstream.as_ref() {
-        let parsed = upstream
+    // Initialize wirefilter config
+    if !args.arxignis_base_url.is_empty() && !args.arxignis_api_key.is_empty() {
+        if let Err(e) = init_config(
+            args.arxignis_base_url.clone(),
+            args.arxignis_api_key.clone(),
+        ).await {
+            log::warn!("Failed to initialize HTTP filter with config: {}", e);
+        }
+    } else {
+        log::warn!("No API credentials provided, HTTP filter will not be initialized");
+    }
+
+    let upstream_uri = {
+        let upstream_str = args.upstream.as_ref()
+            .ok_or_else(|| anyhow!("--upstream is required"))?;
+        let parsed = upstream_str
             .parse::<Uri>()
             .context("failed to parse --upstream as URI")?;
         if parsed.scheme().is_none() || parsed.authority().is_none() {
@@ -149,20 +147,11 @@ async fn main() -> Result<()> {
                 "upstream URI must be absolute (e.g. http://127.0.0.1:8081)",
             ));
         }
-        Some(parsed)
-    } else {
-        None
+        parsed
     };
 
-    // Apply access rules immediately from current global config snapshot (only if XDP is enabled)
-    if !skels.is_empty() {
-        let _ = access_rules::init_access_rules_from_global(&skels);
-    } else {
-        log::info!("Skipping access rules initialization (XDP disabled)");
-    }
-
-    // Start periodic access rules updater (if BPF is available) — remediation/WAF API with rule_id
-    let access_rules_handle = {
+    // Start periodic access rules updater (if BPF is available)
+    let access_rules_handle = if !state.skels.is_empty() {
         let skel_clone = state.skels.clone();
         let api_key = args.arxignis_api_key.clone();
         let base_url = args.arxignis_base_url.clone();
@@ -170,23 +159,26 @@ async fn main() -> Result<()> {
         Some(access_rules::start_access_rules_updater(
             base_url, skel_clone, api_key, shutdown,
         ))
+    } else {
+        log::info!("Skipping access rules updater (XDP disabled)");
+        None
     };
 
-    // Start TLS/HTTP proxy layer if we have an upstream
-    let tls_handle = if let Some(upstream) = upstream_uri.clone() {
+    let tls_handle = {
         let mut builder = Client::builder(TokioExecutor::new());
         builder.timer(TokioTimer::new());
         builder.pool_timer(TokioTimer::new());
         let client: Client<_, Full<Bytes>> = builder.build_http();
 
-        // Create domain filter from CLI arguments (use acme_domains as allow-list)
+        // Create domain filter from CLI arguments
+        // Use acme_domains as the whitelist (serves dual purpose)
         let domain_filter = DomainFilter::new(
             args.acme_domains.clone(),
             args.domain_wildcards.clone(),
         );
 
         if domain_filter.is_enabled() {
-            println!(
+            log::info!(
                 "Domain filtering enabled: {} domain(s), {} wildcard pattern(s)",
                 args.acme_domains.len(),
                 args.domain_wildcards.len()
@@ -211,7 +203,7 @@ async fn main() -> Result<()> {
 
         let proxy_ctx = Arc::new(ProxyContext {
             client,
-            upstream,
+            upstream: upstream_uri.clone(),
             domain_filter,
             tls_only: args.tls_only,
             arxignis: arx_client,
@@ -225,7 +217,7 @@ async fn main() -> Result<()> {
                 let listener = TcpListener::bind(args.tls_addr)
                     .await
                     .context("failed to bind TLS socket")?;
-                println!("HTTPS proxy listening on https://{}", args.tls_addr);
+                log::info!("HTTPS proxy listening on https://{}", args.tls_addr);
                 let shutdown = shutdown_rx.clone();
                 let tls_state_clone = tls_state.clone();
                 let skel_clone = state.skels.first().cloned();
@@ -240,12 +232,11 @@ async fn main() -> Result<()> {
                     )
                     .await
                     {
-                        eprintln!("custom TLS proxy terminated: {err:?}");
+                        log::error!("custom TLS proxy terminated: {err:?}");
                     }
                 }))
             }
             TlsMode::Acme => {
-                // Bind both HTTP (for ACME challenges + regular HTTP) and HTTPS
                 let http_listener = TcpListener::bind(args.http_addr)
                     .await
                     .context("failed to bind HTTP socket for ACME HTTP-01")?;
@@ -253,8 +244,8 @@ async fn main() -> Result<()> {
                     .await
                     .context("failed to bind HTTPS socket")?;
 
-                println!("HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)", args.http_addr);
-                println!("HTTPS server (ACME) listening on https://{}", args.tls_addr);
+                log::info!("HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)", args.http_addr);
+                log::info!("HTTPS server (ACME) listening on https://{}", args.tls_addr);
 
                 let tls_state_clone = tls_state.clone();
                 let shutdown = shutdown_rx.clone();
@@ -272,7 +263,7 @@ async fn main() -> Result<()> {
                     )
                     .await
                     {
-                        eprintln!("ACME HTTP-01 proxy terminated: {err:?}");
+                        log::error!("ACME HTTP-01 proxy terminated: {err:?}");
                     }
                 }))
             }
@@ -281,7 +272,7 @@ async fn main() -> Result<()> {
                 let listener = TcpListener::bind(args.http_addr)
                     .await
                     .context("failed to bind HTTP socket")?;
-                println!("HTTP proxy listening on http://{}", args.http_addr);
+                log::info!("HTTP proxy listening on http://{}", args.http_addr);
                 let shutdown = shutdown_rx.clone();
                 let skel_clone = state.skels.first().cloned();
                 Some(tokio::spawn(async move {
@@ -293,29 +284,27 @@ async fn main() -> Result<()> {
                     )
                     .await
                     {
-                        eprintln!("HTTP proxy terminated: {err:?}");
+                        log::error!("HTTP proxy terminated: {err:?}");
                     }
                 }))
             }
         }
-    } else {
-        None
     };
 
     signal::ctrl_c().await?;
-    println!("Shutdown signal received, stopping servers...");
+    log::info!("Shutdown signal received, stopping servers...");
     let _ = shutdown_tx.send(true);
 
     if let Some(handle) = tls_handle
         && let Err(err) = handle.await
     {
-        eprintln!("TLS task join error: {err}");
+        log::error!("TLS task join error: {err}");
     }
 
     if let Some(handle) = access_rules_handle
         && let Err(err) = handle.await
     {
-        eprintln!("access-rules task join error: {err}");
+        log::error!("access-rules task join error: {err}");
     }
 
     Ok(())
