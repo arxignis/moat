@@ -1,9 +1,17 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use clap::Parser;
-use clap::ValueEnum;
+use clap::{Parser, ValueEnum};
 
 use crate::ssl::TlsMode;
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -16,17 +24,9 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:80")]
     pub http_addr: SocketAddr,
 
-    /// Additional HTTP bind addresses (comma-separated). If set, overrides http_addr.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub http_bind: Vec<SocketAddr>,
-
     /// HTTPS reverse-proxy bind address.
     #[arg(long, default_value = "0.0.0.0:443")]
     pub tls_addr: SocketAddr,
-
-    /// Additional HTTPS bind addresses (comma-separated). If set, overrides tls_addr.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub tls_bind: Vec<SocketAddr>,
 
     /// TLS operating mode.
     #[arg(long, value_enum, default_value_t = TlsMode::Disabled)]
@@ -39,7 +39,7 @@ pub struct Args {
 
     /// Upstream origin URL (required unless TLS is disabled).
     #[arg(long)]
-    pub upstream: String,
+    pub upstream: Option<String>,
 
     /// Path to custom certificate (PEM) when using custom TLS mode.
     #[arg(long)]
@@ -86,16 +86,12 @@ pub struct Args {
     pub redis_url: String,
 
     /// Namespace prefix for Redis ACME cache entries.
-    #[arg(long, default_value = "arxignis:acme")]
+    #[arg(long, default_value = "bpf-firewall:acme")]
     pub redis_prefix: String,
 
     /// The network interface to attach the XDP program to.
     #[arg(short, long, default_value = "eth0")]
     pub iface: String,
-
-    /// Additional network interfaces for XDP attach (comma-separated). If set, overrides --iface.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub ifaces: Vec<String>,
 
     #[arg(long)]
     pub arxignis_api_key: String,
@@ -104,10 +100,9 @@ pub struct Args {
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
     pub arxignis_base_url: String,
 
-    /// Domain whitelist (exact matches, comma separated or repeated).
-    /// If specified, only requests to these domains will be allowed.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub domain_whitelist: Vec<String>,
+    // TODO: make it be able to add a list of ids
+    #[arg(long)]
+    pub arxignis_rule_id: String,
 
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
@@ -116,25 +111,28 @@ pub struct Args {
     /// Disable XDP packet filtering (run without BPF/XDP)
     #[arg(long, default_value_t = false)]
     pub disable_xdp: bool,
-}
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
-}
+    /// Mode for Arxignis decisions: monitor or block
+    #[arg(long, default_value = "monitor")]
+    pub arxignis_mode: String,
 
-impl LogLevel {
-    pub fn to_level_filter(self) -> log::LevelFilter {
-        match self {
-            LogLevel::Error => log::LevelFilter::Error,
-            LogLevel::Warn => log::LevelFilter::Warn,
-            LogLevel::Info => log::LevelFilter::Info,
-            LogLevel::Debug => log::LevelFilter::Debug,
-            LogLevel::Trace => log::LevelFilter::Trace,
-        }
-    }
+    /// Optional CAPTCHA provider: turnstile|recaptcha|hcaptcha
+    #[arg(long)]
+    pub captcha_provider: Option<String>,
+
+    /// CAPTCHA site key
+    #[arg(long)]
+    pub captcha_site_key: Option<String>,
+
+    /// CAPTCHA secret key
+    #[arg(long)]
+    pub captcha_secret_key: Option<String>,
+
+    /// Path to CAPTCHA HTML template
+    #[arg(long)]
+    pub captcha_template_path: Option<PathBuf>,
+
+    /// HTTP status code for CAPTCHA page (default 200)
+    #[arg(long, default_value_t = 200)]
+    pub captcha_http_status_code: u16,
 }
