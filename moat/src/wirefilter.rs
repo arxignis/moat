@@ -5,6 +5,7 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use wirefilter::{ExecutionContext, Scheme, TypedArray, TypedMap};
 use crate::config::{Config, fetch_config};
+use crate::threat;
 use anyhow::anyhow;
 
 /// Wirefilter-based HTTP request filtering engine
@@ -32,6 +33,12 @@ impl HttpFilter {
             http.request.body_sha256: Bytes,
             http.request.headers: Map(Array(Bytes)),
             ip.src: Ip,
+            ip.src.country: Bytes,
+            ip.src.asn: Int,
+            ip.src.asn_org: Bytes,
+            ip.src.asn_country: Bytes,
+            threat.score: Int,
+            threat.advice: Bytes,
         };
 
         // Register functions used in Cloudflare-style expressions
@@ -173,7 +180,7 @@ impl HttpFilter {
     }
 
     /// Check if the given HTTP request should be blocked using request parts and body bytes
-    pub fn should_block_request_from_parts(
+    pub async fn should_block_request_from_parts(
         &self,
         req_parts: &hyper::http::request::Parts,
         body_bytes: &[u8],
@@ -291,6 +298,95 @@ impl HttpFilter {
             self.scheme.get_field("ip.src").unwrap(),
             peer_addr.ip(),
         )?;
+
+        // Fetch threat intelligence data for the source IP
+        let _threat_fields = match threat::get_waf_fields(&peer_addr.ip().to_string()).await {
+            Ok(Some(waf_fields)) => {
+                // Set threat intelligence fields
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.country").unwrap(),
+                    waf_fields.ip_src_country.clone(),
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn").unwrap(),
+                    waf_fields.ip_src_asn as i64,
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn_org").unwrap(),
+                    waf_fields.ip_src_asn_org.clone(),
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn_country").unwrap(),
+                    waf_fields.ip_src_asn_country.clone(),
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("threat.score").unwrap(),
+                    waf_fields.threat_score as i64,
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("threat.advice").unwrap(),
+                    waf_fields.threat_advice.clone(),
+                )?;
+                Some(waf_fields)
+            }
+            Ok(None) => {
+                // No threat data found, set default values
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.country").unwrap(),
+                    "",
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn").unwrap(),
+                    0i64,
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn_org").unwrap(),
+                    "",
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn_country").unwrap(),
+                    "",
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("threat.score").unwrap(),
+                    0i64,
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("threat.advice").unwrap(),
+                    "",
+                )?;
+                None
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch threat intelligence for {}: {}", peer_addr.ip(), e);
+                // Set default values on error
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.country").unwrap(),
+                    "",
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn").unwrap(),
+                    0i64,
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn_org").unwrap(),
+                    "",
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("ip.src.asn_country").unwrap(),
+                    "",
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("threat.score").unwrap(),
+                    0i64,
+                )?;
+                ctx.set_field_value(
+                    self.scheme.get_field("threat.advice").unwrap(),
+                    "",
+                )?;
+                None
+            }
+        };
 
         // Execute the filter
         let filter_guard = self.filter.read().unwrap();
@@ -415,8 +511,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
 
-    #[test]
-    fn test_custom_filter() -> Result<()> {
+    #[tokio::test]
+    async fn test_custom_filter() -> Result<()> {
         // Test a custom filter that blocks requests to specific host
         let filter = HttpFilter::new("http.request.host == \"blocked.example.com\"")?;
 
@@ -427,7 +523,7 @@ mod tests {
         let (req_parts, _) = req.into_parts();
 
         let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
-        let should_block = filter.should_block_request_from_parts(&req_parts, b"", peer_addr)?;
+        let should_block = filter.should_block_request_from_parts(&req_parts, b"", peer_addr).await?;
         assert!(should_block, "Request to blocked host should be blocked");
 
         Ok(())

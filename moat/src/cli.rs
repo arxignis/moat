@@ -86,7 +86,7 @@ pub struct Args {
     pub redis_url: String,
 
     /// Namespace prefix for Redis ACME cache entries.
-    #[arg(long, default_value = "arxignis:acme")]
+    #[arg(long, default_value = "ax:moat")]
     pub redis_prefix: String,
 
     /// The network interface to attach the XDP program to.

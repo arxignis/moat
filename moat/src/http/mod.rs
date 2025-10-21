@@ -1223,7 +1223,7 @@ pub async fn proxy_http_service(
 
     // Apply wirefilter rules before forwarding to upstream
     if let Some(filter) = get_global_http_filter() {
-        match filter.should_block_request_from_parts(&req_parts, &req_body_bytes, peer_addr) {
+        match filter.should_block_request_from_parts(&req_parts, &req_body_bytes, peer_addr).await {
             Ok(true) => {
                 log::info!("Request blocked by wirefilter from {}: {} {}",
                     peer_addr, req_parts.method, req_parts.uri);
@@ -1469,7 +1469,7 @@ pub async fn run_acme_http01_proxy(
         .await;
 
     // Initialize Redis cache
-    let redis_cache = RedisAcmeCache::new(&args.redis_url, args.redis_prefix.clone()).await?;
+    let redis_cache = RedisAcmeCache::new(&args.redis_url, args.redis_prefix.clone() + ":acme").await?;
 
     // Shared store for HTTP-01 challenge tokens
     let challenge_store: ChallengeStore = Arc::new(RwLock::new(std::collections::HashMap::new()));
