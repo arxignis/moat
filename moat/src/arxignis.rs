@@ -348,6 +348,7 @@ pub fn build_event_from_request(
 }
 
 pub fn extract_captcha_response(provider: &Option<CaptchaProvider>, _headers: &HeaderMap, body: &Bytes) -> Option<String> {
+    // First try form body for POSTs
     if !body.is_empty() {
         if let Ok(body_str) = std::str::from_utf8(body) {
             let pairs = form_urlencoded::parse(body_str.as_bytes());
@@ -382,7 +383,6 @@ pub fn build_block_response(html: String, status: u16) -> hyper::Response<http_b
 }
 
 pub fn render_captcha_page(template: &str, provider: &CaptchaProvider, site_key: &str) -> String {
-    // Very small template substitution compatible with our templates
     template
         .replace("{{captcha_site_key}}", site_key)
         .replace("{{captcha_frontend_js}}", provider.frontend_js())

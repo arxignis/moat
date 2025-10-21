@@ -13,6 +13,18 @@ pub enum LogLevel {
     Trace,
 }
 
+impl LogLevel {
+    pub fn to_level_filter(self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
