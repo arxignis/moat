@@ -59,7 +59,66 @@ async fn main() -> Result<()> {
         builder.try_init().ok();
     }
 
-    // Initialize config and HTTP filter if API credentials are provided
+
+    let iface_names: Vec<String> = if !args.ifaces.is_empty() {
+        args.ifaces.clone()
+    } else {
+        vec![args.iface.clone()]
+    };
+
+    let mut skels: Vec<Arc<bpf::FilterSkel<'static>>> = Vec::new();
+
+    if args.disable_xdp {
+        log::info!("XDP disabled by --disable-xdp flag, skipping BPF attachment");
+    } else {
+        for iface in iface_names {
+            let boxed_open: Box<MaybeUninit<libbpf_rs::OpenObject>> = Box::new(MaybeUninit::uninit());
+            let open_object: &'static mut MaybeUninit<libbpf_rs::OpenObject> = Box::leak(boxed_open);
+            let skel_builder = bpf::FilterSkelBuilder::default();
+            match skel_builder.open(open_object).and_then(|o| o.load()) {
+                Ok(mut skel) => {
+                    let ifindex = match if_nametoindex(iface.as_str()) {
+                        Ok(index) => index as i32,
+                        Err(e) => {
+                            log::error!("failed to get interface index for '{}': {e}", iface);
+                            continue;
+                        }
+                    };
+                    if let Err(e) = bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex) {
+                        log::error!("failed to attach XDP to '{}': {e}", iface);
+                        continue;
+                    }
+                    log::info!("BPF sucessfully attached to xdp on {}", iface);
+                    skels.push(Arc::new(skel));
+                }
+                Err(e) => {
+                    log::warn!("failed to load BPF skeleton for '{}': {e}", iface);
+                }
+            }
+        }
+    }
+
+    if args.tls_mode == TlsMode::Custom
+        && (args.tls_cert_path.is_none() || args.tls_key_path.is_none())
+    {
+        return Err(anyhow!(
+            "--tls-cert-path and --tls-key-path are required for custom TLS mode",
+        ));
+    }
+    let tls_state = SharedTlsState::new(
+        args.tls_mode,
+        args.acme_domains.clone(),
+        args.tls_cert_path.as_ref().map(|p| p.display().to_string()),
+    );
+
+    let state = AppState {
+        skels: skels.clone(),
+        tls_state: tls_state.clone(),
+    };
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Build list of interfaces to attach
     if !args.arxignis_base_url.is_empty() && !args.arxignis_api_key.is_empty() {
         if let Err(e) = init_config(
             args.arxignis_base_url.clone(),
@@ -87,81 +146,25 @@ async fn main() -> Result<()> {
         parsed
     };
 
-    if args.tls_mode == TlsMode::Custom
-        && (args.tls_cert_path.is_none() || args.tls_key_path.is_none())
-    {
-        return Err(anyhow!(
-            "--tls-cert-path and --tls-key-path are required for custom TLS mode",
-        ));
-    }
 
-    let tls_state = SharedTlsState::new(
-        args.tls_mode,
-        args.acme_domains.clone(),
-        args.tls_cert_path.as_ref().map(|p| p.display().to_string()),
-    );
-
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    // Build list of interfaces to attach
-    let iface_names: Vec<String> = if !args.ifaces.is_empty() {
-        args.ifaces.clone()
+    // Apply access rules immediately from current global config snapshot (only if XDP is enabled)
+    if !state.skels.is_empty() {
+        let _ = access_rules::init_access_rules_from_global(&state.skels);
     } else {
-        vec![args.iface.clone()]
-    };
-
-    let mut skels: Vec<Arc<bpf::FilterSkel<'static>>> = Vec::new();
-    for iface in iface_names {
-        let boxed_open: Box<MaybeUninit<libbpf_rs::OpenObject>> = Box::new(MaybeUninit::uninit());
-        let open_object: &'static mut MaybeUninit<libbpf_rs::OpenObject> = Box::leak(boxed_open);
-        let skel_builder = bpf::FilterSkelBuilder::default();
-        match skel_builder.open(open_object).and_then(|o| o.load()) {
-            Ok(mut skel) => {
-                let ifindex = match if_nametoindex(iface.as_str()) {
-                    Ok(index) => index as i32,
-                    Err(e) => {
-                        log::error!("failed to get interface index for '{}': {e}", iface);
-                        continue;
-                    }
-                };
-                if let Err(e) = bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex) {
-                    log::error!("failed to attach XDP to '{}': {e}", iface);
-                    continue;
-                }
-                log::info!("BPF sucessfully attached to xdp on {}", iface);
-                skels.push(Arc::new(skel));
-            }
-            Err(e) => {
-                log::warn!("failed to load BPF skeleton for '{}': {e}", iface);
-            }
-        }
+        log::info!("Skipping access rules initialization (XDP disabled)");
     }
-
-    let state = AppState {
-        skels,
-        tls_state: tls_state.clone(),
-    };
-
-    // Apply access rules immediately from current global config snapshot
-    let _ = access_rules::init_access_rules_from_global(&state.skels);
 
     // Start periodic access rules updater (if BPF is available)
-    let access_rules_handle = {
+    let access_rules_handle = if !state.skels.is_empty() {
         let skels = state.skels.clone();
         let api_key = args.arxignis_api_key.clone();
         let base_url = args.arxignis_base_url.clone();
         let shutdown = shutdown_rx.clone();
         Some(access_rules::start_access_rules_updater(base_url, skels, api_key, shutdown))
+    } else {
+        log::info!("Skipping access rules updater (XDP disabled)");
+        None
     };
-
-    // let control_state = state.clone();
-    // let control_shutdown = shutdown_rx.clone();
-    // let control_handle = tokio::spawn(async move {
-    //     if let Err(err) = run_control_plane(control_listener, control_state, control_shutdown).await
-    //     {
-    //         eprintln!("control-plane task terminated: {err:?}");
-    //     }
-    // });
 
     let tls_handle = {
         let mut builder = Client::builder(TokioExecutor::new());
@@ -170,8 +173,9 @@ async fn main() -> Result<()> {
         let client: Client<_, Full<Bytes>> = builder.build_http();
 
         // Create domain filter from CLI arguments
+        // Use acme_domains as the whitelist (serves dual purpose)
         let domain_filter = DomainFilter::new(
-            args.domain_whitelist.clone(),
+            args.acme_domains.clone(),
             args.domain_wildcards.clone(),
         );
 
@@ -352,10 +356,6 @@ async fn main() -> Result<()> {
     {
         log::error!("access-rules task join error: {err}");
     }
-
-    // if let Err(err) = control_handle.await {
-    //     eprintln!("control-plane join error: {err}");
-    // }
 
     Ok(())
 }

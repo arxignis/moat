@@ -311,41 +311,26 @@ fn hash12(input: &str) -> String {
     hex[..12].to_string()
 }
 
-/// Calculate JA4L (JA4Latency) based on packet size and timing characteristics.
-/// JA4L measures client-to-server latency by analyzing the initial packet characteristics.
-///
-/// The format is typically: "client_rtt_server_rtt_packet_size"
-/// where RTT values are in microseconds and packet size is in bytes.
+/// Calculate JA4L (latency-like fingerprint) based on packet size.
 fn calculate_ja4l(packet_size: usize) -> String {
-    // For now, we'll use a simplified calculation based on packet size
-    // In a real implementation, you would measure actual RTT timing
-
-    // Estimate RTT based on packet size (larger packets may indicate higher latency)
     let estimated_client_rtt = if packet_size > 1500 {
-        50  // Higher latency for large packets
+        50
     } else if packet_size > 1000 {
-        30  // Medium latency
+        30
     } else {
-        10  // Lower latency for smaller packets
+        10
     };
-
-    let estimated_server_rtt = estimated_client_rtt + 5; // Server typically adds some processing time
-
-    // Format: client_rtt_server_rtt_packet_size
+    let estimated_server_rtt = estimated_client_rtt + 5;
     format!("{}_{}_{}", estimated_client_rtt, estimated_server_rtt, packet_size)
 }
 
-/// Convert cipher suite code to its string representation
 fn cipher_suite_to_string(cipher_suite: u16) -> String {
     match cipher_suite {
-        // TLS 1.3 cipher suites
         0x1301 => "TLS_AES_128_GCM_SHA256".to_string(),
         0x1302 => "TLS_AES_256_GCM_SHA384".to_string(),
         0x1303 => "TLS_CHACHA20_POLY1305_SHA256".to_string(),
         0x1304 => "TLS_AES_128_CCM_SHA256".to_string(),
         0x1305 => "TLS_AES_128_CCM_8_SHA256".to_string(),
-
-        // TLS 1.2 cipher suites
         0xc02f => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         0xc030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         0xc02b => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_string(),
@@ -356,13 +341,9 @@ fn cipher_suite_to_string(cipher_suite: u16) -> String {
         0x009f => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         0x0035 => "TLS_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         0x0036 => "TLS_RSA_WITH_AES_256_GCM_SHA384".to_string(),
-
-        // Legacy cipher suites
         0x002f => "TLS_RSA_WITH_AES_128_CBC_SHA".to_string(),
         0x003c => "TLS_RSA_WITH_AES_128_CBC_SHA256".to_string(),
         0x003d => "TLS_RSA_WITH_AES_256_CBC_SHA256".to_string(),
-
-        // Default fallback
         _ => format!("UNKNOWN_CIPHER_{:04x}", cipher_suite),
     }
 }

@@ -32,11 +32,12 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = TlsMode::Disabled)]
     pub tls_mode: TlsMode,
 
-    /// Reject non-SSL requests when TLS mode is disabled (TLS-only mode).
+    /// Require TLS for application traffic (HTTP used only for ACME).
+    /// If enabled, plain HTTP requests (except ACME) will be rejected with 426.
     #[arg(long, default_value_t = false)]
     pub tls_only: bool,
 
-    /// Upstream origin URL (always required).
+    /// Upstream origin URL (required unless TLS is disabled).
     #[arg(long)]
     pub upstream: String,
 
@@ -48,9 +49,17 @@ pub struct Args {
     #[arg(long)]
     pub tls_key_path: Option<PathBuf>,
 
-    /// Domains for ACME certificate issuance (comma separated or repeated).
+    /// Domains for ACME certificate issuance and domain whitelist (comma separated or repeated).
+    /// These domains will be used for SSL certificate generation and domain filtering.
+    /// Only requests to these domains (or matching wildcards) will be allowed.
     #[arg(long, value_delimiter = ',', num_args = 0..)]
     pub acme_domains: Vec<String>,
+
+    /// Domain wildcard patterns for filtering (comma separated or repeated).
+    /// Supports wildcards: *.example.com, api.*.example.com
+    /// These are checked along with acme_domains (OR logic).
+    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    pub domain_wildcards: Vec<String>,
 
     /// ACME contact addresses (mailto: optional, comma separated or repeated).
     #[arg(long, value_delimiter = ',', num_args = 0..)]
@@ -91,6 +100,7 @@ pub struct Args {
     #[arg(long)]
     pub arxignis_api_key: String,
 
+    /// Base URL for Arx Ignis API.
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
     pub arxignis_base_url: String,
 
@@ -99,15 +109,13 @@ pub struct Args {
     #[arg(long, value_delimiter = ',', num_args = 0..)]
     pub domain_whitelist: Vec<String>,
 
-    /// Domain wildcard patterns (comma separated or repeated).
-    /// Supports wildcards: *.example.com, api.*.example.com
-    /// If specified along with whitelist, both are checked (OR logic).
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub domain_wildcards: Vec<String>,
-
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     pub log_level: LogLevel,
+
+    /// Disable XDP packet filtering (run without BPF/XDP)
+    #[arg(long, default_value_t = false)]
+    pub disable_xdp: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

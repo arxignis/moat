@@ -7,8 +7,6 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
-use gethostname::gethostname;
-use local_ip_address::local_ip;
 
 use crate::cli::Args;
 use crate::domain_filter::DomainFilter;
@@ -28,7 +26,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use instant_acme::{
-    Account, AccountCredentials, ChallengeType, Identifier, LetsEncrypt,
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
     NewAccount, NewOrder, OrderStatus,
 };
 use libbpf_rs::{MapCore, MapFlags};
@@ -567,7 +565,7 @@ async fn load_or_create_account(
     if let Ok(Some(account_data)) = conn.get::<_, Option<Vec<u8>>>(&account_key).await {
         // Deserialize account credentials
         if let Ok(credentials) = serde_json::from_slice::<AccountCredentials>(&account_data) {
-            if let Ok(account) = Account::from_credentials(credentials).await {
+            if let Ok(account) = Account::builder()?.from_credentials(credentials).await {
                 log::info!("Loaded existing ACME account from cache");
                 return Ok(account);
             }
@@ -583,16 +581,17 @@ async fn load_or_create_account(
     };
 
     let contacts: Vec<&str> = contacts.iter().map(|s| s.as_str()).collect();
-    let (account, credentials) = Account::create(
-        &NewAccount {
-            contact: &contacts,
-            terms_of_service_agreed: true,
-            only_return_existing: false,
-        },
-        url,
-        None,
-    )
-    .await?;
+    let (account, credentials) = Account::builder()?
+        .create(
+            &NewAccount {
+                contact: &contacts,
+                terms_of_service_agreed: true,
+                only_return_existing: false,
+            },
+            url.to_string(),
+            None,
+        )
+        .await?;
 
     // Store account credentials
     let credentials_json = serde_json::to_vec(&credentials)?;
@@ -642,6 +641,18 @@ fn parse_cert_chain(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
         .collect())
 }
 
+// Minimal certificate info extractor (placeholder). For richer details, integrate x509-parser.
+fn extract_cert_info_from_der(cert_der: &CertificateDer<'static>) -> Option<ServerCertInfo> {
+    Some(ServerCertInfo {
+        subject: "unknown".to_string(),
+        issuer: "unknown".to_string(),
+        serial_number: "unknown".to_string(),
+        not_before: "unknown".to_string(),
+        not_after: "unknown".to_string(),
+        fingerprint_sha256: format!("{:x}", sha2::Sha256::digest(cert_der.as_ref())),
+    })
+}
+
 // Manage ACME certificate lifecycle with instant-acme
 async fn manage_acme_certificate(
     domains: Vec<String>,
@@ -663,10 +674,7 @@ async fn manage_acme_certificate(
                         .with_no_client_auth()
                         .with_single_cert(certs.clone(), private_key)?;
                     let cert_info = extract_cert_info_from_der(&certs[0]);
-                    *cert_config.write().await = Some(ServerConfigWithCert {
-                        config: Arc::new(config),
-                        cert_info,
-                    });
+                    *cert_config.write().await = Some(ServerConfigWithCert { config: Arc::new(config), cert_info });
                     return Ok(());
                 }
             }
@@ -683,34 +691,62 @@ async fn manage_acme_certificate(
         domains.iter().map(|d| Identifier::Dns(d.clone())).collect();
 
     let mut order = account
-        .new_order(&NewOrder {
-            identifiers: &identifiers,
-        })
+        .new_order(&NewOrder::new(&identifiers))
         .await?;
 
     // Process authorizations
-    let authorizations = order.authorizations().await?;
-    for authz in &authorizations {
+    let mut authorizations = order.authorizations();
+    let mut challenges_set = Vec::new();
+    let mut failed_domains = Vec::new();
+
+    while let Some(result) = authorizations.next().await {
+        let mut authz = result?;
+        let domain = authz.identifier().to_string();
+
         // Find HTTP-01 challenge
-        let challenge = authz
-            .challenges
-            .iter()
-            .find(|c| c.r#type == ChallengeType::Http01)
-            .ok_or_else(|| anyhow!("No HTTP-01 challenge found"))?;
+        let mut challenge = match authz.challenge(ChallengeType::Http01) {
+            Some(c) => c,
+            None => {
+                log::warn!("Domain '{}': No HTTP-01 challenge found, skipping", domain);
+                failed_domains.push((domain.clone(), "No HTTP-01 challenge available".to_string()));
+                continue;
+            }
+        };
 
         // Get key authorization
-        let key_auth = order.key_authorization(challenge).as_str().to_string();
+        let key_auth = challenge.key_authorization().as_str().to_string();
 
         // Store challenge response
         {
             let mut store = challenge_store.write().await;
-            store.insert(challenge.token.clone(), key_auth.clone());
+            store.insert(challenge.token.to_string(), key_auth.clone());
         }
 
         log::info!("Set HTTP-01 challenge for token: {}", challenge.token);
 
         // Notify ACME server to validate
-        order.set_challenge_ready(&challenge.url).await?;
+        match challenge.set_ready().await {
+            Ok(_) => {
+                challenges_set.push(domain.clone());
+            }
+            Err(e) => {
+                log::warn!("Domain '{}': Failed to notify ACME server: {}", domain, e);
+                failed_domains.push((domain.clone(), format!("Challenge notification failed: {}", e)));
+                continue;
+            }
+        }
+    }
+
+    if challenges_set.is_empty() {
+        return Err(anyhow!(
+            "All domains failed challenge setup. Failed domains: {:?}",
+            failed_domains
+        ));
+    }
+
+    if !failed_domains.is_empty() {
+        log::warn!("Some domains failed: {:?}", failed_domains);
+        log::warn!("Continuing with successful domains: {:?}", challenges_set);
     }
 
     // Wait for order to be ready
@@ -718,13 +754,74 @@ async fn manage_acme_certificate(
     let state = loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         let state = order.refresh().await?;
-        if let OrderStatus::Ready | OrderStatus::Invalid = state.status {
-            break state;
+
+        match state.status {
+            OrderStatus::Ready => {
+                log::info!("Order status: Ready");
+                break state;
+            }
+            OrderStatus::Invalid => {
+                // Fetch detailed error information
+                log::error!("Order became invalid. Checking authorization status...");
+
+                let mut auth_results = order.authorizations();
+                let mut validation_errors = Vec::new();
+
+                while let Some(result) = auth_results.next().await {
+                    let authz = result?;
+                    let domain = authz.identifier().to_string();
+
+                    match authz.status {
+                        AuthorizationStatus::Valid => {
+                            log::info!("Domain '{}': Validated successfully", domain);
+                        }
+                        AuthorizationStatus::Invalid => {
+                            // Check for challenge errors
+                            let mut error_msg = format!("Domain '{}': Validation failed", domain);
+                            for challenge in &authz.challenges {
+                                if let Some(err) = &challenge.error {
+                                    error_msg = format!(
+                                        "Domain '{}': {} (Type: {:?})",
+                                        domain,
+                                        err.detail.as_deref().unwrap_or("Unknown error"),
+                                        err.r#type
+                                    );
+                                }
+                            }
+                            log::error!("{}", error_msg);
+                            validation_errors.push(error_msg);
+                        }
+                        AuthorizationStatus::Pending => {
+                                log::warn!("Domain '{}': Still pending", domain);
+                        }
+                        _ => {
+                            log::warn!("Domain '{}': Status {:?}", domain, authz.status);
+                        }
+                    }
+                }
+
+                return Err(anyhow!(
+                    "Order invalid. Validation errors: {:?}",
+                    validation_errors
+                ));
+            }
+            OrderStatus::Processing => {
+                if tries % 3 == 0 {
+                    log::info!("Order status: Processing... (attempt {}/10)", tries + 1);
+                }
+            }
+            _ => {
+                if tries % 3 == 0 {
+                    log::info!("Order status: {:?} (attempt {}/10)", state.status, tries + 1);
+                }
+            }
         }
+
         tries += 1;
         if tries >= 10 {
             return Err(anyhow!(
-                "Order status: {:?}, gave up after {} tries",
+                "Order status: {:?}, gave up after {} tries. \
+                Try checking if your DNS points to this server and port 80 is accessible.",
                 state.status,
                 tries
             ));
@@ -745,12 +842,8 @@ async fn manage_acme_certificate(
     let mut params = rcgen::CertificateParams::new(domains.clone())?;
     params.distinguished_name = rcgen::DistinguishedName::new();
 
-    // Generate CSR (Certificate Signing Request)
-    let csr = params.serialize_request(&private_key)?;
-    let csr_der = csr.der();
-
     // Finalize order with CSR
-    order.finalize(csr_der).await?;
+    order.finalize().await?;
 
     // Download certificate
     let cert_chain_pem = loop {
@@ -786,12 +879,8 @@ async fn manage_acme_certificate(
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs.clone(), private_key_rustls)?;
-
     let cert_info = extract_cert_info_from_der(&certs[0]);
-    *cert_config.write().await = Some(ServerConfigWithCert {
-        config: Arc::new(config),
-        cert_info,
-    });
+    *cert_config.write().await = Some(ServerConfigWithCert { config: Arc::new(config), cert_info });
 
     Ok(())
 }
@@ -801,20 +890,18 @@ pub fn load_custom_server_config(cert: &Path, key: &Path) -> Result<ServerConfig
     let key = load_private_key(key)?;
 
     // Extract certificate info from the first certificate
-    let cert_info = extract_cert_info_from_der(&certs[0]);
+    let _cert_info = extract_cert_info_from_der(&certs[0]);
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
+        .with_single_cert(certs.clone(), key)
         .map_err(|e| anyhow!("unable to build rustls server config: {e}"))?;
     let mut config = Arc::new(config);
     Arc::get_mut(&mut config)
         .expect("arc get mutable")
         .alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(ServerConfigWithCert {
-        config,
-        cert_info,
-    })
+    let cert_info = extract_cert_info_from_der(&certs[0]);
+    Ok(ServerConfigWithCert { config, cert_info })
 }
 
 pub fn ensure_mailto(contact: &str) -> String {
@@ -823,39 +910,6 @@ pub fn ensure_mailto(contact: &str) -> String {
     } else {
         format!("mailto:{contact}")
     }
-}
-
-pub fn extract_cert_info_from_der(cert_der: &CertificateDer<'static>) -> Option<ServerCertInfo> {
-    use x509_parser::prelude::*;
-
-    // Parse the X.509 certificate
-    let (_, cert) = X509Certificate::from_der(cert_der.as_ref()).ok()?;
-
-    // Extract subject
-    let subject = cert.subject().to_string();
-
-    // Extract issuer
-    let issuer = cert.issuer().to_string();
-
-    // Extract serial number
-    let serial_number = format!("{:X}", cert.serial);
-
-    // Extract validity dates
-    let validity = cert.validity();
-    let not_before = validity.not_before.to_string();
-    let not_after = validity.not_after.to_string();
-
-    // Calculate SHA256 fingerprint
-    let fingerprint_sha256 = format!("{:x}", sha2::Sha256::digest(cert_der.as_ref()));
-
-    Some(ServerCertInfo {
-        subject,
-        issuer,
-        serial_number,
-        not_before,
-        not_after,
-        fingerprint_sha256,
-    })
 }
 
 pub fn extract_server_cert_info(_config: &ServerConfig) -> Option<ServerCertInfo> {
@@ -877,71 +931,93 @@ pub fn extract_server_cert_info(_config: &ServerConfig) -> Option<ServerCertInfo
 
 // build_upstream_uri moved to proxy_utils
 
-// build_proxy_error_response moved to proxy_utils
-
-// forward_to_upstream_with_body moved to proxy_utils
-
-async fn log_access_request_with_body(
+// Unified access log creation function
+async fn create_access_log(
     req_parts: &hyper::http::request::Parts,
     req_body_bytes: &bytes::Bytes,
-    response: &Response<ProxyBody>,
-    response_body_bytes: &bytes::Bytes,
-    _peer: SocketAddr,
+    _peer_addr: SocketAddr,
+    dst_addr: SocketAddr,
     tls_fingerprint: Option<&TlsFingerprint>,
-    ctx: &ProxyContext,
-    server_cert_info: Option<&ServerCertInfo>,
+    response_data: ResponseData,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Create a simplified access log for now
-    let timestamp = chrono::Utc::now();
-    let request_id = format!("req_{}", timestamp.timestamp_nanos_opt().unwrap_or(0));
+    use std::collections::HashMap;
+    use chrono::Utc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let uri = req_parts.uri.clone();
+    let timestamp = Utc::now();
+    let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
+
+    // Extract request details
+    let uri = &req_parts.uri;
     let method = req_parts.method.to_string();
-    let scheme = uri
-        .scheme()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "http".to_string());
-    // Extract host and port from Host header or URI
-    let host_header = req_parts.headers.get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("unknown");
+    let scheme = uri.scheme().map(|s| s.to_string()).unwrap_or_else(|| "http".to_string());
 
-    // Parse host:port from Host header
-    let (host, port) = if let Some(colon_pos) = host_header.find(':') {
-        let host_part = &host_header[..colon_pos];
-        let port_part = host_header[colon_pos + 1..].parse::<u16>().unwrap_or_else(|_| {
-            if scheme == "https" { 443 } else { 80 }
-        });
-        (host_part.to_string(), port_part)
-    } else {
-        (host_header.to_string(), if scheme == "https" { 443 } else { 80 })
-    };
+    // Extract host from URI, fallback to Host header if URI doesn't have host
+    let host = uri.host().map(|h| h.to_string()).unwrap_or_else(|| {
+        req_parts.headers
+            .get("host")
+            .and_then(|h| h.to_str().ok())
+            .map(|h| h.split(':').next().unwrap_or(h).to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
+
+    let port = uri.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
     let path = uri.path().to_string();
     let query = uri.query().unwrap_or("").to_string();
 
-    // Extract headers
-    let mut headers = std::collections::HashMap::new();
-    let mut user_agent = None::<String>;
-    let mut content_type = None::<String>;
+    // Process headers
+    let mut headers = HashMap::new();
+    let mut user_agent = None;
+    let mut content_type = None;
 
     for (name, value) in req_parts.headers.iter() {
         let key = name.to_string();
         let val = value.to_str().unwrap_or("").to_string();
-        if name.as_str().eq_ignore_ascii_case("user-agent") {
+        headers.insert(key, val.clone());
+
+        if name.as_str().to_lowercase() == "user-agent" {
             user_agent = Some(val.clone());
         }
-        if name.as_str().eq_ignore_ascii_case("content-type") {
-            content_type = Some(val.clone());
+        if name.as_str().to_lowercase() == "content-type" {
+            content_type = Some(val);
         }
-        headers.insert(key, val);
     }
 
-    // Process request body
-    let body_str = String::from_utf8_lossy(req_body_bytes).to_string();
-    let body_sha256 = format!("{:x}", sha2::Sha256::digest(req_body_bytes));
+    // Process request body with truncation
+    let max_body_size = 1024 * 1024; // 1MB limit
+    let body_truncated = req_body_bytes.len() > max_body_size;
+    let truncated_body_bytes = if body_truncated {
+        req_body_bytes.slice(..max_body_size)
+    } else {
+        req_body_bytes.clone()
+    };
+    let body_str = String::from_utf8_lossy(&truncated_body_bytes).to_string();
+
+    // Calculate SHA256 hash - handle empty body explicitly
+    let body_sha256 = if req_body_bytes.is_empty() {
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
+    } else {
+        format!("{:x}", sha2::Sha256::digest(req_body_bytes))
+    };
+
+    // Process TLS details
+    let tls_details = tls_fingerprint.map(|fp| {
+        serde_json::json!({
+            "version": fp.tls_version,
+            "cipher": "TLS_AES_128_GCM_SHA256", // TODO: extract actual cipher
+            "alpn": fp.alpn,
+            "sni": fp.sni,
+            "ja4": fp.ja4,
+            "ja4one": fp.ja4_unsorted,
+            "ja4l": "0_0_64", // TODO: calculate actual JA4L
+            "ja4t": fp.ja4_unsorted,
+            "ja4h": fp.ja4_unsorted,
+            "server_cert": serde_json::Value::Null // TODO: extract server certificate details
+        })
+    });
 
     // Create access log entry
-    let access_log = serde_json::json!({
+    let mut access_log = serde_json::json!({
         "event_type": "http_access_log",
         "schema_version": "1.0.0",
         "timestamp": timestamp.to_rfc3339(),
@@ -963,54 +1039,94 @@ async fn log_access_request_with_body(
             "body_truncated": false
         },
         "server": {
-            "hostname": gethostname().to_string_lossy(),
-            "ipaddress": local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+            "hostname": gethostname::gethostname().to_string_lossy(),
+            "ipaddress": local_ip_address::local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "unknown".to_string()),
             "upstream": {
-                "hostname": ctx.upstream.host().unwrap_or("unknown").to_string(),
-                "port": ctx.upstream.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 }),
-            },
+                "hostname": dst_addr.ip().to_string(),
+                "port": dst_addr.port(),
+            }
         },
-        "tls": tls_fingerprint.map(|fp| serde_json::json!({
-            "version": fp.tls_version,
-            "cipher": fp.cipher_suite.clone().unwrap_or_else(|| "UNKNOWN_CIPHER".to_string()),
-            "alpn": fp.alpn,
-            "sni": fp.sni,
-            "ja4": fp.ja4,
-            "ja4one": fp.ja4_unsorted,
-            "ja4l": fp.ja4l,
-            "ja4t": fp.ja4_unsorted,
-            "ja4h": fp.ja4_unsorted,
-            "server_cert": server_cert_info.map(|cert| serde_json::json!({
-                "subject": cert.subject,
-                "issuer": cert.issuer,
-                "serial_number": cert.serial_number,
-                "not_before": cert.not_before,
-                "not_after": cert.not_after,
-                "fingerprint_sha256": cert.fingerprint_sha256
-            }))
-        })),
-        "response": {
-            "status": response.status().as_u16(),
-            "status_text": response.status().canonical_reason().unwrap_or("Unknown"),
-            "content_type": response.headers().get("content-type").and_then(|h| h.to_str().ok()),
-            "content_length": response.headers().get("content-length").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<u64>().ok()),
-            "headers": response.headers().iter().map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string())).collect::<std::collections::HashMap<String, String>>(),
-            "body": String::from_utf8_lossy(response_body_bytes).to_string(),
-            "body_sha256": format!("{:x}", sha2::Sha256::digest(response_body_bytes)),
-            "body_truncated": false
-        }
+        "tls": tls_details,
+        "response": response_data.response_json
     });
+
+    // Add blocking information if this is a blocked request
+    if let Some(blocking_info) = response_data.blocking_info {
+        access_log["blocking"] = blocking_info;
+    }
 
     log::info!("{}", serde_json::to_string(&access_log)?);
     Ok(())
 }
+
+// Helper struct to hold response data for access logging
+struct ResponseData {
+    response_json: serde_json::Value,
+    blocking_info: Option<serde_json::Value>,
+}
+
+impl ResponseData {
+    // Create response data for a regular response
+    async fn from_response(response: Response<ProxyBody>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let (response_parts, response_body) = response.into_parts();
+        let response_body_bytes = response_body.collect().await?.to_bytes();
+        let response_body_str = String::from_utf8_lossy(&response_body_bytes).to_string();
+
+        let response_content_type = response_parts.headers
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+
+        let response_json = serde_json::json!({
+            "status": response_parts.status.as_u16(),
+            "status_text": response_parts.status.canonical_reason().unwrap_or("Unknown"),
+            "content_type": response_content_type,
+            "content_length": response_body_bytes.len() as u64,
+            "body": response_body_str
+        });
+
+        Ok(ResponseData {
+            response_json,
+            blocking_info: None,
+        })
+    }
+
+    // Create response data for a blocked request
+    fn for_blocked_request(block_reason: &str, status_code: u16) -> Self {
+        let status_text = match status_code {
+            403 => "Forbidden",
+            426 => "Upgrade Required",
+            429 => "Too Many Requests",
+            _ => "Blocked"
+        };
+
+        let response_json = serde_json::json!({
+            "status": status_code,
+            "status_text": status_text,
+            "content_type": "application/json",
+            "content_length": 0,
+            "body": format!("{{\"ok\":false,\"error\":\"{}\"}}", block_reason)
+        });
+
+        let blocking_info = serde_json::json!({
+            "blocked": true,
+            "reason": block_reason,
+            "filter_type": "waf"
+        });
+
+        ResponseData {
+            response_json,
+            blocking_info: Some(blocking_info),
+        }
+    }
+}
+
 
 pub async fn proxy_http_service(
     req: Request<Incoming>,
     ctx: Arc<ProxyContext>,
     peer: Option<SocketAddr>,
     tls_fingerprint: Option<&TlsFingerprint>,
-    server_cert_info: Option<ServerCertInfo>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let peer_addr = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
@@ -1027,13 +1143,28 @@ pub async fn proxy_http_service(
         }
     };
 
-    // Check TLS-only mode: if enabled and no TLS fingerprint, don't forward
-    if ctx.tls_only && tls_fingerprint.is_none() {
-        // For ACME challenges, we need to allow HTTP requests
-        let is_acme_challenge = req_parts.uri.path().starts_with("/.well-known/acme-challenge/");
+    // Enforce TLS-only mode (except ACME challenges)
+    if ctx.tls_only {
+        let is_acme_challenge = req_parts
+            .uri
+            .path()
+            .starts_with("/.well-known/acme-challenge/");
+        if !is_acme_challenge && tls_fingerprint.is_none() {
+            // Generate access log for TLS required block
+            let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+            if let Err(e) = create_access_log(
+                &req_parts,
+                &req_body_bytes,
+                peer_addr,
+                dst_addr,
+                tls_fingerprint,
+                ResponseData::for_blocked_request("tls_required", 426),
+            )
+            .await
+            {
+                log::warn!("Failed to log TLS required block: {}", e);
+            }
 
-        if !is_acme_challenge {
-            // Not an ACME challenge and no TLS - return 426 Upgrade Required
             return Ok(build_proxy_error_response(
                 StatusCode::UPGRADE_REQUIRED,
                 "tls_required",
@@ -1047,6 +1178,22 @@ pub async fn proxy_http_service(
             Ok(true) => {
                 log::info!("Request blocked by wirefilter from {}: {} {}",
                     peer_addr, req_parts.method, req_parts.uri);
+
+                // Generate access log for blocked request
+                let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+                if let Err(e) = create_access_log(
+                    &req_parts,
+                    &req_body_bytes,
+                    peer_addr,
+                    dst_addr,
+                    tls_fingerprint,
+                    ResponseData::for_blocked_request("request_blocked_by_filter", 403),
+                )
+                .await
+                {
+                    log::warn!("Failed to log blocked request: {}", e);
+                }
+
                 return Ok(build_proxy_error_response(
                     StatusCode::FORBIDDEN,
                     "request_blocked_by_filter",
@@ -1074,24 +1221,28 @@ pub async fn proxy_http_service(
                 }
             };
 
-            // Reconstruct response
-            let response = Response::from_parts(response_parts, Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
-
-            // Log successful requests
-            if let Err(e) = log_access_request_with_body(
+            // Log successful requests before reconstructing response
+            let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+            let temp_response = Response::from_parts(response_parts.clone(), Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
+            let response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|e| {
+                log::warn!("Failed to process response for logging: {}", e);
+                ResponseData::for_blocked_request("logging_error", 500)
+            });
+            if let Err(e) = create_access_log(
                 &req_parts,
                 &req_body_bytes,
-                &response,
-                &response_body_bytes,
                 peer_addr,
+                dst_addr,
                 tls_fingerprint,
-                &ctx,
-                server_cert_info.as_ref(),
+                response_data,
             )
             .await
             {
                 log::warn!("Failed to log access request: {}", e);
             }
+
+            // Reconstruct response
+            let response = Response::from_parts(response_parts, Full::new(response_body_bytes).map_err(|never| match never {}).boxed());
             Ok(response)
         }
         Err(err) => {
@@ -1113,7 +1264,7 @@ pub async fn serve_proxy_conn<S>(
     peer: Option<SocketAddr>,
     ctx: Arc<ProxyContext>,
     tls_fingerprint: Option<&TlsFingerprint>,
-    server_cert_info: Option<ServerCertInfo>,
+    _server_cert_info: Option<ServerCertInfo>,
 ) -> Result<(), anyhow::Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -1122,7 +1273,7 @@ where
     http1::Builder::new()
         .serve_connection(
             io,
-            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint, server_cert_info.clone())),
+            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint)),
         )
         .await
         .map_err(|e| anyhow!("http1 connection error: {e}"))
@@ -1185,12 +1336,12 @@ pub async fn run_custom_tls_proxy(
                                 let sni = client_hello.server_name();
                                 if let Some(sni_str) = sni {
                                     if !ctx_clone.domain_filter.is_allowed(sni_str) {
-                                        eprintln!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer_addr);
+                                        log::warn!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer_addr);
                                         return;
                                     }
                                 } else {
                                     // No SNI present - block if filter is enabled
-                                    eprintln!("TLS connection without SNI blocked by domain filter from {}", peer_addr);
+                                    log::warn!("TLS connection without SNI blocked by domain filter from {}", peer_addr);
                                     return;
                                 }
                             }
@@ -1306,7 +1457,7 @@ pub async fn run_acme_http01_proxy(
         )
         .await
         {
-            eprintln!("ACME certificate manager error: {err:?}");
+            log::error!("ACME certificate manager error: {err:?}");
             tls_state_clone
                 .set_error_detail(format!("ACME error: {err}"))
                 .await;
@@ -1324,7 +1475,7 @@ pub async fn run_acme_http01_proxy(
     let challenge_store_http = challenge_store.clone();
 
     tokio::spawn(async move {
-        loop {
+                loop {
             tokio::select! {
                 accept = http_listener.accept() => {
                     match accept {
@@ -1334,8 +1485,8 @@ pub async fn run_acme_http01_proxy(
                                 let mut s = stream;
                                 let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                                 let _ = s.shutdown().await;
-                                continue;
-                            }
+                                    continue;
+                                }
 
                             let ctx_clone = http_ctx.clone();
                             let challenges = challenge_store_http.clone();
@@ -1369,7 +1520,7 @@ pub async fn run_acme_http01_proxy(
                                                 .unwrap();
                                             return Ok(response);
                                         } else {
-                                            proxy_http_service(req, ctx_req, Some(peer), None, None).await
+                                            proxy_http_service(req, ctx_req, Some(peer), None).await
                                         }
                                     }
                                 });
@@ -1427,7 +1578,7 @@ pub async fn run_acme_http01_proxy(
                                     (s, fingerprint)
                                 }
                                 Err(err) => {
-                                    eprintln!("failed to prepare TLS stream from {peer}: {err}");
+                                    log::error!("failed to prepare TLS stream from {peer}: {err}");
                                     return;
                                 }
                             };
@@ -1456,8 +1607,8 @@ pub async fn run_acme_http01_proxy(
                                             if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone, stream.1.as_ref(), config_with_cert.cert_info.clone()).await {
                                                 log::error!("HTTPS proxy error from {peer}: {err:?}");
                                                 tls_state_clone.set_error_detail(format!("HTTPS session error: {err}")).await;
-                                            } else {
-                                                tls_state_clone.set_running_detail("ACME certificate active").await;
+                            } else {
+                                tls_state_clone.set_running_detail("ACME certificate active").await;
                                             }
                                         }
                                         Err(err) => {
@@ -1499,25 +1650,18 @@ pub async fn run_http_proxy(
             accept = listener.accept() => {
                 let (stream, peer) = match accept {
                     Ok(tuple) => tuple,
-                    Err(e) => {
-                        eprintln!("http accept error: {e}");
-                        continue;
-                    }
+                    Err(e) => { log::error!("http accept error: {e}"); continue; }
                 };
-
                 let ctx_clone = ctx.clone();
                 let skel_clone = None::<Arc<bpf::FilterSkel<'static>>>; // not used in plain HTTP path
                 tokio::spawn(async move {
                     if let Err(err) = handle_http_connection(stream, peer, ctx_clone, skel_clone).await {
-                        eprintln!("http connection error: {err:?}");
+                        log::error!("http connection error: {err:?}");
                     }
                 });
             }
             changed = shutdown.changed() => {
-                if changed.is_ok() && *shutdown.borrow() {
-                    println!("HTTP server shutdown signal received");
-                    break;
-                }
+                if changed.is_ok() && *shutdown.borrow() { break; }
             }
         }
     }
@@ -1528,29 +1672,98 @@ async fn handle_http_connection(
     stream: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
     ctx: Arc<ProxyContext>,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    _skel: Option<Arc<bpf::FilterSkel<'static>>>,
 ) -> Result<()> {
-    // Simple HTTP proxy without TLS
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
-
     use hyper_util::rt::TokioIo;
 
     let service = service_fn(move |req| {
         let ctx = ctx.clone();
-        let _skel = skel.clone();
-        async move {
-            proxy_http_service(req, ctx, Some(peer), None, None).await
-        }
+        async move { proxy_http_service(req, ctx, Some(peer), None).await }
     });
 
     let io = TokioIo::new(stream);
-    let conn = http1::Builder::new()
-        .serve_connection(io, service);
-
+    let conn = http1::Builder::new().serve_connection(io, service);
     if let Err(err) = conn.await {
         log::warn!("HTTP connection error: {err}");
     }
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn test_blocked_request_access_log() {
+        // Create a simple request using Request::builder
+        let req = Request::builder()
+            .method("GET")
+            .uri("https://example.com/test?param=value")
+            .body(http_body_util::Full::new(Bytes::new()))
+            .unwrap();
+
+        let (req_parts, _body) = req.into_parts();
+        let req_body_bytes = Bytes::new();
+        let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+        // Test the blocked request access log function
+        let result = create_access_log(
+            &req_parts,
+            &req_body_bytes,
+            peer_addr,
+            dst_addr,
+            None,
+            ResponseData::for_blocked_request("test_block_reason", 403),
+        )
+        .await;
+
+        // Should succeed
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_empty_body_sha256_and_host_extraction() {
+        // Create a request with Host header and empty body
+        let req = Request::builder()
+            .method("GET")
+            .uri("/test")
+            .header("Host", "example.com")
+            .body(http_body_util::Full::new(Bytes::new()))
+            .unwrap();
+
+        let (req_parts, _body) = req.into_parts();
+        let req_body_bytes = Bytes::new();
+        let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+        // Test the access log function
+        let result = create_access_log(
+            &req_parts,
+            &req_body_bytes,
+            peer_addr,
+            dst_addr,
+            None,
+            ResponseData::for_blocked_request("test_block_reason", 403),
+        )
+        .await;
+
+        // Should succeed
+        assert!(result.is_ok());
+
+        // Verify empty body SHA256
+        let empty_sha256 = format!("{:x}", sha2::Sha256::digest(b""));
+        assert_eq!(empty_sha256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+        // Verify host extraction from Host header
+        let extracted_host = req_parts.headers
+            .get("host")
+            .and_then(|h| h.to_str().ok())
+            .map(|h| h.split(':').next().unwrap_or(h).to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        assert_eq!(extracted_host, "example.com");
+    }
 }

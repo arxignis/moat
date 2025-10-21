@@ -97,6 +97,9 @@ static void *parse_and_advance(void **cursor, void *end, __u32 len)
 SEC("xdp")
 int firewall(struct xdp_md *ctx)
 {
+    // This filter is designed to only block incoming traffic
+    // It should be attached only to ingress hooks, not egress
+    // The filtering logic below blocks packets based on source IP addresses
 
     void *data_end = (void *)(long)ctx->data_end;
     void *cursor = (void *)(long)ctx->data;
@@ -109,26 +112,41 @@ int firewall(struct xdp_md *ctx)
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *iph = parse_and_advance(&cursor, data_end, sizeof(*iph));
-        bpf_printk("XDP: got packet from IP: %pI4", &iph->saddr);
         if (!iph)
             return XDP_PASS;
-
-
-
-        if (is_frag_v4(iph)) {
-            shootdowns++;
-            return XDP_DROP;
-        }
 
         struct lpm_key key = {
             .prefixlen = 32,
             .addr = iph->saddr,
         };
 
-        if (bpf_map_lookup_elem(&banned_ips, &key))
+        if (bpf_map_lookup_elem(&banned_ips, &key)) {
+            bpf_printk("XDP: BLOCKED incoming permanently banned IPv4 %pI4", &iph->saddr);
             return XDP_DROP;
+        }
 
         if (bpf_map_lookup_elem(&recently_banned_ips, &key)) {
+            // Block UDP and ICMP from recently banned IPs, but allow DNS
+            if (iph->protocol == IPPROTO_UDP) {
+                struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
+                if (udph && udph->dest == bpf_htons(53)) {
+                    return XDP_PASS; // Allow DNS responses
+                }
+                // Block other UDP traffic
+                ip_flag_t one = 1;
+                bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
+                bpf_map_delete_elem(&recently_banned_ips, &key);
+                bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
+                return XDP_DROP;
+            }
+            if (iph->protocol == IPPROTO_ICMP) {
+                ip_flag_t one = 1;
+                bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
+                bpf_map_delete_elem(&recently_banned_ips, &key);
+                bpf_printk("XDP: BLOCKED incoming ICMP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
+                return XDP_DROP;
+            }
+            // For TCP, only promote to banned on FIN/RST
             if (iph->protocol == IPPROTO_TCP) {
                 struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
                 if (tcph) {
@@ -136,6 +154,7 @@ int firewall(struct xdp_md *ctx)
                         ip_flag_t one = 1;
                         bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                         bpf_map_delete_elem(&recently_banned_ips, &key);
+                        bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                     }
                 }
             }
@@ -149,9 +168,17 @@ int firewall(struct xdp_md *ctx)
         if (!ip6h)
             return XDP_PASS;
 
-        if (is_frag_v6(ip6h)) {
-            shootdowns++;
-            return XDP_DROP;
+        // Always allow DNS traffic (UDP port 53) to pass through
+        if (ip6h->nexthdr == IPPROTO_UDP) {
+            struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
+            if (udph && (udph->dest == bpf_htons(53) || udph->source == bpf_htons(53))) {
+                return XDP_PASS; // Always allow DNS traffic
+            }
+        }
+
+        // Skip blocking for IPv6 localhost (::1)
+        if (__builtin_memcmp(&ip6h->saddr, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16) == 0) {
+            return XDP_PASS;
         }
 
         // Check banned/recently banned maps by source IPv6
@@ -160,11 +187,33 @@ int firewall(struct xdp_md *ctx)
         };
         __builtin_memcpy(key6.addr, &ip6h->saddr, 16);
 
-        if (bpf_map_lookup_elem(&banned_ips_v6, &key6))
+        if (bpf_map_lookup_elem(&banned_ips_v6, &key6)) {
+            bpf_printk("XDP: BLOCKED incoming permanently banned IPv6");
             return XDP_DROP;
+        }
 
         if (bpf_map_lookup_elem(&recently_banned_ips_v6, &key6)) {
-            // If TCP FIN/RST, promote to banned list
+            // Block UDP and ICMP from recently banned IPv6 IPs, but allow DNS
+            if (ip6h->nexthdr == IPPROTO_UDP) {
+                struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
+                if (udph && udph->dest == bpf_htons(53)) {
+                    return XDP_PASS; // Allow DNS responses
+                }
+                // Block other UDP traffic
+                ip_flag_t one = 1;
+                bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
+                bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv6, promoted to permanent ban");
+                return XDP_DROP;
+            }
+            if (ip6h->nexthdr == 58) { // 58 = IPPROTO_ICMPV6
+                ip_flag_t one = 1;
+                bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
+                bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                bpf_printk("XDP: BLOCKED incoming ICMPv6 from recently banned IPv6, promoted to permanent ban");
+                return XDP_DROP;
+            }
+            // For TCP, only promote to banned on FIN/RST
             if (ip6h->nexthdr == IPPROTO_TCP) {
                 struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
                 if (tcph) {
@@ -172,6 +221,7 @@ int firewall(struct xdp_md *ctx)
                         ip_flag_t one = 1;
                         bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                         bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                        bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv6, promoted to permanent ban");
                     }
                 }
             }
@@ -182,6 +232,7 @@ int firewall(struct xdp_md *ctx)
     }
 
     return XDP_PASS;
+    // return XDP_ABORTED;
 }
 
 char _license[] SEC("license") = "GPL";
