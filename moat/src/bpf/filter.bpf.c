@@ -95,7 +95,7 @@ static void *parse_and_advance(void **cursor, void *end, __u32 len)
 }
 
 SEC("xdp")
-int firewall(struct xdp_md *ctx)
+int arxignis_xdp_filter(struct xdp_md *ctx)
 {
     // This filter is designed to only block incoming traffic
     // It should be attached only to ingress hooks, not egress

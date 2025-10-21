@@ -21,7 +21,6 @@ pub mod cli;
 pub mod domain_filter;
 pub mod firewall;
 pub mod http;
-pub mod ssl;
 pub mod utils;
 pub mod wirefilter;
 pub mod proxy_utils;
@@ -37,11 +36,11 @@ use tokio::sync::watch;
 use crate::app_state::AppState;
 use crate::cli::Args;
 use crate::domain_filter::DomainFilter;
-use crate::ssl::{
+use crate::http::{
     ProxyContext, SharedTlsState, TlsMode, install_ring_crypto_provider, load_custom_server_config,
     run_acme_http01_proxy, run_custom_tls_proxy, run_http_proxy,
 };
-use crate::wirefilter::{init_http_filter, init_config};
+use crate::wirefilter::init_config;
 use crate::utils::bpf_utils;
 
 #[tokio::main]
@@ -67,6 +66,7 @@ async fn main() -> Result<()> {
     };
 
     let mut skels: Vec<Arc<bpf::FilterSkel<'static>>> = Vec::new();
+    let mut ifindices: Vec<i32> = Vec::new();
 
     if args.disable_xdp {
         log::info!("XDP disabled by --disable-xdp flag, skipping BPF attachment");
@@ -90,11 +90,17 @@ async fn main() -> Result<()> {
                     }
                     log::info!("BPF sucessfully attached to xdp on {}", iface);
                     skels.push(Arc::new(skel));
+                    ifindices.push(ifindex);
                 }
                 Err(e) => {
                     log::warn!("failed to load BPF skeleton for '{}': {e}", iface);
                 }
             }
+        }
+
+        // Initialize access rules immediately after XDP attachment
+        if !skels.is_empty() {
+            let _ = access_rules::init_access_rules_from_global(&skels);
         }
     }
 
@@ -114,7 +120,9 @@ async fn main() -> Result<()> {
     let state = AppState {
         skels: skels.clone(),
         tls_state: tls_state.clone(),
+        ifindices: ifindices.clone(),
     };
+
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -127,10 +135,7 @@ async fn main() -> Result<()> {
             log::warn!("Failed to initialize HTTP filter with config: {}", e);
         }
     } else {
-        // Fallback to test filter if no API credentials
-        if let Err(e) = init_http_filter() {
-            log::warn!("Failed to initialize HTTP filter: {}", e);
-        }
+        log::warn!("No API credentials provided, HTTP filter will not be initialized");
     }
 
     let upstream_uri = {
@@ -147,12 +152,7 @@ async fn main() -> Result<()> {
     };
 
 
-    // Apply access rules immediately from current global config snapshot (only if XDP is enabled)
-    if !state.skels.is_empty() {
-        let _ = access_rules::init_access_rules_from_global(&state.skels);
-    } else {
-        log::info!("Skipping access rules initialization (XDP disabled)");
-    }
+    // Access rules were already initialized after XDP attachment above
 
     // Start periodic access rules updater (if BPF is available)
     let access_rules_handle = if !state.skels.is_empty() {
@@ -355,6 +355,16 @@ async fn main() -> Result<()> {
         && let Err(err) = handle.await
     {
         log::error!("access-rules task join error: {err}");
+    }
+
+    // Detach XDP programs from interfaces
+    if !ifindices.is_empty() {
+        log::info!("Detaching XDP programs from {} interfaces...", ifindices.len());
+        for ifindex in ifindices {
+            if let Err(e) = bpf_utils::bpf_detach_from_xdp(ifindex) {
+                log::error!("Failed to detach XDP from interface {}: {}", ifindex, e);
+            }
+        }
     }
 
     Ok(())

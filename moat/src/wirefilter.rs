@@ -66,10 +66,6 @@ impl HttpFilter {
         Self::new(leaked)
     }
 
-    /// Create a default filter that blocks POST requests (for testing)
-    pub fn new_test_filter() -> Result<Self> {
-        Self::new("http.request.method == \"POST\"")
-    }
 
     /// Create a new HTTP filter from config WAF rules
     pub fn new_from_config(config: &Config) -> Result<Self> {
@@ -316,57 +312,76 @@ pub fn set_global_http_filter(filter: HttpFilter) -> anyhow::Result<()> {
         .map_err(|_| anyhow!("Failed to initialize HTTP filter"))
 }
 
-/// Initialize the global HTTP filter with a test rule that blocks POST requests
-pub fn init_http_filter() -> anyhow::Result<()> {
-    let filter = HttpFilter::new_test_filter()?;
-    set_global_http_filter(filter)?;
-    log::info!("HTTP filter initialized with test rule: blocking POST requests");
-    Ok(())
-}
 
-/// Initialize the global config + HTTP filter from API
+/// Initialize the global config + HTTP filter from API with retry logic
 pub async fn init_config(base_url: String, api_key: String) -> anyhow::Result<()> {
-    match fetch_config(base_url, api_key).await {
-        Ok(config_response) => {
-            let filter = HttpFilter::new_from_config(&config_response.config)?;
-            set_global_http_filter(filter)?;
-            log::info!("HTTP filter initialized with {} WAF rules from config", config_response.config.waf_rules.rules.len());
+    let mut retry_count = 0;
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY_MS: u64 = 1000;
 
-            Ok(())
-        }
-        Err(e) => {
-            log::warn!("Failed to fetch config for HTTP filter: {}", e);
-            // Fallback to test filter
-            init_http_filter()
+    loop {
+        match fetch_config(base_url.clone(), api_key.clone()).await {
+            Ok(config_response) => {
+                let filter = HttpFilter::new_from_config(&config_response.config)?;
+                set_global_http_filter(filter)?;
+                log::info!("HTTP filter initialized with {} WAF rules from config", config_response.config.waf_rules.rules.len());
+                return Ok(());
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                if error_msg.contains("503") && retry_count < MAX_RETRIES {
+                    retry_count += 1;
+                    log::warn!("Failed to fetch config for HTTP filter (attempt {}): {}. Retrying in {}ms...", retry_count, error_msg, RETRY_DELAY_MS);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                    continue;
+                } else {
+                    log::error!("Failed to fetch config for HTTP filter after {} attempts: {}", retry_count + 1, error_msg);
+                    return Err(anyhow!("Failed to initialize HTTP filter: {}", error_msg));
+                }
+            }
         }
     }
 }
 
-/// Update the global HTTP filter with new config
+/// Update the global HTTP filter with new config with retry logic
 pub async fn update_with_config(base_url: String, api_key: String) -> anyhow::Result<()> {
-    match fetch_config(base_url, api_key).await {
-        Ok(config_response) => {
-            if let Some(filter) = HTTP_FILTER.get() {
-                // Capture previous hash to decide logging level
-                let prev_hash = filter.rules_hash.read().unwrap().clone();
-                filter.update_from_config(&config_response.config)?;
-                let new_hash = filter.rules_hash.read().unwrap().clone();
-                if new_hash.is_some() && new_hash == prev_hash {
-                    log::debug!("HTTP filter WAF rules unchanged; skipping update log");
+    let mut retry_count = 0;
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY_MS: u64 = 1000;
+
+    loop {
+        match fetch_config(base_url.clone(), api_key.clone()).await {
+            Ok(config_response) => {
+                if let Some(filter) = HTTP_FILTER.get() {
+                    // Capture previous hash to decide logging level
+                    let prev_hash = filter.rules_hash.read().unwrap().clone();
+                    filter.update_from_config(&config_response.config)?;
+                    let new_hash = filter.rules_hash.read().unwrap().clone();
+                    if new_hash.is_some() && new_hash == prev_hash {
+                        log::debug!("HTTP filter WAF rules unchanged; skipping update log");
+                    } else {
+                        log::info!(
+                            "HTTP filter updated with {} WAF rules from config",
+                            config_response.config.waf_rules.rules.len()
+                        );
+                    }
                 } else {
-                    log::info!(
-                        "HTTP filter updated with {} WAF rules from config",
-                        config_response.config.waf_rules.rules.len()
-                    );
+                    log::warn!("HTTP filter not initialized, cannot update");
                 }
-            } else {
-                log::warn!("HTTP filter not initialized, cannot update");
+                return Ok(());
             }
-            Ok(())
-        }
-        Err(e) => {
-            log::warn!("Failed to fetch config for HTTP filter update: {}", e);
-            Err(anyhow!("Failed to fetch config: {}", e))
+            Err(e) => {
+                let error_msg = e.to_string();
+                if error_msg.contains("503") && retry_count < MAX_RETRIES {
+                    retry_count += 1;
+                    log::warn!("Failed to fetch config for HTTP filter update (attempt {}): {}. Retrying in {}ms...", retry_count, error_msg, RETRY_DELAY_MS);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                    continue;
+                } else {
+                    log::error!("Failed to fetch config for HTTP filter update after {} attempts: {}", retry_count + 1, error_msg);
+                    return Err(anyhow!("Failed to fetch config: {}", error_msg));
+                }
+            }
         }
     }
 }
@@ -399,33 +414,6 @@ mod tests {
     use hyper::http::request::Builder;
     use std::net::Ipv4Addr;
 
-    #[test]
-    fn test_post_blocking() -> Result<()> {
-        let filter = HttpFilter::new_test_filter()?;
-
-        // Test POST request (should be blocked)
-        let post_req = Builder::new()
-            .method("POST")
-            .uri("http://example.com/test")
-            .body(())?;
-        let (post_parts, _) = post_req.into_parts();
-
-        let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
-        let should_block = filter.should_block_request_from_parts(&post_parts, b"", peer_addr)?;
-        assert!(should_block, "POST request should be blocked");
-
-        // Test GET request (should not be blocked)
-        let get_req = Builder::new()
-            .method("GET")
-            .uri("http://example.com/test")
-            .body(())?;
-        let (get_parts, _) = get_req.into_parts();
-
-        let should_block = filter.should_block_request_from_parts(&get_parts, b"", peer_addr)?;
-        assert!(!should_block, "GET request should not be blocked");
-
-        Ok(())
-    }
 
     #[test]
     fn test_custom_filter() -> Result<()> {

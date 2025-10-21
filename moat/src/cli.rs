@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use clap::Parser;
 use clap::ValueEnum;
 
-use crate::ssl::TlsMode;
+use crate::http::TlsMode;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
