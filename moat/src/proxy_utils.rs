@@ -6,7 +6,7 @@ use hyper::header::HeaderValue;
 use hyper::header::HOST;
 // Client and HttpConnector types are not referenced directly here
 
-use crate::ssl::ProxyContext;
+use crate::http::ProxyContext;
 
 pub type ProxyBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 

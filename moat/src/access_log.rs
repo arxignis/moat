@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ssl::tls_fingerprint::Fingerprint as TlsFingerprint;
+use crate::http::tls_fingerprint::Fingerprint as TlsFingerprint;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpAccessLog {

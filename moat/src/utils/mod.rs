@@ -1,21 +1,41 @@
 pub mod bpf_utils {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::fd::AsFd;
 
     use crate::bpf::{self, FilterSkel};
+    use libbpf_rs::{Xdp, XdpFlags};
+    use nix::libc;
 
     pub fn bpf_attach_to_xdp(
         skel: &mut FilterSkel<'_>,
         ifindex: i32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match skel.progs.firewall.attach_xdp(ifindex) {
-            Ok(link) => {
-                skel.links = bpf::FilterLinks {
-                    firewall: Some(link),
-                };
+        // Try hardware mode first, fall back to driver mode if not supported
+        let xdp = Xdp::new(skel.progs.arxignis_xdp_filter.as_fd().into());
 
+        // Try hardware offload mode first
+        if let Ok(()) = xdp.attach(ifindex, XdpFlags::HW_MODE) {
+            log::info!("XDP program attached in hardware offload mode");
+            return Ok(());
+        }
+
+        // Fall back to driver mode if hardware mode fails
+        match xdp.attach(ifindex, XdpFlags::DRV_MODE) {
+            Ok(()) => {
+                log::info!("XDP program attached in driver mode");
                 Ok(())
             }
-            Err(e) => Err(Box::new(e)),
+            Err(e) => {
+                log::debug!("Driver mode failed, trying generic SKB mode: {}", e);
+                // Final fallback to SKB mode
+                match xdp.attach(ifindex, XdpFlags::SKB_MODE) {
+                    Ok(()) => {
+                        log::info!("XDP program attached in generic SKB mode");
+                        Ok(())
+                    }
+                    Err(e) => Err(Box::new(e)),
+                }
+            }
         }
     }
 
@@ -46,6 +66,31 @@ pub mod bpf_utils {
 
         let my_ip_key_bytes = unsafe { plain::as_bytes(&my_ip_key) };
         my_ip_key_bytes.to_vec().into_boxed_slice()
+    }
+
+    pub fn bpf_detach_from_xdp(ifindex: i32) -> Result<(), Box<dyn std::error::Error>> {
+        // Create a dummy XDP instance for detaching
+        // We need to query first to get the existing program ID
+        let dummy_fd = unsafe { libc::open("/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        if dummy_fd < 0 {
+            return Err("Failed to create dummy file descriptor".into());
+        }
+
+        let xdp = Xdp::new(unsafe { std::os::fd::BorrowedFd::borrow_raw(dummy_fd) });
+
+        // Try to detach using different modes
+        let modes = [XdpFlags::HW_MODE, XdpFlags::DRV_MODE, XdpFlags::SKB_MODE];
+
+        for mode in modes {
+            if let Ok(()) = xdp.detach(ifindex, mode) {
+                log::info!("XDP program detached from interface");
+                unsafe { libc::close(dummy_fd); }
+                return Ok(());
+            }
+        }
+
+        unsafe { libc::close(dummy_fd); }
+        Err("Failed to detach XDP program from interface".into())
     }
 }
 
