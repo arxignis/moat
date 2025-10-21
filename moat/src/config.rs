@@ -42,6 +42,7 @@ pub struct WafRule {
     pub name: String,
     pub org_id: String,
     pub description: String,
+    pub action: String,
     pub expression: String,
 }
 

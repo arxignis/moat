@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::collections::HashSet;
 
 /// Domain filter that supports exact matches and wildcard patterns
 #[derive(Debug, Clone)]
@@ -31,11 +32,40 @@ impl DomainFilter {
             .map(|pattern| WildcardPattern::parse(&pattern))
             .collect();
 
+        // Normalize whitelist domains
+        let normalized_whitelist: Vec<String> = whitelist
+            .into_iter()
+            .map(|domain| normalize_domain(&domain))
+            .collect();
+
         Self {
-            whitelist: Arc::new(whitelist),
+            whitelist: Arc::new(normalized_whitelist),
             wildcards: Arc::new(wildcards),
             enabled,
         }
+    }
+
+    /// Expand wildcard domains into specific domains
+    /// This generates common subdomains for wildcard patterns like *.example.com
+    pub fn expand_wildcard_domains(domains: &[String]) -> Vec<String> {
+        let mut expanded = HashSet::new();
+
+        for domain in domains {
+            let normalized = normalize_domain(domain);
+
+            if normalized.contains('*') {
+                // Generate common subdomains for wildcard patterns
+                let subdomains = generate_common_subdomains(&normalized);
+                for subdomain in subdomains {
+                    expanded.insert(subdomain);
+                }
+            } else {
+                // Add exact domain as-is
+                expanded.insert(normalized);
+            }
+        }
+
+        expanded.into_iter().collect()
     }
 
     /// Check if a domain is allowed
@@ -167,6 +197,53 @@ fn find_substring(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
+/// Generate common subdomains for wildcard patterns
+fn generate_common_subdomains(wildcard_pattern: &str) -> Vec<String> {
+    let mut domains = Vec::new();
+
+    // Common subdomains to generate
+    let common_subdomains = vec![
+        "www", "api", "app", "admin", "mail", "ftp", "blog", "shop", "store",
+        "support", "help", "docs", "dev", "test", "staging", "prod", "production",
+        "cdn", "static", "assets", "img", "images", "js", "css", "media",
+        "v1", "v2", "v3", "api-v1", "api-v2", "mobile", "m", "wap",
+        "secure", "ssl", "tls", "login", "auth", "oauth", "sso",
+        "dashboard", "panel", "console", "control", "manage", "monitor",
+        "status", "health", "ping", "metrics", "stats", "analytics",
+        "logs", "log", "audit", "backup", "backups", "archive", "archives",
+        "download", "downloads", "upload", "uploads", "files", "file",
+        "cache", "caching", "proxy", "gateway", "router", "loadbalancer",
+        "db", "database", "mysql", "postgres", "redis", "memcached",
+        "search", "elastic", "solr", "lucene", "index", "indices",
+        "queue", "worker", "job", "jobs", "task", "tasks", "cron",
+        "webhook", "webhooks", "callback", "callbacks", "notify",
+        "notification", "notifications", "alert", "alerts", "warning",
+        "warnings", "error", "errors", "exception", "exceptions",
+        "debug", "trace", "profiler", "profile", "profiling",
+        "beta", "alpha", "rc", "release", "preview", "demo",
+        "sandbox", "playground", "experiment", "experimental",
+        "internal", "private", "public", "external", "partner",
+        "partners", "vendor", "vendors", "supplier", "suppliers",
+        "customer", "customers", "client", "clients", "user", "users",
+        "member", "members", "guest", "guests", "visitor", "visitors",
+        "subdomain", "subdomains", "wildcard", "wildcards", "catch-all"
+    ];
+
+    // Replace * with each common subdomain
+    for subdomain in common_subdomains {
+        let expanded = wildcard_pattern.replace('*', subdomain);
+        domains.push(expanded);
+    }
+
+    // Also add the base domain (without subdomain) if it's a *.domain.com pattern
+    if wildcard_pattern.starts_with("*.") {
+        let base_domain = wildcard_pattern.strip_prefix("*.").unwrap_or(wildcard_pattern);
+        domains.push(base_domain.to_string());
+    }
+
+    domains
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +322,36 @@ mod tests {
         assert!(filter.is_allowed("anything.com"));
         assert!(filter.is_allowed("example.org"));
         assert!(!filter.is_enabled());
+    }
+
+    #[test]
+    fn test_expand_wildcard_domains() {
+        let domains = vec![
+            "*.example.com".to_string(),
+            "api.example.org".to_string(),
+            "*.test.net".to_string(),
+        ];
+
+        let expanded = DomainFilter::expand_wildcard_domains(&domains);
+
+        // Should contain the exact domain
+        assert!(expanded.contains(&"api.example.org".to_string()));
+
+        // Should contain base domains
+        assert!(expanded.contains(&"example.com".to_string()));
+        assert!(expanded.contains(&"test.net".to_string()));
+
+        // Should contain common subdomains
+        assert!(expanded.contains(&"www.example.com".to_string()));
+        assert!(expanded.contains(&"api.example.com".to_string()));
+        assert!(expanded.contains(&"www.test.net".to_string()));
+
+        // Should not contain duplicates and have reasonable count
+        let unique_count = expanded.len();
+
+        // Should have at least the exact domain + base domains + many subdomains
+        assert!(unique_count >= 200); // Should have many subdomains from 2 wildcards
+        assert!(unique_count <= 500); // But not too many
     }
 }
 

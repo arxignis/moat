@@ -4,10 +4,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::{RwLock, OnceCell};
+
+use crate::redis::RedisManager;
 
 /// Custom deserializer for optional datetime fields that can be empty strings or missing
 fn deserialize_optional_datetime<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
@@ -110,8 +111,6 @@ impl From<&ThreatResponse> for WafFields {
 pub struct ThreatClient {
     base_url: String,
     api_key: String,
-    redis_client: Option<ConnectionManager>,
-    redis_prefix: String,
     l1_cache: Arc<RwLock<HashMap<String, CachedThreatData>>>,
 }
 
@@ -119,14 +118,10 @@ impl ThreatClient {
     pub fn new(
         base_url: String,
         api_key: String,
-        redis_client: Option<ConnectionManager>,
-        redis_prefix: String,
     ) -> Self {
         Self {
             base_url,
             api_key,
-            redis_client,
-            redis_prefix,
             l1_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -246,20 +241,22 @@ impl ThreatClient {
 
     /// Get data from L2 cache (Redis)
     async fn get_l2_cache(&self, ip: &str) -> Result<Option<ThreatResponse>> {
-        let Some(ref redis) = self.redis_client else {
-            return Ok(None);
+        let redis_manager = match RedisManager::get() {
+            Ok(manager) => manager,
+            Err(_) => return Ok(None),
         };
 
-        let key = format!("{}:threat:{}", self.redis_prefix, ip);
+        let key = format!("{}:threat:{}", redis_manager.create_namespace("threat"), ip);
+        let mut redis = redis_manager.get_connection();
 
-        match redis.clone().get::<_, Option<String>>(&key).await {
+        match redis.get::<_, Option<String>>(&key).await {
             Ok(Some(data)) => {
                 match serde_json::from_str::<ThreatResponse>(&data) {
                     Ok(threat_data) => Ok(Some(threat_data)),
                     Err(e) => {
                         log::warn!("Failed to deserialize cached threat data for key {}: {}. Clearing cache entry.", key, e);
                         // Clear the invalid cache entry
-                        let _: () = redis.clone().del(&key).await.unwrap_or_default();
+                        let _: () = redis.del(&key).await.unwrap_or_default();
                         Ok(None)
                     }
                 }
@@ -274,15 +271,18 @@ impl ThreatClient {
 
     /// Set data in L2 cache (Redis) with TTL from API response
     async fn set_l2_cache(&self, ip: &str, data: &ThreatResponse) -> Result<()> {
-        let Some(ref redis) = self.redis_client else {
-            return Ok(());
+        let redis_manager = match RedisManager::get() {
+            Ok(manager) => manager,
+            Err(_) => return Ok(()),
         };
 
-        let key = format!("{}:threat:{}", self.redis_prefix, ip);
+        let key = format!("{}:threat:{}", redis_manager.create_namespace("threat"), ip);
+        let mut redis = redis_manager.get_connection();
+
         let json_data = serde_json::to_string(data)
             .context("Failed to serialize threat data")?;
 
-        let _: () = redis.clone()
+        let _: () = redis
             .set_ex(&key, json_data, data.ttl_s)
             .await
             .context("Failed to store threat data in Redis")?;
@@ -305,20 +305,8 @@ static THREAT_CLIENT: OnceCell<Arc<ThreatClient>> = OnceCell::const_new();
 pub async fn init_threat_client(
     base_url: String,
     api_key: String,
-    redis_url: Option<String>,
-    redis_prefix: String,
 ) -> Result<()> {
-    let redis_client = if let Some(url) = redis_url {
-        let client = redis::Client::open(url)
-            .context("Failed to create Redis client")?;
-        let conn_manager = client.get_connection_manager().await
-            .context("Failed to get Redis connection manager")?;
-        Some(conn_manager)
-    } else {
-        None
-    };
-
-    let client = Arc::new(ThreatClient::new(base_url, api_key, redis_client, redis_prefix));
+    let client = Arc::new(ThreatClient::new(base_url, api_key));
 
     THREAT_CLIENT.set(client)
         .map_err(|_| anyhow::anyhow!("Failed to initialize threat client"))?;

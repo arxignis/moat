@@ -33,3 +33,4 @@ go.work.sum
 
 target/
 Cargo.lock
+config.yaml

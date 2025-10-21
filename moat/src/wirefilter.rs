@@ -8,10 +8,36 @@ use crate::config::{Config, fetch_config};
 use crate::threat;
 use anyhow::anyhow;
 
+/// WAF action types
+#[derive(Debug, Clone, PartialEq)]
+pub enum WafAction {
+    Block,
+    Challenge,
+    Allow,
+}
+
+impl WafAction {
+    pub fn from_str(action: &str) -> Self {
+        match action.to_lowercase().as_str() {
+            "block" => WafAction::Block,
+            "challenge" => WafAction::Challenge,
+            _ => WafAction::Allow,
+        }
+    }
+}
+
+/// WAF rule evaluation result
+#[derive(Debug, Clone)]
+pub struct WafResult {
+    pub action: WafAction,
+    pub rule_name: String,
+    pub rule_id: String,
+}
+
 /// Wirefilter-based HTTP request filtering engine
 pub struct HttpFilter {
     scheme: Arc<Scheme>,
-    filter: Arc<RwLock<wirefilter::Filter>>,
+    rules: Arc<RwLock<Vec<(wirefilter::Filter, WafAction, String, String)>>>, // (filter, action, name, id)
     rules_hash: Arc<RwLock<Option<String>>>,
 }
 
@@ -61,28 +87,29 @@ impl HttpFilter {
 
         Ok(Self {
             scheme,
-            filter: Arc::new(RwLock::new(filter)),
+            rules: Arc::new(RwLock::new(vec![(filter, WafAction::Block, "default".to_string(), "default".to_string())])),
             rules_hash: Arc::new(RwLock::new(None)),
         })
     }
 
-    /// Create a new HTTP filter with an owned string by converting to static
-    fn new_from_string(filter_expr: String) -> Result<Self> {
-        // Convert to static by leaking the string
-        let leaked = Box::leak(filter_expr.into_boxed_str());
-        Self::new(leaked)
-    }
-
-
     /// Create a new HTTP filter from config WAF rules
     pub fn new_from_config(config: &Config) -> Result<Self> {
+        // Create the scheme with HTTP request fields
+        let scheme = Arc::new(Self::create_scheme());
+
         if config.waf_rules.rules.is_empty() {
             // If no WAF rules, create a default filter that allows all
-            return Self::new("false");
+            return Ok(Self {
+                scheme,
+                rules: Arc::new(RwLock::new(vec![])),
+                rules_hash: Arc::new(RwLock::new(Some(Self::compute_rules_hash("")))),
+            });
         }
 
-        // Validate and combine all WAF rule expressions with OR logic
-        let mut valid_expressions = Vec::new();
+        // Validate and compile individual WAF rules
+        let mut compiled_rules = Vec::new();
+        let mut rules_hash_input = String::new();
+
         for rule in &config.waf_rules.rules {
             // Basic validation - check if expression is not empty
             if rule.expression.trim().is_empty() {
@@ -91,40 +118,44 @@ impl HttpFilter {
             }
 
             // Try to parse the expression to validate it
-            let scheme = Self::create_scheme();
             if let Err(error) = scheme.parse(&rule.expression) {
                 log::warn!("Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
-            valid_expressions.push(format!("({})", rule.expression));
+            // Compile the rule
+            let expression = Box::leak(rule.expression.clone().into_boxed_str());
+            let ast = scheme.parse(expression)?;
+            let filter = ast.compile();
+            let action = WafAction::from_str(&rule.action);
+
+            compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone()));
+            rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, rule.expression));
         }
 
-        if valid_expressions.is_empty() {
+        if compiled_rules.is_empty() {
             log::warn!("No valid WAF rules found, using default filter that allows all");
-            return Self::new("false");
+            return Ok(Self {
+                scheme,
+                rules: Arc::new(RwLock::new(vec![])),
+                rules_hash: Arc::new(RwLock::new(Some(Self::compute_rules_hash("")))),
+            });
         }
 
-        let combined_expr = valid_expressions.join(" or ");
-        let filter = Self::new_from_string(combined_expr.clone())?;
-        let hash = Self::compute_rules_hash(&combined_expr);
-        *filter.rules_hash.write().unwrap() = Some(hash);
-        Ok(filter)
+        let hash = Self::compute_rules_hash(&rules_hash_input);
+        Ok(Self {
+            scheme,
+            rules: Arc::new(RwLock::new(compiled_rules)),
+            rules_hash: Arc::new(RwLock::new(Some(hash))),
+        })
     }
 
     /// Update the filter with new WAF rules from config
     pub fn update_from_config(&self, config: &Config) -> Result<()> {
-        if config.waf_rules.rules.is_empty() {
-            // If no WAF rules, create a filter that allows all
-            let ast = self.scheme.parse("false")?;
-            let new_filter = ast.compile();
-            *self.filter.write().unwrap() = new_filter;
-            *self.rules_hash.write().unwrap() = Some(Self::compute_rules_hash("false"));
-            return Ok(());
-        }
+        // Validate and compile individual WAF rules
+        let mut compiled_rules = Vec::new();
+        let mut rules_hash_input = String::new();
 
-        // Validate and combine all WAF rule expressions with OR logic
-        let mut valid_expressions = Vec::new();
         for rule in &config.waf_rules.rules {
             // Basic validation - check if expression is not empty
             if rule.expression.trim().is_empty() {
@@ -138,18 +169,18 @@ impl HttpFilter {
                 continue;
             }
 
-            valid_expressions.push(format!("({})", rule.expression));
+            // Compile the rule
+            let expression = Box::leak(rule.expression.clone().into_boxed_str());
+            let ast = self.scheme.parse(expression)?;
+            let filter = ast.compile();
+            let action = WafAction::from_str(&rule.action);
+
+            compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone()));
+            rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, rule.expression));
         }
 
-        let combined_expr = if valid_expressions.is_empty() {
-            log::warn!("No valid WAF rules found, using default filter that allows all");
-            "false".to_string()
-        } else {
-            valid_expressions.join(" or ")
-        };
-
         // Compute hash and skip update if unchanged
-        let new_hash = Self::compute_rules_hash(&combined_expr);
+        let new_hash = Self::compute_rules_hash(&rules_hash_input);
         if let Some(prev) = self.rules_hash.read().unwrap().as_ref() {
             if prev == &new_hash {
                 log::debug!("HTTP filter WAF rules unchanged; skipping update");
@@ -157,11 +188,7 @@ impl HttpFilter {
             }
         }
 
-        // Convert to static by leaking the string
-        let leaked = Box::leak(combined_expr.into_boxed_str());
-        let ast = self.scheme.parse(leaked)?;
-        let new_filter = ast.compile();
-        *self.filter.write().unwrap() = new_filter;
+        *self.rules.write().unwrap() = compiled_rules;
         *self.rules_hash.write().unwrap() = Some(new_hash);
 
         Ok(())
@@ -185,7 +212,7 @@ impl HttpFilter {
         req_parts: &hyper::http::request::Parts,
         body_bytes: &[u8],
         peer_addr: SocketAddr,
-    ) -> Result<bool> {
+    ) -> Result<Option<WafResult>> {
         // Create execution context
         let mut ctx = ExecutionContext::new(&self.scheme);
 
@@ -388,10 +415,20 @@ impl HttpFilter {
             }
         };
 
-        // Execute the filter
-        let filter_guard = self.filter.read().unwrap();
-        let result = filter_guard.execute(&ctx)?;
-        Ok(result)
+        // Execute each rule individually and return the first match
+        let rules_guard = self.rules.read().unwrap();
+        for (filter, action, rule_name, rule_id) in rules_guard.iter() {
+            let rule_result = filter.execute(&ctx)?;
+            if rule_result {
+                return Ok(Some(WafResult {
+                    action: action.clone(),
+                    rule_name: rule_name.clone(),
+                    rule_id: rule_id.clone(),
+                }));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -523,8 +560,9 @@ mod tests {
         let (req_parts, _) = req.into_parts();
 
         let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
-        let should_block = filter.should_block_request_from_parts(&req_parts, b"", peer_addr).await?;
-        assert!(should_block, "Request to blocked host should be blocked");
+        let result = filter.should_block_request_from_parts(&req_parts, b"", peer_addr).await?;
+        assert!(result.is_some(), "Request to blocked host should be blocked");
+        assert_eq!(result.unwrap().action, WafAction::Block);
 
         Ok(())
     }

@@ -8,9 +8,11 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 
-use crate::cli::Args;
 use crate::domain_filter::DomainFilter;
 use crate::wirefilter::get_global_http_filter;
+use crate::actions::captcha::{validate_captcha_token, generate_captcha_token, apply_captcha_challenge, apply_captcha_challenge_with_token};
+use crate::threat;
+use crate::redis::RedisManager;
 use crate::{bpf, utils::bpf_utils};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -30,7 +32,6 @@ use instant_acme::{
     NewAccount, NewOrder, OrderStatus,
 };
 use libbpf_rs::{MapCore, MapFlags};
-use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, RedisError};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -42,9 +43,10 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, RwLock};
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
+use url::form_urlencoded;
 
 use crate::proxy_utils::{build_proxy_error_response, forward_to_upstream_with_body, ProxyBody};
 
@@ -79,6 +81,19 @@ impl TlsMode {
             TlsMode::Disabled => "disabled",
             TlsMode::Custom => "custom",
             TlsMode::Acme => "acme",
+        }
+    }
+}
+
+impl std::str::FromStr for TlsMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "disabled" => Ok(TlsMode::Disabled),
+            "custom" => Ok(TlsMode::Custom),
+            "acme" => Ok(TlsMode::Acme),
+            _ => Err(anyhow::anyhow!("Invalid TLS mode: {}", s)),
         }
     }
 }
@@ -433,38 +448,26 @@ pub struct ProxyContext {
 #[derive(Clone)]
 pub struct RedisAcmeCache {
     pub prefix: String,
-    pub connection: Arc<Mutex<ConnectionManager>>,
 }
 
 impl RedisAcmeCache {
-    pub async fn new(redis_url: &str, prefix: String) -> Result<Self> {
-        log::info!("Initializing Redis ACME cache with URL: {}", redis_url);
-        let client = redis::Client::open(redis_url)?;
-        let manager = client
-            .get_connection_manager()
-            .await
-            .context("failed to create redis connection manager")?;
-        log::info!("Redis connection manager created successfully with prefix: {}", prefix);
+    pub async fn new(prefix: String) -> Result<Self> {
+        log::info!("Initializing Redis ACME cache with prefix: {}", prefix);
 
-        let cache = Self {
-            prefix,
-            connection: Arc::new(Mutex::new(manager)),
-        };
+        // Test Redis connection
+        let redis_manager = RedisManager::get()
+            .context("Redis manager not initialized")?;
 
-        // Test the connection
-        if let Err(e) = cache.test_connection().await {
-            log::warn!("Redis connection test failed: {}", e);
-            return Err(anyhow!("Redis connection test failed: {}", e));
+        let mut test_conn = redis_manager.get_connection();
+        match redis::cmd("PING").query_async::<String>(&mut test_conn).await {
+            Ok(_) => log::info!("Redis connection test successful"),
+            Err(e) => {
+                log::warn!("Redis connection test failed: {}", e);
+                return Err(anyhow!("Redis connection test failed: {}", e));
+            }
         }
-        log::info!("Redis connection test successful");
 
-        Ok(cache)
-    }
-
-    pub async fn test_connection(&self) -> Result<()> {
-        let mut conn = self.connection.lock().await;
-        let _: String = conn.ping().await?;
-        Ok(())
+        Ok(Self { prefix })
     }
 
     pub fn key(
@@ -499,7 +502,11 @@ impl CertCache for RedisAcmeCache {
     ) -> std::result::Result<Option<Vec<u8>>, Self::EC> {
         let key = self.key("cert", domains, directory_url, &[]);
         log::debug!("Loading certificate with key: {}", key);
-        let mut conn = self.connection.lock().await;
+
+        let redis_manager = RedisManager::get()
+            .map_err(|e| RedisError::from((redis::ErrorKind::IoError, "Redis manager not initialized", e.to_string())))?;
+        let mut conn = redis_manager.get_connection();
+
         let value: Option<Vec<u8>> = conn.get(key).await?;
         if value.is_some() {
             log::debug!("Certificate found in cache");
@@ -517,9 +524,14 @@ impl CertCache for RedisAcmeCache {
     ) -> std::result::Result<(), Self::EC> {
         let key = self.key("cert", domains, directory_url, &[]);
         log::debug!("Storing certificate with key: {}", key);
-        let mut conn = self.connection.lock().await;
-        conn.set::<_, _, ()>(key, cert).await?;
-        log::debug!("Certificate stored successfully");
+
+        let redis_manager = RedisManager::get()
+            .map_err(|e| RedisError::from((redis::ErrorKind::IoError, "Redis manager not initialized", e.to_string())))?;
+        let mut conn = redis_manager.get_connection();
+
+        // Set certificate to expire in 60 days (5184000 seconds)
+        conn.set_ex::<_, _, ()>(key, cert, 5184000).await?;
+        log::debug!("Certificate stored successfully with 60-day expiration");
         Ok(())
     }
 }
@@ -534,7 +546,9 @@ impl AccountCache for RedisAcmeCache {
         directory_url: &str,
     ) -> std::result::Result<Option<Vec<u8>>, Self::EA> {
         let key = self.key("account", &[], directory_url, contact);
-        let mut conn = self.connection.lock().await;
+        let redis_manager = RedisManager::get()
+            .map_err(|_e| RedisError::from((redis::ErrorKind::IoError, "Redis manager not initialized")))?;
+        let mut conn = redis_manager.get_connection();
         let value: Option<Vec<u8>> = conn.get(key).await?;
         Ok(value)
     }
@@ -546,8 +560,11 @@ impl AccountCache for RedisAcmeCache {
         account: &[u8],
     ) -> std::result::Result<(), Self::EA> {
         let key = self.key("account", &[], directory_url, contact);
-        let mut conn = self.connection.lock().await;
-        conn.set::<_, _, ()>(key, account).await?;
+        let redis_manager = RedisManager::get()
+            .map_err(|_e| RedisError::from((redis::ErrorKind::IoError, "Redis manager not initialized")))?;
+        let mut conn = redis_manager.get_connection();
+        // Set account to expire in 1 year (31536000 seconds)
+        conn.set_ex::<_, _, ()>(key, account, 31536000).await?;
         Ok(())
     }
 }
@@ -587,7 +604,9 @@ async fn load_or_create_account(
     contacts: &[String],
 ) -> Result<Account> {
     let account_key = cache.key("account", &[], directory_url, contacts);
-    let mut conn = cache.connection.lock().await;
+    let redis_manager = RedisManager::get()
+        .context("Redis manager not initialized")?;
+    let mut conn = redis_manager.get_connection();
 
     // Try to load existing account
     if let Ok(Some(account_data)) = conn.get::<_, Option<Vec<u8>>>(&account_key).await {
@@ -621,9 +640,9 @@ async fn load_or_create_account(
         )
         .await?;
 
-    // Store account credentials
+    // Store account credentials with 1 year expiration
     let credentials_json = serde_json::to_vec(&credentials)?;
-    let _: () = conn.set(&account_key, &credentials_json).await?;
+    let _: () = conn.set_ex(&account_key, &credentials_json, 31536000).await?;
 
     Ok(account)
 }
@@ -635,7 +654,9 @@ async fn load_private_key_from_redis(
     directory_url: &str,
 ) -> Result<Option<PrivateKeyDer<'static>>> {
     let key = cache.key("privkey", domains, directory_url, &[]);
-    let mut conn = cache.connection.lock().await;
+    let redis_manager = RedisManager::get()
+        .context("Redis manager not initialized")?;
+    let mut conn = redis_manager.get_connection();
 
     if let Some(der_bytes) = conn.get::<_, Option<Vec<u8>>>(&key).await? {
         Ok(Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
@@ -655,9 +676,12 @@ async fn store_private_key_in_redis(
 ) -> Result<()> {
     let key = cache.key("privkey", domains, directory_url, &[]);
     log::debug!("Storing private key with key: {}", key);
-    let mut conn = cache.connection.lock().await;
-    conn.set::<_, _, ()>(key, private_key_der).await?;
-    log::debug!("Private key stored successfully");
+    let redis_manager = RedisManager::get()
+        .context("Redis manager not initialized")?;
+    let mut conn = redis_manager.get_connection();
+    // Set private key to expire in 60 days (5184000 seconds)
+    conn.set_ex::<_, _, ()>(key, private_key_der, 5184000).await?;
+    log::debug!("Private key stored successfully with 60-day expiration");
     Ok(())
 }
 
@@ -716,7 +740,9 @@ async fn manage_acme_certificate(
                             // Clear the cached certificate and private key
                             let cert_key = cache.key("cert", &domains, &directory_url, &[]);
                             let privkey_key = cache.key("privkey", &domains, &directory_url, &[]);
-                            let mut conn = cache.connection.lock().await;
+                            let redis_manager = RedisManager::get()
+                                .context("Redis manager not initialized")?;
+                            let mut conn = redis_manager.get_connection();
                             let _: () = conn.del(cert_key).await.unwrap_or(());
                             let _: () = conn.del(privkey_key).await.unwrap_or(());
 
@@ -1171,6 +1197,165 @@ impl ResponseData {
 }
 
 
+/// Handle captcha verification endpoint
+async fn handle_captcha_verification(
+    req_parts: hyper::http::request::Parts,
+    req_body_bytes: Bytes,
+    peer_addr: SocketAddr,
+) -> Result<Response<ProxyBody>, Infallible> {
+    use crate::actions::captcha::{validate_and_mark_captcha, apply_captcha_challenge};
+    use std::collections::HashMap;
+
+    // Parse form data from request body
+    let form_data = match String::from_utf8(req_body_bytes.to_vec()) {
+        Ok(body) => {
+            form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect::<HashMap<String, String>>()
+        }
+        Err(e) => {
+            log::warn!("Failed to parse captcha verification request body: {}", e);
+            return Ok(build_proxy_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_body",
+            ));
+        }
+    };
+
+    // Extract captcha response and JWT token from form data
+    let captcha_response = match form_data.get("captcha_response") {
+        Some(response) => response.clone(),
+        None => {
+            log::warn!("Missing captcha_response in verification request from {}", peer_addr.ip());
+            return Ok(build_proxy_error_response(
+                StatusCode::BAD_REQUEST,
+                "missing_captcha_response",
+            ));
+        }
+    };
+
+    let jwt_token = match form_data.get("jwt_token") {
+        Some(token) => token.clone(),
+        None => {
+            log::warn!("Missing jwt_token in verification request from {}", peer_addr.ip());
+            return Ok(build_proxy_error_response(
+                StatusCode::BAD_REQUEST,
+                "missing_jwt_token",
+            ));
+        }
+    };
+
+    // Get user agent for validation
+    let user_agent = req_parts
+        .headers
+        .get("user-agent")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Validate captcha and mark token as validated
+    match validate_and_mark_captcha(
+        captcha_response,
+        jwt_token.clone(),
+        peer_addr.ip().to_string(),
+        Some(user_agent),
+    ).await {
+        Ok(true) => {
+            log::info!("Captcha verification successful for IP: {}", peer_addr.ip());
+
+            // Generate success page with redirect
+            let success_html = format!(
+                r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Verification Successful</title>
+    <meta http-equiv="refresh" content="3;url=/">
+    <style>
+        body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+        .success {{ color: green; margin: 20px 0; }}
+        .redirect {{ color: #666; margin: 10px 0; }}
+    </style>
+</head>
+<body>
+    <h2>Verification Successful</h2>
+    <div class="success">
+        <p>Your request has been verified successfully.</p>
+        <p>You will be redirected automatically in 3 seconds.</p>
+    </div>
+    <div class="redirect">
+        <p><a href="/">Click here if you are not redirected automatically</a></p>
+    </div>
+    <script>
+        // Set captcha token in localStorage for future requests
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token') || '{}';
+        if (token) {{
+            localStorage.setItem('captcha_token', token);
+        }}
+    </script>
+</body>
+</html>"#,
+                jwt_token
+            );
+
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .header("Pragma", "no-cache")
+                .header("Expires", "0")
+                .body(Full::new(Bytes::from(success_html)).map_err(|e| match e {}).boxed())
+                .unwrap())
+        }
+        Ok(false) => {
+            log::warn!("Captcha verification failed for IP: {}", peer_addr.ip());
+
+            // Generate failure page with retry option
+            let failure_html = match apply_captcha_challenge() {
+                Ok(html) => html,
+                Err(e) => {
+                    log::error!("Failed to generate captcha challenge HTML for retry: {}", e);
+                    format!(
+                        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Verification Failed</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }}
+        .error {{ color: red; margin: 20px 0; }}
+    </style>
+</head>
+<body>
+    <h2>Verification Failed</h2>
+    <div class="error">
+        <p>Captcha verification failed. Please try again.</p>
+        <p><a href="/">Return to main page</a></p>
+    </div>
+</body>
+</html>"#
+                    )
+                }
+            };
+
+            Ok(Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .header("Pragma", "no-cache")
+                .header("Expires", "0")
+                .body(Full::new(Bytes::from(failure_html)).map_err(|e| match e {}).boxed())
+                .unwrap())
+        }
+        Err(e) => {
+            log::error!("Captcha verification error for IP {}: {}", peer_addr.ip(), e);
+            Ok(build_proxy_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "captcha_verification_error",
+            ))
+        }
+    }
+}
+
 pub async fn proxy_http_service(
     req: Request<Incoming>,
     ctx: Arc<ProxyContext>,
@@ -1192,13 +1377,19 @@ pub async fn proxy_http_service(
         }
     };
 
-    // Enforce TLS-only mode (except ACME challenges)
+    // Handle captcha verification endpoint
+    if req_parts.uri.path() == "/cgi-bin/captcha/verify" {
+        return handle_captcha_verification(req_parts, req_body_bytes, peer_addr).await;
+    }
+
+    // Enforce TLS-only mode (except ACME challenges and captcha verification)
     if ctx.tls_only {
         let is_acme_challenge = req_parts
             .uri
             .path()
             .starts_with("/.well-known/acme-challenge/");
-        if !is_acme_challenge && tls_fingerprint.is_none() {
+        let is_captcha_verify = req_parts.uri.path() == "/cgi-bin/captcha/verify";
+        if !is_acme_challenge && !is_captcha_verify && tls_fingerprint.is_none() {
             // Generate access log for TLS required block
             let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
             if let Err(e) = create_access_log(
@@ -1221,34 +1412,239 @@ pub async fn proxy_http_service(
         }
     }
 
+    // Check for captcha challenge requirement before applying wirefilter rules
+    let user_agent = req_parts
+        .headers
+        .get("user-agent")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Extract captcha token from headers or query parameters
+    let captcha_token = req_parts
+        .headers
+        .get("x-captcha-token")
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| {
+            // Also check query parameters for captcha token
+            req_parts.uri.query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find(|param| param.starts_with("captcha_token="))
+                        .and_then(|param| param.split('=').nth(1))
+                })
+        })
+        .unwrap_or("")
+        .to_string();
+
+    // Check if captcha challenge is required based on threat intelligence
+    let challenge_required = match threat::get_waf_fields(&peer_addr.ip().to_string()).await {
+        Ok(Some(waf_fields)) => waf_fields.threat_advice == "challenge",
+        _ => false,
+    };
+
+    // Handle captcha challenge logic
+    if challenge_required {
+        // Validate captcha token if present
+        let captcha_validated = if !captcha_token.is_empty() {
+            match validate_captcha_token(&captcha_token, &peer_addr.ip().to_string(), &user_agent).await {
+                Ok(true) => {
+                    log::debug!("Captcha token validated successfully for IP: {}", peer_addr.ip());
+                    true
+                }
+                Ok(false) => {
+                    log::debug!("Captcha token validation failed for IP: {}", peer_addr.ip());
+                    false
+                }
+                Err(e) => {
+                    log::warn!("Captcha token validation error for IP {}: {}", peer_addr.ip(), e);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !captcha_validated {
+            // Generate a new captcha token
+            let captcha_token = match generate_captcha_token(
+                peer_addr.ip().to_string(),
+                user_agent.clone(),
+                None, // JA4 fingerprint could be added here if available
+            ).await {
+                Ok(token) => token.token,
+                Err(e) => {
+                    log::error!("Failed to generate captcha token for IP {}: {}", peer_addr.ip(), e);
+                    return Ok(build_proxy_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "captcha_token_generation_failed",
+                    ));
+                }
+            };
+
+            // Generate captcha challenge HTML with JWT token
+            let challenge_html = match apply_captcha_challenge_with_token(&captcha_token) {
+                Ok(html) => html,
+                Err(e) => {
+                    log::warn!("Failed to generate captcha challenge HTML with token: {}. Falling back to basic challenge.", e);
+                    // Fallback to basic captcha challenge without token
+                    match apply_captcha_challenge() {
+                        Ok(html) => html,
+                        Err(e2) => {
+                            log::error!("Failed to generate basic captcha challenge HTML: {}", e2);
+                            return Ok(build_proxy_error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "captcha_challenge_generation_failed",
+                            ));
+                        }
+                    }
+                }
+            };
+
+            log::info!("Captcha challenge required for IP: {}", peer_addr.ip());
+
+            // Generate access log for captcha challenge
+            let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+            if let Err(e) = create_access_log(
+                &req_parts,
+                &req_body_bytes,
+                peer_addr,
+                dst_addr,
+                tls_fingerprint,
+                ResponseData::for_blocked_request("captcha_challenge_required", 403),
+            )
+            .await
+            {
+                log::warn!("Failed to log captcha challenge request: {}", e);
+            }
+
+            // Return captcha challenge page with token
+            let body = challenge_html;
+            let boxed = Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed();
+            let response = Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .header("Pragma", "no-cache")
+                .header("Expires", "0")
+                .header("X-Captcha-Token", &captcha_token)
+                .body(boxed)
+                .unwrap();
+
+            return Ok(response);
+        }
+    }
+
     // Apply wirefilter rules before forwarding to upstream
     if let Some(filter) = get_global_http_filter() {
         match filter.should_block_request_from_parts(&req_parts, &req_body_bytes, peer_addr).await {
-            Ok(true) => {
-                log::info!("Request blocked by wirefilter from {}: {} {}",
+            Ok(Some(waf_result)) => {
+                log::info!("Request {} by wirefilter rule '{}' from {}: {} {}",
+                    match waf_result.action {
+                        crate::wirefilter::WafAction::Block => "blocked",
+                        crate::wirefilter::WafAction::Challenge => "challenged",
+                        crate::wirefilter::WafAction::Allow => "allowed",
+                    },
+                    waf_result.rule_name,
                     peer_addr, req_parts.method, req_parts.uri);
 
-                // Generate access log for blocked request
-                let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
-                if let Err(e) = create_access_log(
-                    &req_parts,
-                    &req_body_bytes,
-                    peer_addr,
-                    dst_addr,
-                    tls_fingerprint,
-                    ResponseData::for_blocked_request("request_blocked_by_filter", 403),
-                )
-                .await
-                {
-                    log::warn!("Failed to log blocked request: {}", e);
-                }
+                match waf_result.action {
+                    crate::wirefilter::WafAction::Block => {
+                        // Generate access log for blocked request
+                        let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+                        if let Err(e) = create_access_log(
+                            &req_parts,
+                            &req_body_bytes,
+                            peer_addr,
+                            dst_addr,
+                            tls_fingerprint,
+                            ResponseData::for_blocked_request("request_blocked_by_filter", 403),
+                        )
+                        .await
+                        {
+                            log::warn!("Failed to log blocked request: {}", e);
+                        }
 
-                return Ok(build_proxy_error_response(
-                    StatusCode::FORBIDDEN,
-                    "request_blocked_by_filter",
-                ));
+                        return Ok(build_proxy_error_response(
+                            StatusCode::FORBIDDEN,
+                            "request_blocked_by_filter",
+                        ));
+                    }
+                    crate::wirefilter::WafAction::Challenge => {
+                        // Generate a new captcha token for WAF challenge
+                        let captcha_token = match generate_captcha_token(
+                            peer_addr.ip().to_string(),
+                            user_agent.clone(),
+                            None, // JA4 fingerprint could be added here if available
+                        ).await {
+                            Ok(token) => token.token,
+                            Err(e) => {
+                                log::error!("Failed to generate captcha token for WAF challenge IP {}: {}", peer_addr.ip(), e);
+                                return Ok(build_proxy_error_response(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "captcha_token_generation_failed",
+                                ));
+                            }
+                        };
+
+                        // Generate captcha challenge HTML with JWT token
+                        let challenge_html = match apply_captcha_challenge_with_token(&captcha_token) {
+                            Ok(html) => html,
+                            Err(e) => {
+                                log::warn!("Failed to generate captcha challenge HTML with token: {}. Falling back to basic challenge.", e);
+                                // Fallback to basic captcha challenge without token
+                                match apply_captcha_challenge() {
+                                    Ok(html) => html,
+                                    Err(e2) => {
+                                        log::error!("Failed to generate basic captcha challenge HTML: {}", e2);
+                                        return Ok(build_proxy_error_response(
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            "captcha_challenge_generation_failed",
+                                        ));
+                                    }
+                                }
+                            }
+                        };
+
+                        log::info!("Captcha challenge required for IP: {}", peer_addr.ip());
+
+                        // Generate access log for captcha challenge
+                        let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+                        let response_data = ResponseData::for_blocked_request("captcha_challenge_required", 403);
+                        if let Err(e) = create_access_log(
+                            &req_parts,
+                            &req_body_bytes,
+                            peer_addr,
+                            dst_addr,
+                            tls_fingerprint,
+                            response_data,
+                        ).await {
+                            log::warn!("Failed to log captcha challenge request: {}", e);
+                        }
+
+                        // Return captcha challenge page with token
+                        let body = challenge_html;
+                        let boxed = Full::new(Bytes::from(body))
+                            .map_err(|never| match never {})
+                            .boxed();
+                        return Ok(Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .header("Content-Type", "text/html; charset=utf-8")
+                            .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                            .header("Pragma", "no-cache")
+                            .header("Expires", "0")
+                            .header("X-Captcha-Token", &captcha_token)
+                            .body(boxed)
+                            .unwrap());
+                    }
+                    crate::wirefilter::WafAction::Allow => {
+                        // Request allowed, continue processing
+                    }
+                }
             }
-            Ok(false) => {
+            Ok(None) => {
                 // Request allowed, continue processing
             }
             Err(e) => {
@@ -1435,27 +1831,28 @@ pub async fn run_custom_tls_proxy(
 pub async fn run_acme_http01_proxy(
     https_listener: TcpListener,
     http_listener: TcpListener,
-    args: &Args,
+    acme_config: &crate::cli::AcmeConfig,
+    redis_config: &crate::cli::RedisConfig,
+    domains: Vec<String>,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
     skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    if !args.acme_accept_tos {
+    if !acme_config.accept_tos {
         return Err(anyhow!(
-            "ACME mode requires --acme-accept-tos to acknowledge the certificate authority terms"
+            "ACME mode requires accept_tos: true in config to acknowledge the certificate authority terms"
         ));
     }
 
-    let domains = args.acme_domains.clone();
     if domains.is_empty() {
         return Err(anyhow!("ACME mode requires at least one domain"));
     }
 
-    let contacts = if args.acme_contacts.is_empty() {
+    let contacts = if acme_config.contacts.is_empty() {
         vec![]
     } else {
-        args.acme_contacts
+        acme_config.contacts
             .iter()
             .map(|c| ensure_mailto(c))
             .collect::<Vec<_>>()
@@ -1469,15 +1866,15 @@ pub async fn run_acme_http01_proxy(
         .await;
 
     // Initialize Redis cache
-    let redis_cache = RedisAcmeCache::new(&args.redis_url, args.redis_prefix.clone() + ":acme").await?;
+    let redis_cache = RedisAcmeCache::new(redis_config.prefix.clone() + ":acme").await?;
 
     // Shared store for HTTP-01 challenge tokens
     let challenge_store: ChallengeStore = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
     // Determine directory URL
-    let directory_url = if let Some(dir) = &args.acme_directory {
+    let directory_url = if let Some(dir) = &acme_config.directory {
         dir.clone()
-    } else if args.acme_use_prod {
+    } else if acme_config.use_prod {
         LetsEncrypt::Production.url().to_string()
     } else {
         LetsEncrypt::Staging.url().to_string()

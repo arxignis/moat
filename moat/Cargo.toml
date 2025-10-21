@@ -29,9 +29,10 @@ http-body-util = "0.1"
 plain = "0.2.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 clap = { version = "4.5.4", features = ["derive"] }
 nix = { version = "0.29.0", features = ["net", "fs"] }
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.32", features = ["tokio-native-tls-comp", "connection-manager"]}
 tokio-rustls = "0.26.4"
 rustls = { version = "0.23.12", default-features = false, features = [
   "std",
@@ -65,3 +66,6 @@ wirefilter-engine = { git = "https://github.com/arxignis/wirefilter" , rev = "ab
 flate2 = "1.0"
 log = "0.4.28"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+jsonwebtoken = "9.3"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+url = "2.5"
