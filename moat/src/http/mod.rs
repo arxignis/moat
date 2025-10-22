@@ -13,6 +13,7 @@ use crate::wirefilter::get_global_http_filter;
 use crate::actions::captcha::{validate_captcha_token, generate_captcha_token, apply_captcha_challenge, apply_captcha_challenge_with_token};
 use crate::threat;
 use crate::redis::RedisManager;
+use crate::access_rules::is_ip_allowed_by_access_rules;
 use crate::{bpf, utils::bpf_utils};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -1409,6 +1410,68 @@ pub async fn proxy_http_service(
                 StatusCode::UPGRADE_REQUIRED,
                 "tls_required",
             ));
+        }
+    }
+
+    // Check if IP is allowed by access rules - if so, skip threat intelligence and WAF
+    let is_allowed_by_access_rules = is_ip_allowed_by_access_rules(peer_addr.ip());
+    if is_allowed_by_access_rules {
+        log::info!("Request from {} allowed by access rules, skipping threat intelligence and WAF", peer_addr.ip());
+
+        // Forward directly to upstream without threat intelligence or WAF checks
+        match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
+            Ok(response) => {
+                // Capture response body for logging
+                let (response_parts, response_body) = response.into_parts();
+                let response_body_bytes = match response_body.collect().await {
+                    Ok(collected) => collected.to_bytes(),
+                    Err(e) => {
+                        log::warn!("Failed to read response body: {}", e);
+                        bytes::Bytes::new()
+                    }
+                };
+
+                // Log successful requests with access rules bypass flag
+                let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+                let temp_response = Response::from_parts(response_parts.clone(), Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
+                let mut response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|e| {
+                    log::warn!("Failed to process response for logging: {}", e);
+                    ResponseData::for_blocked_request("logging_error", 500)
+                });
+
+                // Add access rules bypass information to the response data
+                if let Some(response_json) = response_data.response_json.as_object_mut() {
+                    response_json.insert("access_rules_bypass".to_string(), serde_json::Value::Bool(true));
+                }
+
+                if let Err(e) = create_access_log(
+                    &req_parts,
+                    &req_body_bytes,
+                    peer_addr,
+                    dst_addr,
+                    tls_fingerprint,
+                    response_data,
+                )
+                .await
+                {
+                    log::warn!("Failed to log access request: {}", e);
+                }
+
+                // Reconstruct response
+                let response = Response::from_parts(response_parts, Full::new(response_body_bytes).map_err(|never| match never {}).boxed());
+                return Ok(response);
+            }
+            Err(err) => {
+                log::error!(
+                    "proxy error from {}: {err:?}",
+                    peer.map(|p| p.to_string())
+                        .unwrap_or_else(|| "<unknown>".into())
+                );
+                return Ok(build_proxy_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "proxy_error",
+                ));
+            }
         }
     }
 

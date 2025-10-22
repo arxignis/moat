@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, IpAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::select;
@@ -11,6 +11,8 @@ use crate::config;
 use crate::config::{fetch_config, global_config};
 use crate::wirefilter::update_http_filter_from_config_value;
 use crate::firewall::{Firewall, MOATFirewall};
+use crate::utils::http_utils::parse_ip_or_cidr;
+use crate::utils::http_utils::is_ip_in_cidr;
 
 // Store previous rules state for comparison
 type PreviousRules = Arc<Mutex<HashSet<(Ipv4Addr, u32)>>>;
@@ -307,4 +309,57 @@ fn apply_rules(
     if ipv6_changed { *previous_rules_v6_guard = current_rules_v6; }
 
     Ok(())
+}
+
+/// Check if an IP address is allowed by access rules
+/// Returns true if the IP is explicitly allowed, false otherwise
+pub fn is_ip_allowed_by_access_rules(ip: IpAddr) -> bool {
+    if let Ok(guard) = global_config().read() {
+        if let Some(cfg) = guard.as_ref() {
+            let allow_rules = &cfg.access_rules.allow;
+
+            // Check direct IP matches
+            for ip_str in &allow_rules.ips {
+                if let Ok(allowed_ip) = ip_str.parse::<IpAddr>() {
+                    if ip == allowed_ip {
+                        return true;
+                    }
+                }
+
+                // Check CIDR ranges
+                if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str) {
+                    if is_ip_in_cidr(ip, network, prefix_len) {
+                        return true;
+                    }
+                }
+            }
+
+            // Check country-based allow rules
+            for country_map in &allow_rules.country {
+                for (_country_code, ip_list) in country_map.iter() {
+                    for ip_str in ip_list {
+                        if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str) {
+                            if is_ip_in_cidr(ip, network, prefix_len) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check ASN-based allow rules
+            for asn_map in &allow_rules.asn {
+                for (_asn, ip_list) in asn_map.iter() {
+                    for ip_str in ip_list {
+                        if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str) {
+                            if is_ip_in_cidr(ip, network, prefix_len) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
