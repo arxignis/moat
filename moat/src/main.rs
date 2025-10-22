@@ -61,13 +61,24 @@ async fn main() -> Result<()> {
         builder.try_init().ok();
     }
 
-    let iface_names: Vec<String> = if !args.iface.is_empty() {
-        vec![args.iface.clone()]
-    } else {
-        vec![args.iface.clone()]
+    let iface_names: Vec<String> = {
+        // Allow comma-separated interface list for compatibility with multi-iface builds.
+        let parsed: Vec<String> = args
+            .iface
+            .split(',')
+            .map(|iface| iface.trim())
+            .filter(|iface| !iface.is_empty())
+            .map(|iface| iface.to_string())
+            .collect();
+        if parsed.is_empty() {
+            vec![args.iface.clone()]
+        } else {
+            parsed
+        }
     };
 
     let mut skels: Vec<Arc<bpf::FilterSkel<'static>>> = Vec::new();
+    let mut ifindices: Vec<i32> = Vec::new();
 
     if args.disable_xdp {
         log::info!("XDP disabled by --disable-xdp flag, skipping BPF attachment");
@@ -89,8 +100,9 @@ async fn main() -> Result<()> {
                         log::error!("failed to attach XDP to '{}': {e}", iface);
                         continue;
                     }
-                    log::info!("BPF sucessfully attached to xdp on {}", iface);
+                    log::info!("BPF successfully attached to XDP on {}", iface);
                     skels.push(Arc::new(skel));
+                    ifindices.push(ifindex);
                 }
                 Err(e) => {
                     log::warn!("failed to load BPF skeleton for '{}': {e}", iface);
@@ -220,14 +232,15 @@ async fn main() -> Result<()> {
                 log::info!("HTTPS proxy listening on https://{}", args.tls_addr);
                 let shutdown = shutdown_rx.clone();
                 let tls_state_clone = tls_state.clone();
-                let skel_clone = state.skels.first().cloned();
+                let proxy_ctx_clone = proxy_ctx.clone();
+                let skels_clone = state.skels.clone();
                 Some(tokio::spawn(async move {
                     if let Err(err) = run_custom_tls_proxy(
                         listener,
                         config.clone(),
-                        proxy_ctx,
+                        proxy_ctx_clone,
                         tls_state_clone,
-                        skel_clone,
+                        skels_clone,
                         shutdown,
                     )
                     .await
@@ -244,21 +257,25 @@ async fn main() -> Result<()> {
                     .await
                     .context("failed to bind HTTPS socket")?;
 
-                log::info!("HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)", args.http_addr);
+                log::info!(
+                    "HTTP server listening on http://{} (ACME HTTP-01 challenges + regular HTTP)",
+                    args.http_addr
+                );
                 log::info!("HTTPS server (ACME) listening on https://{}", args.tls_addr);
 
                 let tls_state_clone = tls_state.clone();
                 let shutdown = shutdown_rx.clone();
                 let args_clone = args.clone();
-                let skel_clone = state.skels.first().cloned();
+                let proxy_ctx_clone = proxy_ctx.clone();
+                let skels_clone = state.skels.clone();
                 Some(tokio::spawn(async move {
                     if let Err(err) = run_acme_http01_proxy(
                         https_listener,
                         http_listener,
                         &args_clone,
-                        proxy_ctx,
+                        proxy_ctx_clone,
                         tls_state_clone,
-                        skel_clone,
+                        skels_clone,
                         shutdown,
                     )
                     .await
@@ -274,12 +291,13 @@ async fn main() -> Result<()> {
                     .context("failed to bind HTTP socket")?;
                 log::info!("HTTP proxy listening on http://{}", args.http_addr);
                 let shutdown = shutdown_rx.clone();
-                let skel_clone = state.skels.first().cloned();
+                let proxy_ctx_clone = proxy_ctx.clone();
+                let skels_clone = state.skels.clone();
                 Some(tokio::spawn(async move {
                     if let Err(err) = run_http_proxy(
                         listener,
-                        proxy_ctx,
-                        skel_clone,
+                        proxy_ctx_clone,
+                        skels_clone,
                         shutdown,
                     )
                     .await
@@ -305,6 +323,13 @@ async fn main() -> Result<()> {
         && let Err(err) = handle.await
     {
         log::error!("access-rules task join error: {err}");
+    }
+
+    if !ifindices.is_empty() {
+        log::info!(
+            "BPF attached to {} interface(s); dropping skeletons will detach on shutdown",
+            ifindices.len()
+        );
     }
 
     Ok(())

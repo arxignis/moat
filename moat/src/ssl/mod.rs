@@ -226,7 +226,7 @@ impl AsRef<TcpStream> for FingerprintTcpStream {
 // Custom stream wrapper that implements Unpin for use with rustls-acme
 pub struct FingerprintingTcpListener {
     inner: TcpListenerStream,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    _skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     pending: Option<
         Pin<
             Box<
@@ -239,10 +239,10 @@ pub struct FingerprintingTcpListener {
 }
 
 impl FingerprintingTcpListener {
-    pub fn new(inner: TcpListenerStream, skel: Option<Arc<bpf::FilterSkel<'static>>>) -> Self {
+    pub fn new(inner: TcpListenerStream, skels: Vec<Arc<bpf::FilterSkel<'static>>>) -> Self {
         Self {
             inner,
-            skel,
+            _skels: skels,
             pending: None,
         }
     }
@@ -298,7 +298,7 @@ impl Unpin for FingerprintingTcpListener {}
 
 pub fn log_tls_fingerprint(peer: SocketAddr, fingerprint: Option<&TlsFingerprint>) {
     if let Some(fp) = fingerprint {
-        println!(
+        log::info!(
             "TLS client {peer}: ja4={} ja4_raw={} ja4_unsorted={} ja4_raw_unsorted={} version={} sni={} alpn={}",
             fp.ja4,
             fp.ja4_raw,
@@ -315,25 +315,53 @@ pub fn ipv4_to_u32_be(ip: Ipv4Addr) -> u32 {
     u32::from_be_bytes(ip.octets())
 }
 
-fn is_ipv4_banned(peer: SocketAddr, skel: &Option<Arc<bpf::FilterSkel<'static>>>) -> bool {
-    let Some(skel) = skel.as_ref() else {
+fn is_ipv4_banned(peer: SocketAddr, skels: &[Arc<bpf::FilterSkel<'static>>]) -> bool {
+    if skels.is_empty() {
         return false;
-    };
+    }
     match peer.ip() {
         std::net::IpAddr::V4(ip) => {
             let key_bytes = bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, 32);
-            match skel
-                .maps
-                .recently_banned_ips
-                .lookup(&key_bytes, MapFlags::ANY)
-            {
-                Ok(Some(flag)) => flag == vec![1u8],
-                Ok(None) => false,
-                Err(e) => {
-                    eprintln!("bpf recently_banned_ips lookup error for {peer}: {e}");
-                    false
+            for skel in skels {
+                match skel
+                    .maps
+                    .recently_banned_ips
+                    .lookup(&key_bytes, MapFlags::ANY)
+                {
+                    Ok(Some(flag)) if flag == vec![1u8] => return true,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        log::error!("bpf recently_banned_ips lookup error for {peer}: {e}");
+                    }
                 }
             }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn is_ipv6_banned(peer: SocketAddr, skels: &[Arc<bpf::FilterSkel<'static>>]) -> bool {
+    if skels.is_empty() {
+        return false;
+    }
+    match peer.ip() {
+        std::net::IpAddr::V6(ip) => {
+            let key_bytes = bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, 128);
+            for skel in skels {
+                match skel
+                    .maps
+                    .recently_banned_ips_v6
+                    .lookup(&key_bytes, MapFlags::ANY)
+                {
+                    Ok(Some(flag)) if flag == vec![1u8] => return true,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        log::error!("bpf recently_banned_ips_v6 lookup error for {peer}: {e}");
+                    }
+                }
+            }
+            false
         }
         _ => false,
     }
@@ -669,7 +697,7 @@ async fn manage_acme_certificate(
                 if let Ok(Some(private_key)) =
                     load_private_key_from_redis(&cache, &domains, &directory_url).await
                 {
-                    println!("Loaded existing certificate from cache");
+                    log::info!("Loaded existing certificate from cache");
                     let config = ServerConfig::builder()
                         .with_no_client_auth()
                         .with_single_cert(certs.clone(), private_key)?;
@@ -682,7 +710,7 @@ async fn manage_acme_certificate(
     }
 
     // Need to obtain new certificate
-    println!("Obtaining new ACME certificate for {:?}", domains);
+    log::info!("Obtaining new ACME certificate for {:?}", domains);
 
     let account = load_or_create_account(&cache, &directory_url, &contacts).await?;
 
@@ -917,18 +945,32 @@ pub fn build_upstream_uri(incoming: &Uri, upstream: &Uri) -> Result<Uri> {
 }
 
 pub fn build_proxy_error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
-    // Use block.html template for WAF blocks, JSON for others
     const BLOCK_HTML: &str = include_str!("../../templates/block.html");
-    
-    let (content_type, body) = if message == "waf_block" {
-        ("text/html; charset=utf-8", BLOCK_HTML.to_string())
+
+    let should_render_block = matches!(
+        status,
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS | StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+    ) || matches!(
+        message,
+        "waf_block"
+            | "waf_error"
+            | "malware_block"
+            | "request_blocked_by_filter"
+            | "forbidden_domain"
+            | "blocked"
+    );
+
+    let (content_type, body_bytes) = if should_render_block {
+        (
+            "text/html; charset=utf-8",
+            Bytes::from_static(BLOCK_HTML.as_bytes()),
+        )
     } else {
-        ("application/json", json!({"ok": false, "error": message}).to_string())
+        let payload = json!({ "ok": false, "error": message }).to_string();
+        ("application/json", Bytes::from(payload))
     };
-    
-    let boxed = Full::new(Bytes::from(body))
-        .map_err(|never| match never {})
-        .boxed();
+
+    let boxed = Full::new(body_bytes).map_err(|never| match never {}).boxed();
     Response::builder()
         .status(status)
         .header(hyper::header::CONTENT_TYPE, content_type)
@@ -1080,7 +1122,7 @@ async fn log_access_request_with_body(
         }
     });
 
-    println!("{}", serde_json::to_string_pretty(&access_log)?);
+    log::info!("{}", serde_json::to_string_pretty(&access_log)?);
     Ok(())
 }
 
@@ -1097,7 +1139,7 @@ pub async fn proxy_http_service(
     let req_body_bytes = match req_body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
-            eprintln!("Failed to read request body: {}", e);
+            log::warn!("Failed to read request body: {}", e);
             return Ok(build_proxy_error_response(
                 StatusCode::BAD_REQUEST,
                 "body_read_error",
@@ -1229,13 +1271,18 @@ pub async fn proxy_http_service(
             Ok(decision) => {
                 if decision.action.as_deref() == Some("block") {
                     if matches!(arx.mode, crate::arxignis::ArxignisMode::Block) {
-                        eprintln!("WAF blocked request: {} {} from {}", req_parts.method, req_parts.uri.path(), remote_ip);
+                        log::info!(
+                            "WAF blocked request: {} {} from {}",
+                            req_parts.method,
+                            req_parts.uri.path(),
+                            remote_ip
+                        );
                         return Ok(build_proxy_error_response(StatusCode::FORBIDDEN, "waf_block"));
                     }
                 }
             }
             Err(e) => {
-                eprintln!("WAF error: {}", e);
+                log::warn!("WAF error: {}", e);
                 // Fail-closed: block request on WAF errors when in block mode
                 if matches!(arx.mode, crate::arxignis::ArxignisMode::Block) {
                     return Ok(build_proxy_error_response(StatusCode::FORBIDDEN, "waf_error"));
@@ -1270,12 +1317,12 @@ pub async fn proxy_http_service(
             )
             .await
             {
-                eprintln!("Failed to log access request: {}", e);
+                log::warn!("Failed to log access request: {}", e);
             }
             Ok(response)
         }
         Err(err) => {
-            eprintln!(
+            log::error!(
                 "proxy error from {}: {err:?}",
                 peer.map(|p| p.to_string())
                     .unwrap_or_else(|| "<unknown>".into())
@@ -1315,7 +1362,7 @@ pub async fn run_custom_tls_proxy(
     server_config: ServerConfigWithCert,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     tls_state
@@ -1327,14 +1374,14 @@ pub async fn run_custom_tls_proxy(
                 let (stream, peer) = match accept {
                     Ok(tuple) => tuple,
                     Err(e) => {
-                        eprintln!("tls accept error: {e}");
+                        log::error!("TLS accept error: {e}");
                         continue;
                     }
                 };
                 let ctx_clone = ctx.clone();
                 let tls_state_clone = tls_state.clone();
                 let config_with_cert = server_config.clone();
-                let skel_clone = skel.clone();
+                let skels_clone = skels.clone();
                 tokio::spawn(async move {
                     let stream = match FingerprintTcpStream::new(stream).await {
                         Ok(s) => {
@@ -1342,18 +1389,22 @@ pub async fn run_custom_tls_proxy(
                             s
                         }
                         Err(err) => {
-                            eprintln!("failed to prepare TLS stream from {peer}: {err}");
+                            log::error!("failed to prepare TLS stream from {peer}: {err}");
                             return;
                         }
                     };
 
                     let peer_addr = stream.peer_addr();
                     let fingerprint = stream.fingerprint().cloned();
-                    // Pre-TLS ban check
-                    if is_ipv4_banned(peer_addr, &skel_clone) {
+                    // Pre-TLS ban check (support both IPv4 and IPv6)
+                    if is_ipv4_banned(peer_addr, &skels_clone) || is_ipv6_banned(peer_addr, &skels_clone) {
                         let mut s = stream.inner;
-                        let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
-                        let _ = s.shutdown().await;
+                        if let Err(err) = s.write_all(BANNED_MESSAGE.as_bytes()).await {
+                            log::warn!("Failed to send ban banner to {peer_addr}: {err}");
+                        }
+                        if let Err(err) = s.shutdown().await {
+                            log::warn!("Failed to shutdown banned socket for {peer_addr}: {err}");
+                        }
                         return;
                     }
                     let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
@@ -1366,27 +1417,32 @@ pub async fn run_custom_tls_proxy(
                                 let sni = client_hello.server_name();
                                 if let Some(sni_str) = sni {
                                     if !ctx_clone.domain_filter.is_allowed(sni_str) {
-                                        eprintln!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer_addr);
+                                        log::warn!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer_addr);
                                         return;
                                     }
                                 } else {
-                                    // No SNI present - block if filter is enabled
-                                    eprintln!("TLS connection without SNI blocked by domain filter from {}", peer_addr);
+                                    log::warn!("TLS connection without SNI blocked by domain filter from {}", peer_addr);
                                     return;
                                 }
                             }
 
                             match start.into_stream(config_with_cert.config.clone()).await {
                                 Ok(tls_stream) => {
-                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone(), fingerprint.as_ref(), config_with_cert.cert_info.clone()).await {
-                                        eprintln!("TLS proxy error from {peer_addr}: {err:?}");
+                                    if let Err(err) = serve_proxy_conn(
+                                        tls_stream,
+                                        Some(peer_addr),
+                                        ctx_clone.clone(),
+                                        fingerprint.as_ref(),
+                                        config_with_cert.cert_info.clone(),
+                                    ).await {
+                                        log::error!("TLS proxy error from {peer_addr}: {err:?}");
                                         tls_state_clone
                                             .set_error_detail(format!("last connection error: {err}"))
                                             .await;
                                     }
                                 }
                                 Err(err) => {
-                                    eprintln!("TLS handshake error from {peer_addr}: {err}");
+                                    log::warn!("TLS handshake error from {peer_addr}: {err}");
                                     tls_state_clone
                                         .set_error_detail(format!("handshake failure: {err}"))
                                         .await;
@@ -1394,7 +1450,7 @@ pub async fn run_custom_tls_proxy(
                             }
                         }
                         Err(err) => {
-                            eprintln!("TLS handshake error from {peer_addr}: {err}");
+                            log::warn!("TLS handshake error from {peer_addr}: {err}");
                             tls_state_clone
                                 .set_error_detail(format!("handshake failure: {err}"))
                                 .await;
@@ -1404,7 +1460,7 @@ pub async fn run_custom_tls_proxy(
             }
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
-                    println!("custom TLS proxy shutdown signal received");
+                    log::info!("custom TLS proxy shutdown signal received");
                     break;
                 }
             }
@@ -1419,7 +1475,7 @@ pub async fn run_acme_http01_proxy(
     args: &Args,
     ctx: Arc<ProxyContext>,
     tls_state: SharedTlsState,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     if !args.acme_accept_tos {
@@ -1487,7 +1543,7 @@ pub async fn run_acme_http01_proxy(
         )
         .await
         {
-            eprintln!("ACME certificate manager error: {err:?}");
+            log::error!("ACME certificate manager error: {err:?}");
             tls_state_clone
                 .set_error_detail(format!("ACME error: {err}"))
                 .await;
@@ -1500,23 +1556,26 @@ pub async fn run_acme_http01_proxy(
 
     // Spawn HTTP server for ACME challenges and regular HTTP traffic
     let http_ctx = ctx.clone();
-    let http_skel = skel.clone();
+    let http_skels = skels.clone();
     let mut http_shutdown = shutdown.clone();
     let challenge_store_http = challenge_store.clone();
 
     tokio::spawn(async move {
-                loop {
+        loop {
             tokio::select! {
                 accept = http_listener.accept() => {
                     match accept {
                         Ok((stream, peer)) => {
-                            // Check if banned
-                            if is_ipv4_banned(peer, &http_skel) {
+                            if is_ipv4_banned(peer, &http_skels) || is_ipv6_banned(peer, &http_skels) {
                                 let mut s = stream;
-                                let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
-                                let _ = s.shutdown().await;
-                                    continue;
+                                if let Err(err) = s.write_all(BANNED_MESSAGE.as_bytes()).await {
+                                    log::warn!("Failed to send ban banner to {peer}: {err}");
                                 }
+                                if let Err(err) = s.shutdown().await {
+                                    log::warn!("Failed to shutdown banned socket for {peer}: {err}");
+                                }
+                                continue;
+                            }
 
                             let ctx_clone = http_ctx.clone();
                             let challenges = challenge_store_http.clone();
@@ -1559,18 +1618,18 @@ pub async fn run_acme_http01_proxy(
                                     .serve_connection(io, service)
                                     .await
                                 {
-                                    eprintln!("HTTP connection error from {peer}: {err}");
+                                    log::warn!("HTTP connection error from {peer}: {err}");
                                 }
                             });
                         }
                         Err(err) => {
-                            eprintln!("HTTP accept error: {err}");
+                            log::warn!("HTTP accept error: {err}");
                         }
                     }
                 }
                 changed = http_shutdown.changed() => {
                     if changed.is_ok() && *http_shutdown.borrow() {
-                        println!("HTTP server shutdown signal received");
+                        log::info!("HTTP server shutdown signal received");
                         break;
                     }
                 }
@@ -1584,22 +1643,26 @@ pub async fn run_acme_http01_proxy(
             accept = https_listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        // Check if banned
-                        if is_ipv4_banned(peer, &skel) {
+                        if is_ipv4_banned(peer, &skels) || is_ipv6_banned(peer, &skels) {
                             let mut s = stream;
-                            let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
-                            let _ = s.shutdown().await;
+                            if let Err(err) = s.write_all(BANNED_MESSAGE.as_bytes()).await {
+                                log::warn!("Failed to send ban banner to {peer}: {err}");
+                            }
+                            if let Err(err) = s.shutdown().await {
+                                log::warn!("Failed to shutdown banned socket for {peer}: {err}");
+                            }
                             continue;
                         }
 
                         let cert_cfg = cert_config.read().await.clone();
                         let Some(config_with_cert) = cert_cfg else {
-                            eprintln!("HTTPS connection from {peer} but certificate not ready yet");
+                            log::warn!("HTTPS connection from {peer} but certificate not ready yet");
                             continue;
                         };
 
                         let ctx_clone = ctx.clone();
                         let tls_state_clone = tls_state.clone();
+                        let skels_clone = skels.clone();
 
                         tokio::spawn(async move {
                             let stream = match FingerprintTcpStream::new(stream).await {
@@ -1609,7 +1672,7 @@ pub async fn run_acme_http01_proxy(
                                     (s, fingerprint)
                                 }
                                 Err(err) => {
-                                    eprintln!("failed to prepare TLS stream from {peer}: {err}");
+                                    log::error!("failed to prepare TLS stream from {peer}: {err}");
                                     return;
                                 }
                             };
@@ -1623,44 +1686,49 @@ pub async fn run_acme_http01_proxy(
                                         let sni = client_hello.server_name();
                                         if let Some(sni_str) = sni {
                                             if !ctx_clone.domain_filter.is_allowed(sni_str) {
-                                                eprintln!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer);
+                                                log::warn!("TLS SNI '{}' blocked by domain filter from {}", sni_str, peer);
                                                 return;
                                             }
                                         } else {
                                             // No SNI present - block if filter is enabled
-                                            eprintln!("TLS connection without SNI blocked by domain filter from {}", peer);
+                                            log::warn!("TLS connection without SNI blocked by domain filter from {}", peer);
                                             return;
                                         }
+                                    }
+
+                                    if is_ipv4_banned(peer, &skels_clone) || is_ipv6_banned(peer, &skels_clone) {
+                                        log::info!("Connection from {peer} banned after handshake preparation");
+                                        return;
                                     }
 
                                     match start.into_stream(config_with_cert.config.clone()).await {
                                         Ok(tls_stream) => {
                                             if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone, stream.1.as_ref(), config_with_cert.cert_info.clone()).await {
-                                                eprintln!("HTTPS proxy error from {peer}: {err:?}");
+                                                log::error!("HTTPS proxy error from {peer}: {err:?}");
                                                 tls_state_clone.set_error_detail(format!("HTTPS session error: {err}")).await;
                             } else {
                                 tls_state_clone.set_running_detail("ACME certificate active").await;
                                             }
                                         }
                                         Err(err) => {
-                                            eprintln!("TLS handshake error from {peer}: {err}");
+                                            log::warn!("TLS handshake error from {peer}: {err}");
                                         }
                                     }
                                 }
                                 Err(err) => {
-                                    eprintln!("TLS accept error from {peer}: {err}");
+                                    log::warn!("TLS accept error from {peer}: {err}");
                                 }
                             }
                         });
                     }
                     Err(err) => {
-                        eprintln!("HTTPS accept error: {err}");
+                        log::warn!("HTTPS accept error: {err}");
                     }
                 }
             }
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
-                    println!("HTTPS server shutdown signal received");
+                    log::info!("HTTPS server shutdown signal received");
                     break;
                 }
             }
@@ -1673,7 +1741,7 @@ pub async fn run_acme_http01_proxy(
 pub async fn run_http_proxy(
     listener: TcpListener,
     ctx: Arc<ProxyContext>,
-    skel: Option<Arc<bpf::FilterSkel<'static>>>,
+    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     loop {
@@ -1681,13 +1749,24 @@ pub async fn run_http_proxy(
             accept = listener.accept() => {
                 let (stream, peer) = match accept {
                     Ok(tuple) => tuple,
-                    Err(e) => { eprintln!("http accept error: {e}"); continue; }
+                    Err(e) => { log::warn!("HTTP accept error: {e}"); continue; }
                 };
                 let ctx_clone = ctx.clone();
-                let skel_clone = skel.clone();
+                let skels_clone = skels.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_http_connection(stream, peer, ctx_clone, skel_clone).await {
-                        eprintln!("http connection error: {err:?}");
+                    if is_ipv4_banned(peer, &skels_clone) || is_ipv6_banned(peer, &skels_clone) {
+                        let mut s = stream;
+                        if let Err(err) = s.write_all(BANNED_MESSAGE.as_bytes()).await {
+                            log::warn!("Failed to send ban banner to {peer}: {err}");
+                        }
+                        if let Err(err) = s.shutdown().await {
+                            log::warn!("Failed to shutdown banned socket for {peer}: {err}");
+                        }
+                        return;
+                    }
+
+                    if let Err(err) = handle_http_connection(stream, peer, ctx_clone).await {
+                        log::warn!("http connection error: {err:?}");
                     }
                 });
             }
@@ -1703,7 +1782,6 @@ async fn handle_http_connection(
     stream: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
     ctx: Arc<ProxyContext>,
-    _skel: Option<Arc<bpf::FilterSkel<'static>>>,
 ) -> Result<()> {
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
@@ -1717,7 +1795,7 @@ async fn handle_http_connection(
     let io = TokioIo::new(stream);
     let conn = http1::Builder::new().serve_connection(io, service);
     if let Err(err) = conn.await {
-        eprintln!("HTTP connection error: {err}");
+        log::warn!("HTTP connection error: {err}");
     }
     Ok(())
 }
