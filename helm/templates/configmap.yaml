@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "moat.fullname" . }}
+  labels:
+    {{- include "moat.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Moat Configuration File
+    # This file contains all configuration options for the Moat reverse proxy
+    #
+    # Environment Variable Overrides:
+    # All configuration options can be overridden using environment variables with the AX_ prefix.
+    # For example: AX_SERVER_UPSTREAM=http://localhost:8080
+
+    # Server Configuration
+    server:
+      # HTTP server bind address (for ACME HTTP-01 challenges and regular HTTP traffic)
+      http_addr: "{{ .Values.moat.server.httpAddr }}"
+
+      # Additional HTTP bind addresses (overrides http_addr if set)
+      http_bind: {{ toYaml .Values.moat.server.httpBind | nindent 6 }}
+
+      # HTTPS reverse-proxy bind address
+      tls_addr: "{{ .Values.moat.server.tlsAddr }}"
+
+      # Additional HTTPS bind addresses (overrides tls_addr if set)
+      tls_bind: {{ toYaml .Values.moat.server.tlsBind | nindent 6 }}
+
+      # Upstream origin URL (required)
+      upstream: "{{ .Values.moat.server.upstream }}"
+
+      # PROXY protocol configuration
+      proxy_protocol:
+        # Enable PROXY protocol support for TCP connections
+        enabled: {{ .Values.moat.server.proxyProtocol.enabled }}
+        # PROXY protocol timeout in milliseconds
+        timeout_ms: {{ .Values.moat.server.proxyProtocol.timeoutMs }}
+
+      # Health check endpoint configuration
+      health_check:
+        # Enable or disable health check server
+        enabled: {{ .Values.moat.server.healthCheck.enabled }}
+        # Health check endpoint path
+        endpoint: "{{ .Values.moat.server.healthCheck.endpoint }}"
+        # Health check server bind address (separate from main proxy)
+        port: "{{ .Values.moat.server.healthCheck.port }}"
+        # Allowed HTTP methods for health checks
+        methods: {{ toYaml .Values.moat.server.healthCheck.methods | nindent 8 }}
+        # Allowed CIDR blocks (empty means allow all IPs)
+        allowed_cidrs: {{ toYaml .Values.moat.server.healthCheck.allowedCidrs | nindent 8 }}
+
+    # TLS Configuration
+    tls:
+      # TLS operating mode: disabled, acme, custom
+      mode: "{{ .Values.moat.tls.mode }}"
+
+      # Require TLS for application traffic (HTTP used only for ACME)
+      only: {{ .Values.moat.tls.only }}
+
+      # Path to custom certificate (PEM) when using custom TLS mode
+      cert_path: {{ if .Values.moat.tls.certPath }}{{ .Values.moat.tls.certPath }}{{ else }}null{{ end }}
+
+      # Path to custom private key (PEM) when using custom TLS mode
+      key_path: {{ if .Values.moat.tls.keyPath }}{{ .Values.moat.tls.keyPath }}{{ else }}null{{ end }}
+
+    # ACME Configuration
+    acme:
+      # Domains for ACME certificate issuance and domain whitelist
+      domains: {{ toYaml .Values.moat.acme.domains | nindent 6 }}
+
+      # Domain wildcard patterns for filtering
+      wildcards: {{ toYaml .Values.moat.acme.wildcards | nindent 6 }}
+
+      # ACME contact addresses (mailto: optional)
+      contacts: {{ toYaml .Values.moat.acme.contacts | nindent 6 }}
+
+      # Use Let's Encrypt production directory instead of staging
+      use_prod: {{ .Values.moat.acme.useProd }}
+
+      # Override ACME directory URL (useful for Pebble or other test CAs)
+      directory: {{ if .Values.moat.acme.directory }}{{ .Values.moat.acme.directory }}{{ else }}null{{ end }}
+
+      # Explicitly accept the ACME Terms of Service
+      accept_tos: {{ .Values.moat.acme.acceptTos }}
+
+      # Custom CA bundle for the ACME directory (PEM file)
+      ca_root: {{ if .Values.moat.acme.caRoot }}{{ .Values.moat.acme.caRoot }}{{ else }}null{{ end }}
+
+    # Redis Configuration
+    redis:
+      # Redis connection URL for ACME cache storage
+      url: "{{ .Values.moat.redis.url }}"
+
+      # Namespace prefix for Redis ACME cache entries
+      prefix: "{{ .Values.moat.redis.prefix }}"
+
+    # Network Configuration
+    network:
+      # The network interface to attach the XDP program to
+      iface: "{{ .Values.moat.network.iface }}"
+
+      # Additional network interfaces for XDP attach (overrides iface if set)
+      ifaces: {{ toYaml .Values.moat.network.ifaces | nindent 6 }}
+
+      # Disable XDP packet filtering (run without BPF/XDP)
+      disable_xdp: {{ .Values.moat.network.disableXdp }}
+
+    # Arx Ignis Configuration
+    arxignis:
+      # API key for Arx Ignis service
+      api_key: "{{ .Values.moat.arxignis.apiKey }}"
+
+      # Base URL for Arx Ignis API
+      base_url: "{{ .Values.moat.arxignis.baseUrl }}"
+
+      # Captcha Configuration
+      captcha:
+        # Captcha site key for security verification
+        site_key: {{ if .Values.moat.arxignis.captcha.siteKey }}{{ .Values.moat.arxignis.captcha.siteKey }}{{ else }}null{{ end }}
+
+        # Captcha secret key for security verification
+        secret_key: {{ if .Values.moat.arxignis.captcha.secretKey }}{{ .Values.moat.arxignis.captcha.secretKey }}{{ else }}null{{ end }}
+
+        # JWT secret key for captcha token signing
+        jwt_secret: {{ if .Values.moat.arxignis.captcha.jwtSecret }}{{ .Values.moat.arxignis.captcha.jwtSecret }}{{ else }}null{{ end }}
+
+        # Captcha provider: hcaptcha, recaptcha, turnstile
+        provider: "{{ .Values.moat.arxignis.captcha.provider }}"
+
+        # Captcha token TTL in seconds
+        token_ttl: {{ .Values.moat.arxignis.captcha.tokenTtl }}
+
+        # Captcha validation cache TTL in seconds
+        cache_ttl: {{ .Values.moat.arxignis.captcha.cacheTtl }}
+
+    # Content Scanning Configuration
+    content_scanning:
+      # Enable or disable content scanning
+      enabled: {{ .Values.moat.contentScanning.enabled }}
+
+      # ClamAV server address
+      clamav_server: "{{ .Values.moat.contentScanning.clamavServer }}"
+
+      # Maximum file size to scan in bytes (10MB)
+      max_file_size: {{ .Values.moat.contentScanning.maxFileSize }}
+
+      # Content types to scan (empty means scan all)
+      scan_content_types: {{ toYaml .Values.moat.contentScanning.scanContentTypes | nindent 6 }}
+
+      # Skip scanning for specific file extensions
+      skip_extensions: {{ toYaml .Values.moat.contentScanning.skipExtensions | nindent 6 }}
+
+      # Wirefilter expression to determine when to scan content
+      scan_expression: "{{ .Values.moat.contentScanning.scanExpression }}"
+
+    # Logging Configuration
+    logging:
+      # Log level: error, warn, info, debug, trace
+      level: "{{ .Values.moat.logging.level }}"
