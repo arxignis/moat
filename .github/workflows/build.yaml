@@ -1,5 +1,8 @@
 name: Continuous integration
-on: [push, pull_request]
+on:
+  pull_request:
+      branches:
+        - main
 
 jobs:
   build:
@@ -18,7 +21,7 @@ jobs:
           restore-keys: ${{ runner.os }}-moat
       - name: Install package
         run: |
-          apt-get update && apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \
+          sudo apt-get update && sudo apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \
           zlib1g-dev libzstd-dev pkg-config libcap-dev binutils-multiarch-dev curl cmake ca-certificates libelf-dev libelf1 libssl3
       - name: Update toolchain
         run: rustup update stable && rustup default stable
