@@ -39,12 +39,12 @@ use crate::app_state::AppState;
 use crate::arxignis::{ArxignisClient, ArxignisMode, CaptchaConfig, CaptchaProvider};
 use crate::cli::Args;
 use crate::domain_filter::DomainFilter;
-use crate::ssl::{
+use crate::http::{
     ProxyContext, SharedTlsState, TlsMode, install_ring_crypto_provider, load_custom_server_config,
     run_acme_http01_proxy, run_custom_tls_proxy, run_http_proxy,
 };
-use crate::utils::bpf_utils;
 use crate::wirefilter::init_config;
+use crate::utils::bpf_utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -134,7 +134,9 @@ async fn main() -> Result<()> {
     let state = AppState {
         skels: skels.clone(),
         tls_state: tls_state.clone(),
+        ifindices: ifindices.clone(),
     };
+
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -167,6 +169,9 @@ async fn main() -> Result<()> {
         }
         parsed
     };
+
+
+    // Access rules were already initialized after XDP attachment above
 
     // Start periodic access rules updater (if BPF is available)
     let access_rules_handle = if !state.skels.is_empty() {
@@ -410,11 +415,14 @@ async fn main() -> Result<()> {
         log::error!("access-rules task join error: {err}");
     }
 
+    // Detach XDP programs from interfaces
     if !ifindices.is_empty() {
-        log::info!(
-            "BPF attached to {} interface(s); dropping skeletons will detach on shutdown",
-            ifindices.len()
-        );
+        log::info!("Detaching XDP programs from {} interfaces...", ifindices.len());
+        for ifindex in ifindices {
+            if let Err(e) = bpf_utils::bpf_detach_from_xdp(ifindex) {
+                log::error!("Failed to detach XDP from interface {}: {}", ifindex, e);
+            }
+        }
     }
 
     Ok(())

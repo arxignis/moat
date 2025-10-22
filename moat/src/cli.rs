@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 
-use crate::ssl::TlsMode;
+use crate::http::TlsMode;
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum LogLevel {
