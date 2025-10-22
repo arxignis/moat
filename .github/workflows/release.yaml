@@ -1,21 +1,21 @@
-name: Moat release
+name: Release
+permissions:
+  # Allow this action to create releases.
+  contents: write
+  packages: write
+  
 
 on:
-  push:
+  create:
     tags:
-      - v*
-    paths:
-      - '**/*.rs'
-      - 'Dockerfile'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - .github/workflows/release.yaml
+    - 'v*'
+  workflow_dispatch:
 
 env:
   MOAT_REGISTRY_IMAGE: ghcr.io/arxignis/moat
 
 jobs:
-  moat-prepare:
+  docker-prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
@@ -56,14 +56,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  moat-build:
+  docker-build:
     runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     needs:
-      - moat-prepare
+      - docker-prepare
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJson(needs.moat-prepare.outputs.matrix) }}
+        platform: ${{ fromJson(needs.docker-prepare.outputs.matrix) }}
     steps:
       - name: Prepare
         run: |
@@ -116,10 +116,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  moat-merge:
+  docker-merge:
     runs-on: ubuntu-latest
     needs:
-      - moat-build
+      - docker-build
     steps:
       - name: Download meta bake definition
         uses: actions/download-artifact@v5
@@ -153,3 +153,77 @@ jobs:
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.MOAT_REGISTRY_IMAGE }}:$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' ${{ runner.temp }}/moat-bake-meta.json)
+
+
+  build-artifacts:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    env:
+      CARGO_TERM_COLOR: always
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+        - linux-arm
+        - linux-intel
+        include:
+        - build: linux-intel
+          os: ubuntu-latest
+          target: x86_64-unknown-linux-gnu
+
+        - build: linux-arm
+          os: ubuntu-24.04-arm
+          target: aarch64-unknown-linux-gnu
+
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Check version number
+      shell: bash
+      run: |
+        set -ex
+        version=`cargo pkgid --manifest-path Cargo.toml | cut -d "@" -f2`
+        if [ "${{ github.ref_name }}" != "v$version" ]; then
+          exit 1
+        fi
+
+    - run: rustup target add ${{ matrix.target }}
+
+    - name: Build
+      run: cargo build --bin moat --release --target ${{ matrix.target }}
+
+    - name: Build archive
+      shell: bash
+      run: |
+        tar czf moat-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release moat
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: moat-${{ matrix.target }}
+        path: moat-*
+  publish-artifacts:
+      needs: [ build-artifacts ]
+      runs-on: ubuntu-latest
+
+      steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: moat-*
+
+      - name: ls
+        shell: bash
+        run: ls
+
+      - name: Release
+        uses: softprops/action-gh-release@v2.2.1
+        with:
+          draft: true
+          files: moat-*/moat-*
