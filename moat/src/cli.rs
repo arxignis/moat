@@ -17,6 +17,7 @@ pub struct Config {
     pub network: NetworkConfig,
     pub arxignis: ArxignisConfig,
     pub domains: DomainConfig,
+    pub content_scanning: ContentScanningCliConfig,
     pub logging: LoggingConfig,
 }
 
@@ -77,6 +78,27 @@ fn default_base_url() -> String {
 pub struct DomainConfig {
     pub whitelist: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentScanningCliConfig {
+    #[serde(default = "default_scanning_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_clamav_server")]
+    pub clamav_server: String,
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size: usize,
+    #[serde(default)]
+    pub scan_content_types: Vec<String>,
+    #[serde(default)]
+    pub skip_extensions: Vec<String>,
+    #[serde(default = "default_scan_expression")]
+    pub scan_expression: String,
+}
+
+fn default_scanning_enabled() -> bool { false }
+fn default_clamav_server() -> String { "localhost:3310".to_string() }
+fn default_max_file_size() -> usize { 10 * 1024 * 1024 }
+fn default_scan_expression() -> String { "http.request.method eq \"POST\" or http.request.method eq \"PUT\"".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
@@ -147,6 +169,20 @@ impl Config {
             },
             domains: DomainConfig {
                 whitelist: vec![],
+            },
+            content_scanning: ContentScanningCliConfig {
+                enabled: false,
+                clamav_server: "localhost:3310".to_string(),
+                max_file_size: 10 * 1024 * 1024,
+                scan_content_types: vec![
+                    "text/html".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                    "multipart/form-data".to_string(),
+                    "application/json".to_string(),
+                    "text/plain".to_string(),
+                ],
+                skip_extensions: vec![],
+                scan_expression: default_scan_expression(),
             },
             logging: LoggingConfig {
                 level: "info".to_string(),
@@ -322,6 +358,26 @@ impl Config {
         // Logging configuration overrides
         if let Ok(val) = env::var("AX_LOGGING_LEVEL") {
             self.logging.level = val;
+        }
+
+        // Content scanning overrides
+        if let Ok(val) = env::var("AX_CONTENT_SCANNING_ENABLED") {
+            self.content_scanning.enabled = val.parse().unwrap_or(false);
+        }
+        if let Ok(val) = env::var("AX_CLAMAV_SERVER") {
+            self.content_scanning.clamav_server = val;
+        }
+        if let Ok(val) = env::var("AX_CONTENT_MAX_FILE_SIZE") {
+            self.content_scanning.max_file_size = val.parse().unwrap_or(10 * 1024 * 1024);
+        }
+        if let Ok(val) = env::var("AX_CONTENT_SCAN_CONTENT_TYPES") {
+            self.content_scanning.scan_content_types = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(val) = env::var("AX_CONTENT_SKIP_EXTENSIONS") {
+            self.content_scanning.skip_extensions = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(val) = env::var("AX_CONTENT_SCAN_EXPRESSION") {
+            self.content_scanning.scan_expression = val;
         }
 
         // Captcha configuration overrides

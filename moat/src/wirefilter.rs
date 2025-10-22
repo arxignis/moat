@@ -87,7 +87,9 @@ impl HttpFilter {
 
         Ok(Self {
             scheme,
-            rules: Arc::new(RwLock::new(vec![(filter, WafAction::Block, "default".to_string(), "default".to_string())])),
+            rules: Arc::new(RwLock::new(vec![
+                (filter, WafAction::Block, "default".to_string(), "default".to_string())
+            ])),
             rules_hash: Arc::new(RwLock::new(None)),
         })
     }
@@ -563,6 +565,32 @@ mod tests {
         let result = filter.should_block_request_from_parts(&req_parts, b"", peer_addr).await?;
         assert!(result.is_some(), "Request to blocked host should be blocked");
         assert_eq!(result.unwrap().action, WafAction::Block);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_content_scanning_integration() -> Result<()> {
+        // Test content scanning integration with wirefilter
+        let filter = HttpFilter::new("http.request.host == \"example.com\"")?;
+
+        let req = Builder::new()
+            .method("POST")
+            .uri("http://example.com/test")
+            .header("content-type", "text/html")
+            .body(())
+            .unwrap();
+        let (req_parts, _) = req.into_parts();
+
+        let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
+
+        // Test with clean content (should not be blocked by content scanning)
+        let clean_content = b"<html><body>Clean content</body></html>";
+        let result = filter.should_block_request_from_parts(&req_parts, clean_content, peer_addr).await?;
+
+        // Should be blocked by host rule, not content scanning
+        assert!(result.is_some(), "Request to example.com should be blocked by host rule");
+        assert_eq!(result.unwrap().rule_name, "default");
 
         Ok(())
     }

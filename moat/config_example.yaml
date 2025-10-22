@@ -126,6 +126,36 @@ domains:
   # Domain whitelist (exact matches)
   whitelist: []
 
+# Content Scanning
+content_scanning:
+  # Enable or disable content scanning
+  enabled: false
+
+  # ClamAV server address
+  clamav_server: "localhost:3310"
+
+  # Maximum file size to scan in bytes (10MB)
+  max_file_size: 10485760
+
+  # Content types to scan (empty means scan all)
+  scan_content_types:
+    - "text/html"
+    - "application/x-www-form-urlencoded"
+    - "multipart/form-data"
+    - "application/json"
+    - "text/plain"
+
+  # Skip scanning for specific file extensions
+  skip_extensions: []
+
+  # Wirefilter expression to determine when to scan content
+  # Default: scan POST and PUT requests
+  # Examples:
+  #   - "http.request.method eq \"POST\" or http.request.method eq \"PUT\""
+  #   - "http.request.method eq \"POST\" and http.request.path contains \"/upload\""
+  #   - "http.request.content_type contains \"multipart/form-data\""
+  scan_expression: "http.request.method eq \"POST\" or http.request.method eq \"PUT\""
+
 # Logging Configuration
 logging:
   # Log level: error, warn, info, debug, trace

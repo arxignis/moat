@@ -1195,6 +1195,37 @@ impl ResponseData {
             blocking_info: Some(blocking_info),
         }
     }
+
+    // Create response data for a malware-blocked request with scan details
+    fn for_malware_blocked_request(signature: Option<String>, scan_error: Option<String>) -> Self {
+        let response_json = serde_json::json!({
+            "status": 403,
+            "status_text": "Forbidden",
+            "content_type": "application/json",
+            "content_length": 0,
+            "body": "{\"ok\":false,\"error\":\"malware_detected\"}"
+        });
+
+        let mut blocking_info = serde_json::json!({
+            "blocked": true,
+            "reason": "malware_detected",
+            "filter_type": "content_scanning",
+            "malware_detected": true,
+        });
+
+        if let Some(sig) = signature {
+            blocking_info["malware_signature"] = serde_json::Value::String(sig);
+        }
+
+        if let Some(err) = scan_error {
+            blocking_info["scan_error"] = serde_json::Value::String(err);
+        }
+
+        ResponseData {
+            response_json,
+            blocking_info: Some(blocking_info),
+        }
+    }
 }
 
 
@@ -1413,10 +1444,69 @@ pub async fn proxy_http_service(
         }
     }
 
-    // Check if IP is allowed by access rules - if so, skip threat intelligence and WAF
+    // Check if IP is allowed by access rules - if so, skip threat intelligence and WAF but still do content scanning
     let is_allowed_by_access_rules = is_ip_allowed_by_access_rules(peer_addr.ip());
     if is_allowed_by_access_rules {
-        log::info!("Request from {} allowed by access rules, skipping threat intelligence and WAF", peer_addr.ip());
+        log::info!("Request from {} allowed by access rules, skipping threat intelligence and WAF but checking content", peer_addr.ip());
+
+        // Perform content scanning even for trusted IPs
+        log::debug!("Checking for content scanner (access rules bypass): method={}, path={}", req_parts.method, req_parts.uri.path());
+        if let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
+            log::debug!("Content scanner found, checking if should scan (access rules bypass)");
+            if scanner.should_scan(&req_parts, &req_body_bytes, peer_addr) {
+                log::debug!("should_scan returned true, scanning content (access rules bypass)");
+
+                // Check if content-type is multipart and scan accordingly
+                let content_type = req_parts.headers
+                    .get("content-type")
+                    .and_then(|h| h.to_str().ok());
+
+                let scan_result = if let Some(ct) = content_type {
+                    if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
+                        log::debug!("Detected multipart content, scanning parts individually");
+                        scanner.scan_multipart_content(&req_body_bytes, &boundary).await
+                    } else {
+                        scanner.scan_content(&req_body_bytes).await
+                    }
+                } else {
+                    scanner.scan_content(&req_body_bytes).await
+                };
+
+                match scan_result {
+                    Ok(scan_result) => {
+                        if scan_result.malware_detected {
+                            log::warn!("Malware detected from trusted IP {}: {} {} - signature: {:?}",
+                                peer_addr, req_parts.method, req_parts.uri,
+                                scan_result.signature);
+
+                            // Generate access log for blocked request with content scanning details
+                            let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+                            if let Err(e) = create_access_log(
+                                &req_parts,
+                                &req_body_bytes,
+                                peer_addr,
+                                dst_addr,
+                                tls_fingerprint,
+                                ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error),
+                            )
+                            .await
+                            {
+                                log::warn!("Failed to log blocked request: {}", e);
+                            }
+
+                            return Ok(build_proxy_error_response(
+                                StatusCode::FORBIDDEN,
+                                "malware_detected",
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Content scanning failed for trusted IP: {}", e);
+                        // On scanning error, allow the request to proceed
+                    }
+                }
+            }
+        }
 
         // Forward directly to upstream without threat intelligence or WAF checks
         match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
@@ -1715,6 +1805,69 @@ pub async fn proxy_http_service(
                 // On filter error, allow the request to proceed
             }
         }
+    }
+
+    // Perform content scanning after WAF rules
+    log::debug!("Checking for content scanner: method={}, path={}", req_parts.method, req_parts.uri.path());
+    if let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
+        log::debug!("Content scanner found, checking if should scan");
+        if scanner.should_scan(&req_parts, &req_body_bytes, peer_addr) {
+            log::debug!("should_scan returned true, scanning content");
+
+            // Check if content-type is multipart and scan accordingly
+            let content_type = req_parts.headers
+                .get("content-type")
+                .and_then(|h| h.to_str().ok());
+
+            let scan_result = if let Some(ct) = content_type {
+                if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
+                    log::debug!("Detected multipart content, scanning parts individually");
+                    scanner.scan_multipart_content(&req_body_bytes, &boundary).await
+                } else {
+                    scanner.scan_content(&req_body_bytes).await
+                }
+            } else {
+                scanner.scan_content(&req_body_bytes).await
+            };
+
+            match scan_result {
+                    Ok(scan_result) => {
+                        if scan_result.malware_detected {
+                            log::warn!("Malware detected from {}: {} {} - signature: {:?}",
+                                peer_addr, req_parts.method, req_parts.uri,
+                                scan_result.signature);
+
+                            // Generate access log for blocked request with content scanning details
+                            let dst_addr = ctx.upstream.authority().unwrap().as_str().parse().unwrap_or_else(|_| "127.0.0.1:80".parse().unwrap());
+                            if let Err(e) = create_access_log(
+                                &req_parts,
+                                &req_body_bytes,
+                                peer_addr,
+                                dst_addr,
+                                tls_fingerprint,
+                                ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error),
+                            )
+                            .await
+                            {
+                                log::warn!("Failed to log blocked request: {}", e);
+                            }
+
+                            return Ok(build_proxy_error_response(
+                                StatusCode::FORBIDDEN,
+                                "malware_detected",
+                            ));
+                        }
+                    }
+                Err(e) => {
+                    log::warn!("Content scanning failed: {}", e);
+                    // On scanning error, allow the request to proceed
+                }
+            }
+        } else {
+            log::debug!("should_scan returned false, not scanning");
+        }
+    } else {
+        log::debug!("No content scanner found");
     }
 
     match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {

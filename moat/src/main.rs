@@ -21,6 +21,7 @@ pub mod actions;
 pub mod config;
 pub mod app_state;
 pub mod cli;
+pub mod content_scanning;
 pub mod domain_filter;
 pub mod firewall;
 pub mod http;
@@ -46,6 +47,7 @@ use crate::http::{
     run_acme_http01_proxy, run_custom_tls_proxy, run_http_proxy,
 };
 use crate::wirefilter::init_config;
+use crate::content_scanning::{init_content_scanner, ContentScanningConfig};
 use crate::utils::bpf_utils;
 use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
 
@@ -215,6 +217,21 @@ async fn main() -> Result<()> {
         }
     } else {
         log::warn!("No API credentials provided, HTTP filter will not be initialized");
+    }
+
+    // Initialize content scanning from CLI config
+    let content_scanning_config = ContentScanningConfig {
+        enabled: config.content_scanning.enabled,
+        clamav_server: config.content_scanning.clamav_server.clone(),
+        max_file_size: config.content_scanning.max_file_size,
+        scan_content_types: config.content_scanning.scan_content_types.clone(),
+        skip_extensions: config.content_scanning.skip_extensions.clone(),
+        scan_expression: config.content_scanning.scan_expression.clone(),
+    };
+    if let Err(e) = init_content_scanner(content_scanning_config) {
+        log::warn!("Failed to initialize content scanner: {}", e);
+    } else {
+        log::info!("Content scanner initialized successfully");
     }
 
     let upstream_uri = {

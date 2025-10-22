@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use flate2::read::GzDecoder;
 use std::sync::{Arc, OnceLock, RwLock};
+use crate::content_scanning::ContentScanningConfig;
 
 pub type Details = serde_json::Value;
 
@@ -17,6 +18,8 @@ pub struct ConfigApiResponse {
 pub struct Config {
     pub access_rules: AccessRule,
     pub waf_rules: WafRules,
+    #[serde(default)]
+    pub content_scanning: ContentScanningConfig,
     pub created_at: String,
     pub updated_at: String,
     pub last_modified: String,
