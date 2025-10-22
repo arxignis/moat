@@ -59,6 +59,8 @@ futures-rustls = "0.26.0"
 tls-parser = "0.12.2"
 reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
+ipnet = "2.9"
+tokio-test = "0.4"
 x509-parser = "0.18"
 gethostname = "1.1.0"
 local-ip-address = "0.6.5"
@@ -71,3 +73,4 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 url = "2.5"
 clamav-tcp = "0.2"
 multer = "3.0"
+proxy-protocol = { git = "https://github.com/arxignis/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}

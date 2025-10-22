@@ -24,7 +24,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode, Uri};
+use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
@@ -166,6 +166,7 @@ impl SharedTlsState {
 }
 
 pub mod tls_fingerprint;
+pub mod health_checks;
 
 #[derive(Debug)]
 pub struct FingerprintTcpStream {
@@ -444,6 +445,8 @@ pub struct ProxyContext {
     pub upstream: Uri,
     pub domain_filter: DomainFilter,
     pub tls_only: bool,
+    pub proxy_protocol_enabled: bool,
+    pub proxy_protocol_timeout_ms: u64,
 }
 
 #[derive(Clone)]
@@ -1396,18 +1399,28 @@ pub async fn proxy_http_service(
 ) -> Result<Response<ProxyBody>, Infallible> {
     let peer_addr = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
+    log::info!("Processing request from {}: {} {}", peer_addr, req.method(), req.uri());
+
     // Extract request details for logging before consuming the request
     let (req_parts, req_body) = req.into_parts();
     let req_body_bytes = match req_body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             log::warn!("Failed to read request body: {}", e);
-            return Ok(build_proxy_error_response(
-                StatusCode::BAD_REQUEST,
-                "body_read_error",
-            ));
+            // For GET requests, try to continue with empty body
+            if req_parts.method == Method::GET {
+                log::info!("Continuing with empty body for GET request");
+                Bytes::new()
+            } else {
+                return Ok(build_proxy_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "body_read_error",
+                ));
+            }
         }
     };
+
+    log::info!("Request body read successfully, size: {} bytes", req_body_bytes.len());
 
     // Handle captcha verification endpoint
     if req_parts.uri.path() == "/cgi-bin/captcha/verify" {
@@ -1968,21 +1981,53 @@ pub async fn run_custom_tls_proxy(
                 let server_config_clone = server_config.clone();
                 let skels_clone = skels.clone();
                 tokio::spawn(async move {
-                    let stream = match FingerprintTcpStream::new(stream).await {
-                        Ok(s) => {
-                            s
+                    // Handle PROXY protocol if enabled
+                    let (stream, real_client_addr) = if ctx_clone.proxy_protocol_enabled {
+                        use crate::proxy_protocol::ProxyProtocolStream;
+                        match ProxyProtocolStream::new(stream, true, ctx_clone.proxy_protocol_timeout_ms).await {
+                            Ok(proxy_stream) => {
+                                let real_addr = proxy_stream.real_client_addr().unwrap_or(peer);
+                                log::debug!("PROXY protocol detected: real client {} -> proxy {}", real_addr, peer);
+                                (proxy_stream.inner(), real_addr)
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to parse PROXY protocol header: {}, dropping connection", e);
+                                return;
+                            }
                         }
-                        Err(err) => {
-                            log::error!("failed to prepare TLS stream from {peer}: {err}");
-                            return;
+                    } else {
+                        (stream, peer)
+                    };
+
+                    // Skip TLS fingerprinting if PROXY protocol was used to avoid stream state conflicts
+                    let (stream, fingerprint) = if ctx_clone.proxy_protocol_enabled {
+                        // When PROXY protocol is enabled, skip fingerprinting to avoid stream conflicts
+                        (stream, None)
+                    } else {
+                        // Normal TLS fingerprinting when PROXY protocol is disabled
+                        match FingerprintTcpStream::new(stream).await {
+                            Ok(s) => {
+                                let fingerprint = s.fingerprint().cloned();
+                                (s.inner, fingerprint)
+                            }
+                            Err(err) => {
+                                log::error!("failed to prepare TLS stream from {peer}: {err}");
+                                return;
+                            }
                         }
                     };
 
-                    let peer_addr = stream.peer_addr();
-                    let fingerprint = stream.fingerprint().cloned();
-                    // Pre-TLS ban check (both IPv4 and IPv6)
-                    if is_ipv4_banned(peer_addr, &skels_clone) || is_ipv6_banned(peer_addr, &skels_clone) {
-                        let mut s = stream.inner;
+                    let peer_addr = match stream.peer_addr() {
+                        Ok(addr) => addr,
+                        Err(err) => {
+                            log::error!("failed to get peer address: {err}");
+                            return;
+                        }
+                    };
+                    // Pre-TLS ban check (both IPv4 and IPv6) - use real client address if available
+                    let ban_check_addr = real_client_addr;
+                    if is_ipv4_banned(ban_check_addr, &skels_clone) || is_ipv6_banned(ban_check_addr, &skels_clone) {
+                        let mut s = stream;
                         let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                         let _ = s.shutdown().await;
                         return;
@@ -2009,8 +2054,8 @@ pub async fn run_custom_tls_proxy(
 
                             match start.into_stream(server_config_clone.config.clone()).await {
                                 Ok(tls_stream) => {
-                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(peer_addr), ctx_clone.clone(), fingerprint.as_ref(), server_config_clone.cert_info.clone()).await {
-                                    log::error!("TLS proxy error from {peer_addr}: {err:?}");
+                                    if let Err(err) = serve_proxy_conn(tls_stream, Some(real_client_addr), ctx_clone.clone(), fingerprint.as_ref(), server_config_clone.cert_info.clone()).await {
+                                    log::error!("TLS proxy error from {real_client_addr}: {err:?}");
                                         tls_state_clone
                                             .set_error_detail(format!("last connection error: {err}"))
                                             .await;
@@ -2142,8 +2187,26 @@ pub async fn run_acme_http01_proxy(
                 accept = http_listener.accept() => {
                     match accept {
                         Ok((stream, peer)) => {
-                            // Check if banned (both IPv4 and IPv6)
-                            if is_ipv4_banned(peer, &http_skels) || is_ipv6_banned(peer, &http_skels) {
+                            // Handle PROXY protocol if enabled
+                            let (stream, real_client_addr) = if http_ctx.proxy_protocol_enabled {
+                                use crate::proxy_protocol::ProxyProtocolStream;
+                                match ProxyProtocolStream::new(stream, true, http_ctx.proxy_protocol_timeout_ms).await {
+                                    Ok(proxy_stream) => {
+                                        let real_addr = proxy_stream.real_client_addr().unwrap_or(peer);
+                                        log::debug!("PROXY protocol detected: real client {} -> proxy {}", real_addr, peer);
+                                        (proxy_stream.inner(), real_addr)
+                                    }
+                                    Err(e) => {
+                                        log::warn!("Failed to parse PROXY protocol header: {}, dropping connection", e);
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                (stream, peer)
+                            };
+
+                            // Check if banned (both IPv4 and IPv6) - use real client address if available
+                            if is_ipv4_banned(real_client_addr, &http_skels) || is_ipv6_banned(real_client_addr, &http_skels) {
                                 let mut s = stream;
                                 let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                                 let _ = s.shutdown().await;
@@ -2182,7 +2245,7 @@ pub async fn run_acme_http01_proxy(
                                                 .unwrap();
                                             return Ok(response);
                                         } else {
-                                            proxy_http_service(req, ctx_req, Some(peer), None).await
+                                            proxy_http_service(req, ctx_req, Some(real_client_addr), None).await
                                         }
                                     }
                                 });
@@ -2216,8 +2279,26 @@ pub async fn run_acme_http01_proxy(
             accept = https_listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        // Check if banned (both IPv4 and IPv6)
-                        if is_ipv4_banned(peer, &skels) || is_ipv6_banned(peer, &skels) {
+                        // Handle PROXY protocol if enabled
+                        let (stream, real_client_addr) = if ctx.proxy_protocol_enabled {
+                            use crate::proxy_protocol::ProxyProtocolStream;
+                            match ProxyProtocolStream::new(stream, true, ctx.proxy_protocol_timeout_ms).await {
+                                Ok(proxy_stream) => {
+                                    let real_addr = proxy_stream.real_client_addr().unwrap_or(peer);
+                                    log::debug!("PROXY protocol detected: real client {} -> proxy {}", real_addr, peer);
+                                    (proxy_stream.inner(), real_addr)
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to parse PROXY protocol header: {}, dropping connection", e);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            (stream, peer)
+                        };
+
+                        // Check if banned (both IPv4 and IPv6) - use real client address if available
+                        if is_ipv4_banned(real_client_addr, &skels) || is_ipv6_banned(real_client_addr, &skels) {
                             let mut s = stream;
                             let _ = s.write_all(BANNED_MESSAGE.as_bytes()).await;
                             let _ = s.shutdown().await;
@@ -2226,7 +2307,7 @@ pub async fn run_acme_http01_proxy(
 
                         let cert_cfg = cert_config.read().await.clone();
                         let Some(config_with_cert) = cert_cfg else {
-                            log::warn!("HTTPS connection from {peer} but certificate not ready yet");
+                            log::warn!("HTTPS connection from {real_client_addr} but certificate not ready yet");
                             continue;
                         };
 
@@ -2234,18 +2315,25 @@ pub async fn run_acme_http01_proxy(
                         let tls_state_clone = tls_state.clone();
 
                         tokio::spawn(async move {
-                            let stream = match FingerprintTcpStream::new(stream).await {
-                                Ok(s) => {
-                                    let fingerprint = s.fingerprint().cloned();
-                                    (s, fingerprint)
-                                }
-                                Err(err) => {
-                                    log::error!("failed to prepare TLS stream from {peer}: {err}");
-                                    return;
+                            // Skip TLS fingerprinting if PROXY protocol was used to avoid stream state conflicts
+                            let (stream, fingerprint) = if ctx_clone.proxy_protocol_enabled {
+                                // When PROXY protocol is enabled, skip fingerprinting to avoid stream conflicts
+                                (stream, None)
+                            } else {
+                                // Normal TLS fingerprinting when PROXY protocol is disabled
+                                match FingerprintTcpStream::new(stream).await {
+                                    Ok(s) => {
+                                        let fingerprint = s.fingerprint().cloned();
+                                        (s.inner, fingerprint)
+                                    }
+                                    Err(err) => {
+                                        log::error!("failed to prepare TLS stream from {peer}: {err}");
+                                        return;
+                                    }
                                 }
                             };
 
-                            let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream.0);
+                            let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
                             match acceptor.await {
                                 Ok(start) => {
                                     // Check SNI against domain filter
@@ -2266,8 +2354,8 @@ pub async fn run_acme_http01_proxy(
 
                                     match start.into_stream(config_with_cert.config.clone()).await {
                                         Ok(tls_stream) => {
-                                            if let Err(err) = serve_proxy_conn(tls_stream, Some(peer), ctx_clone, stream.1.as_ref(), config_with_cert.cert_info.clone()).await {
-                                                log::error!("HTTPS proxy error from {peer}: {err:?}");
+                                            if let Err(err) = serve_proxy_conn(tls_stream, Some(real_client_addr), ctx_clone, fingerprint.as_ref(), config_with_cert.cert_info.clone()).await {
+                                                log::error!("HTTPS proxy error from {real_client_addr}: {err:?}");
                                                 tls_state_clone.set_error_detail(format!("HTTPS session error: {err}")).await;
                             } else {
                                 tls_state_clone.set_running_detail("ACME certificate active").await;
@@ -2339,10 +2427,28 @@ async fn handle_http_connection(
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
+    use crate::proxy_protocol::ProxyProtocolStream;
+
+    // Handle PROXY protocol if enabled
+    let (stream, real_client_addr) = if ctx.proxy_protocol_enabled {
+        match ProxyProtocolStream::new(stream, true, ctx.proxy_protocol_timeout_ms).await {
+            Ok(proxy_stream) => {
+                let real_addr = proxy_stream.real_client_addr().unwrap_or(peer);
+                log::debug!("PROXY protocol detected: real client {} -> proxy {}", real_addr, peer);
+                (proxy_stream.inner(), real_addr)
+            }
+            Err(e) => {
+                log::warn!("Failed to parse PROXY protocol header: {}, dropping connection", e);
+                return Ok(());
+            }
+        }
+    } else {
+        (stream, peer)
+    };
 
     let service = service_fn(move |req| {
         let ctx = ctx.clone();
-        async move { proxy_http_service(req, ctx, Some(peer), None).await }
+        async move { proxy_http_service(req, ctx, Some(real_client_addr), None).await }
     });
 
     let io = TokioIo::new(stream);

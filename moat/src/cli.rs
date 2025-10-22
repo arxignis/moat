@@ -16,7 +16,6 @@ pub struct Config {
     pub redis: RedisConfig,
     pub network: NetworkConfig,
     pub arxignis: ArxignisConfig,
-    pub domains: DomainConfig,
     pub content_scanning: ContentScanningCliConfig,
     pub logging: LoggingConfig,
 }
@@ -28,7 +27,40 @@ pub struct ServerConfig {
     pub tls_addr: String,
     pub tls_bind: Vec<String>,
     pub upstream: String,
+    pub proxy_protocol: ProxyProtocolConfig,
+    pub health_check: HealthCheckConfig,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyProtocolConfig {
+    #[serde(default = "default_proxy_protocol_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_proxy_protocol_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_proxy_protocol_enabled() -> bool { false }
+fn default_proxy_protocol_timeout() -> u64 { 1000 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckConfig {
+    #[serde(default = "default_health_check_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_health_check_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_health_check_port")]
+    pub port: String,
+    #[serde(default = "default_health_check_methods")]
+    pub methods: Vec<String>,
+    #[serde(default = "default_health_check_allowed_cidrs")]
+    pub allowed_cidrs: Vec<String>,
+}
+
+fn default_health_check_enabled() -> bool { true }
+fn default_health_check_endpoint() -> String { "/health".to_string() }
+fn default_health_check_port() -> String { "0.0.0.0:8080".to_string() }
+fn default_health_check_methods() -> Vec<String> { vec!["GET".to_string(), "HEAD".to_string()] }
+fn default_health_check_allowed_cidrs() -> Vec<String> { vec![] }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
@@ -72,11 +104,6 @@ pub struct ArxignisConfig {
 
 fn default_base_url() -> String {
     "https://api.arxignis.com/v1".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainConfig {
-    pub whitelist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +157,17 @@ impl Config {
                 tls_addr: "0.0.0.0:443".to_string(),
                 tls_bind: vec![],
                 upstream: "http://localhost:8080".to_string(),
+                proxy_protocol: ProxyProtocolConfig {
+                    enabled: false,
+                    timeout_ms: 1000,
+                },
+                health_check: HealthCheckConfig {
+                    enabled: true,
+                    endpoint: "/health".to_string(),
+                    port: "0.0.0.0:8080".to_string(),
+                    methods: vec!["GET".to_string(), "HEAD".to_string()],
+                    allowed_cidrs: vec![],
+                },
             },
             tls: TlsConfig {
                 mode: "disabled".to_string(),
@@ -167,9 +205,6 @@ impl Config {
                     cache_ttl: 300,
                 },
             },
-            domains: DomainConfig {
-                whitelist: vec![],
-            },
             content_scanning: ContentScanningCliConfig {
                 enabled: false,
                 clamav_server: "localhost:3310".to_string(),
@@ -204,9 +239,6 @@ impl Config {
         if !args.domain_wildcards.is_empty() {
             self.acme.wildcards = args.domain_wildcards.clone();
         }
-        if !args.domain_whitelist.is_empty() {
-            self.domains.whitelist = args.domain_whitelist.clone();
-        }
         if !args.ifaces.is_empty() {
             self.network.ifaces = args.ifaces.clone();
         }
@@ -230,6 +262,14 @@ impl Config {
         }
         if let Some(provider) = &args.captcha_provider {
             self.arxignis.captcha.provider = format!("{:?}", provider).to_lowercase();
+        }
+
+        // Proxy protocol configuration overrides
+        if args.proxy_protocol_enabled {
+            self.server.proxy_protocol.enabled = true;
+        }
+        if args.proxy_protocol_timeout != 1000 {
+            self.server.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
         }
 
         // Redis configuration overrides
@@ -284,6 +324,21 @@ impl Config {
         }
         if let Ok(val) = env::var("AX_SERVER_TLS_BIND") {
             self.server.tls_bind = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENABLED") {
+            self.server.health_check.enabled = val.parse().unwrap_or(true);
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENDPOINT") {
+            self.server.health_check.endpoint = val;
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_PORT") {
+            self.server.health_check.port = val;
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_METHODS") {
+            self.server.health_check.methods = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS") {
+            self.server.health_check.allowed_cidrs = val.split(',').map(|s| s.trim().to_string()).collect();
         }
 
         // TLS configuration overrides
@@ -350,11 +405,6 @@ impl Config {
             self.arxignis.base_url = val;
         }
 
-        // Domain configuration overrides
-        if let Ok(val) = env::var("AX_DOMAINS_WHITELIST") {
-            self.domains.whitelist = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-
         // Logging configuration overrides
         if let Ok(val) = env::var("AX_LOGGING_LEVEL") {
             self.logging.level = val;
@@ -398,6 +448,14 @@ impl Config {
         }
         if let Ok(val) = env::var("AX_CAPTCHA_CACHE_TTL") {
             self.arxignis.captcha.cache_ttl = val.parse().unwrap_or(300);
+        }
+
+        // Proxy protocol configuration overrides
+        if let Ok(val) = env::var("AX_PROXY_PROTOCOL_ENABLED") {
+            self.server.proxy_protocol.enabled = val.parse().unwrap_or(false);
+        }
+        if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
+            self.server.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
         }
     }
 }
@@ -501,11 +559,6 @@ pub struct Args {
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
     pub arxignis_base_url: Option<String>,
 
-    /// Domain whitelist (exact matches, comma separated or repeated).
-    /// If specified, only requests to these domains will be allowed.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub domain_whitelist: Vec<String>,
-
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     pub log_level: LogLevel,
@@ -538,6 +591,14 @@ pub struct Args {
     /// Captcha validation cache TTL in seconds
     #[arg(long, default_value = "300")]
     pub captcha_cache_ttl: u64,
+
+    /// Enable PROXY protocol support for TCP connections
+    #[arg(long, default_value_t = false)]
+    pub proxy_protocol_enabled: bool,
+
+    /// PROXY protocol timeout in milliseconds
+    #[arg(long, default_value = "1000")]
+    pub proxy_protocol_timeout: u64,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

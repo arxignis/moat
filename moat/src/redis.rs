@@ -74,7 +74,6 @@ impl RedisManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[tokio::test]
     async fn test_redis_manager_init() {

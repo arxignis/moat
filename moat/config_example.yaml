@@ -8,6 +8,8 @@
 # Available environment variables:
 # - AX_SERVER_HTTP_ADDR, AX_SERVER_TLS_ADDR, AX_SERVER_UPSTREAM
 # - AX_SERVER_HTTP_BIND, AX_SERVER_TLS_BIND (comma-separated)
+# - AX_SERVER_HEALTH_CHECK_ENABLED, AX_SERVER_HEALTH_CHECK_ENDPOINT, AX_SERVER_HEALTH_CHECK_PORT
+# - AX_SERVER_HEALTH_CHECK_METHODS, AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS (comma-separated)
 # - AX_TLS_MODE, AX_TLS_ONLY, AX_TLS_CERT_PATH, AX_TLS_KEY_PATH
 # - AX_ACME_DOMAINS, AX_ACME_WILDCARDS, AX_ACME_CONTACTS (comma-separated)
 # - AX_ACME_USE_PROD, AX_ACME_DIRECTORY, AX_ACME_ACCEPT_TOS, AX_ACME_CA_ROOT
@@ -35,6 +37,26 @@ server:
 
   # Upstream origin URL (required)
   upstream: "http://localhost:8080"
+
+  # PROXY protocol configuration
+  proxy_protocol:
+    # Enable PROXY protocol support for TCP connections
+    enabled: false
+    # PROXY protocol timeout in milliseconds
+    timeout_ms: 1000
+
+  # Health check endpoint configuration
+  health_check:
+    # Enable or disable health check server
+    enabled: true
+    # Health check endpoint path
+    endpoint: "/health"
+    # Health check server bind address (separate from main proxy)
+    port: "0.0.0.0:8080"
+    # Allowed HTTP methods for health checks
+    methods: ["GET", "HEAD"]
+    # Allowed CIDR blocks (empty means allow all IPs)
+    allowed_cidrs: []
 
 # TLS Configuration
 tls:
@@ -119,12 +141,6 @@ arxignis:
 
     # Captcha validation cache TTL in seconds
     cache_ttl: 300
-
-
-# Domain Filtering
-domains:
-  # Domain whitelist (exact matches)
-  whitelist: []
 
 # Content Scanning
 content_scanning:

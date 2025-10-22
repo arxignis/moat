@@ -250,14 +250,13 @@ fn calculate_ja4l(tls_version: &str, alpn: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::body::Incoming;
     use http_body_util::Full;
     use bytes::Bytes;
 
     #[tokio::test]
     async fn test_access_log_creation() {
         // Create a simple request
-        let req = Request::builder()
+        let _req = Request::builder()
             .method("GET")
             .uri("https://example.com/test?param=value")
             .header("User-Agent", "TestAgent/1.0")
@@ -265,14 +264,14 @@ mod tests {
             .unwrap();
 
         // Create a simple response
-        let response = Response::builder()
+        let _response = Response::builder()
             .status(200)
             .header("Content-Type", "application/json")
             .body(Full::new(Bytes::from("{\"ok\":true}")))
             .unwrap();
 
-        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let _peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let _dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
 
         // This test would need more setup to work properly
         // For now, just test the structure creation
