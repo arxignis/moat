@@ -1,0 +1,9 @@
+target
+.git
+.vscode
+helm
+docs
+.github
+.devcontainer
+images
+*.md
