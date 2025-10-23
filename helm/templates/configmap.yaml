@@ -69,9 +69,6 @@ data:
       # Domains for ACME certificate issuance and domain whitelist
       domains: {{ toYaml .Values.moat.acme.domains | nindent 6 }}
 
-      # Domain wildcard patterns for filtering
-      wildcards: {{ toYaml .Values.moat.acme.wildcards | nindent 6 }}
-
       # ACME contact addresses (mailto: optional)
       contacts: {{ toYaml .Values.moat.acme.contacts | nindent 6 }}
 

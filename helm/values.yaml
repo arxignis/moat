@@ -116,8 +116,6 @@ moat:
   acme:
     # Domains for ACME certificate issuance and domain whitelist
     domains: []
-    # Domain wildcard patterns for filtering
-    wildcards: []
     # ACME contact addresses (mailto: optional)
     contacts: []
     # Use Let's Encrypt production directory instead of staging
@@ -145,11 +143,11 @@ moat:
     # Disable XDP packet filtering (run without BPF/XDP)
     disableXdp: false
 
-  # Arx Ignis Configuration
+  # Arxignis Configuration
   arxignis:
-    # API key for Arx Ignis service
+    # API key for Arxignis service
     apiKey: ""
-    # Base URL for Arx Ignis API
+    # Base URL for Arxignis API
     baseUrl: "https://api.arxignis.com/v1"
     # Captcha Configuration
     captcha:
@@ -215,7 +213,6 @@ env:
   # ACME environment variables
   acme:
     domains: null
-    wildcards: null
     contacts: null
     useProd: null
     directory: null
@@ -230,7 +227,7 @@ env:
     iface: null
     ifaces: null
     disableXdp: null
-  # Arx Ignis environment variables
+  # Arxignis environment variables
   arxignis:
     apiKey: null
     baseUrl: null

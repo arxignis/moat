@@ -31,7 +31,7 @@ Moat is a high-performance reverse proxy and firewall built with Rust, featuring
 - **PROXY protocol support** for preserving client IP addresses
 - **Health check endpoints** for monitoring and load balancer integration
 - **Redis-backed caching** for certificates, threat intelligence, and CAPTCHA validation
-- **Domain filtering** with whitelist and wildcard support
+- **Domain filtering** with whitelist support
 - **Wirefilter expressions** for advanced request filtering
 - **Environment variable configuration** for containerized deployments
 
@@ -302,7 +302,6 @@ moat [OPTIONS]
 
 #### Domain Management
 - `--acme-domains <DOMAINS>` - Domains for ACME certificate issuance (comma separated or repeated)
-- `--acme-wildcards <PATTERNS>` - Domain wildcard patterns for filtering (comma separated or repeated)
 - `--acme-contacts <CONTACTS>` - ACME contact addresses (mailto: optional, comma separated or repeated)
 
 #### ACME Settings
@@ -321,11 +320,6 @@ moat [OPTIONS]
 #### Whitelist Configuration
 - `--domain-whitelist <DOMAINS>` - Domain whitelist (exact matches, comma separated or repeated)
   - If specified, only requests to these domains will be allowed
-
-#### Wildcard Patterns
-- `--domain-wildcards <PATTERNS>` - Domain wildcard patterns (comma separated or repeated)
-  - Supports wildcards: `*.example.com`, `api.*.example.com`
-  - If specified along with whitelist, both are checked (OR logic)
 
 ### Arxignis Configuration
 
@@ -368,7 +362,7 @@ moat --iface eth0 --tls-mode acme --acme-domains "example.com,www.example.com" -
 
 #### With Domain Filtering
 ```bash
-moat --iface eth0 --domain-whitelist "trusted.com,secure.example.com" --domain-wildcards "*.api.example.com" --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
+moat --iface eth0 --domain-whitelist "trusted.com,secure.example.com" --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
 ```
 
 #### With CAPTCHA Protection
@@ -589,7 +583,7 @@ Comprehensive TLS support with multiple modes:
 - When TLS mode is `custom` or `acme`, Moat runs as an HTTPS proxy + firewall
 - `--tls-only` mode enforces TLS requirements: non-SSL requests return 426 Upgrade Required (except ACME challenges)
 - For custom TLS mode, both `--tls-cert-path` and `--tls-key-path` are required
-- Domain filtering supports both exact matches (whitelist) and wildcard patterns
+- Domain filtering supports exact matches (whitelist)
 - When using Docker, ensure the required capabilities (`SYS_ADMIN`, `BPF`, `NET_ADMIN`) are added
 - The XDP program attaches to the specified network interface for packet filtering
 - CAPTCHA tokens are JWT-signed for security and can be cached for performance

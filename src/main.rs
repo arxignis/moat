@@ -52,6 +52,7 @@ use crate::wirefilter::init_config;
 use crate::content_scanning::{init_content_scanner, ContentScanningConfig};
 use crate::utils::bpf_utils;
 use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
+use crate::access_log::{LogSenderConfig, set_log_sender_config, start_batch_log_processor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -236,6 +237,28 @@ async fn main() -> Result<()> {
         log::info!("Content scanner initialized successfully");
     }
 
+    // Initialize access log sender configuration
+    let log_sender_config = LogSenderConfig {
+        enabled: config.arxignis.log_sending_enabled,
+        base_url: config.arxignis.base_url.clone(),
+        api_key: config.arxignis.api_key.clone(),
+        batch_size_limit: 5000,        // Default: 5000 logs per batch
+        batch_size_bytes: 5 * 1024 * 1024, // Default: 5MB
+        batch_timeout_secs: 10,        // Default: 10 seconds
+        include_response_body: config.arxignis.include_response_body,
+        max_body_size: config.arxignis.max_body_size,
+    };
+    set_log_sender_config(log_sender_config);
+
+    if config.arxignis.log_sending_enabled && !config.arxignis.api_key.is_empty() {
+        log::info!("Access log sending to arxignis server enabled with batching (10s timeout, 5MB limit)");
+        // Start the background batch log processor
+        start_batch_log_processor();
+    } else {
+        log::info!("Access log sending to arxignis server disabled (enabled: {}, api_key configured: {})",
+                   config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());
+    }
+
     let upstream_uri = {
         let parsed = config.server.upstream
             .parse::<Uri>()
@@ -273,14 +296,13 @@ async fn main() -> Result<()> {
         // Use expanded domains as the whitelist (serves dual purpose)
         let domain_filter = DomainFilter::new(
             expanded_domains.clone(),
-            args.domain_wildcards.clone(),
+            vec![],
         );
 
         if domain_filter.is_enabled() {
             log::info!(
-                "Domain filtering enabled: {} whitelist entries, {} wildcard patterns",
-                expanded_domains.len(),
-                args.domain_wildcards.len()
+                "Domain filtering enabled: {} whitelist entries",
+                expanded_domains.len()
             );
         }
 

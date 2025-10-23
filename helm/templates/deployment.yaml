@@ -111,10 +111,6 @@ spec:
             - name: AX_ACME_DOMAINS
               value: "{{ join "," .Values.env.acme.domains }}"
             {{- end }}
-            {{- if .Values.env.acme.wildcards }}
-            - name: AX_ACME_WILDCARDS
-              value: "{{ join "," .Values.env.acme.wildcards }}"
-            {{- end }}
             {{- if .Values.env.acme.contacts }}
             - name: AX_ACME_CONTACTS
               value: "{{ join "," .Values.env.acme.contacts }}"

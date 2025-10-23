@@ -73,7 +73,6 @@ pub struct TlsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcmeConfig {
     pub domains: Vec<String>,
-    pub wildcards: Vec<String>,
     pub contacts: Vec<String>,
     pub use_prod: bool,
     pub directory: Option<String>,
@@ -99,11 +98,29 @@ pub struct ArxignisConfig {
     pub api_key: String,
     #[serde(default = "default_base_url")]
     pub base_url: String,
+    #[serde(default = "default_log_sending_enabled")]
+    pub log_sending_enabled: bool,
+    #[serde(default = "default_include_response_body")]
+    pub include_response_body: bool,
+    #[serde(default = "default_max_body_size")]
+    pub max_body_size: usize,
     pub captcha: CaptchaConfig,
 }
 
 fn default_base_url() -> String {
     "https://api.arxignis.com/v1".to_string()
+}
+
+fn default_log_sending_enabled() -> bool {
+    true
+}
+
+fn default_include_response_body() -> bool {
+    true
+}
+
+fn default_max_body_size() -> usize {
+    1024 * 1024 // 1MB
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,7 +194,6 @@ impl Config {
             },
             acme: AcmeConfig {
                 domains: vec![],
-                wildcards: vec![],
                 contacts: vec![],
                 use_prod: false,
                 directory: None,
@@ -196,6 +212,9 @@ impl Config {
             arxignis: ArxignisConfig {
                 api_key: "".to_string(),
                 base_url: "https://api.arxignis.com/v1".to_string(),
+                log_sending_enabled: true,
+                include_response_body: true,
+                max_body_size: 1024 * 1024, // 1MB
                 captcha: CaptchaConfig {
                     site_key: None,
                     secret_key: None,
@@ -236,9 +255,6 @@ impl Config {
         if !args.acme_domains.is_empty() {
             self.acme.domains = args.acme_domains.clone();
         }
-        if !args.domain_wildcards.is_empty() {
-            self.acme.wildcards = args.domain_wildcards.clone();
-        }
         if !args.ifaces.is_empty() {
             self.network.ifaces = args.ifaces.clone();
         }
@@ -251,6 +267,11 @@ impl Config {
         if let Some(base_url) = &args.arxignis_base_url {
             self.arxignis.base_url = base_url.clone();
         }
+        if let Some(log_sending_enabled) = args.arxignis_log_sending_enabled {
+            self.arxignis.log_sending_enabled = log_sending_enabled;
+        }
+        self.arxignis.include_response_body = args.arxignis_include_response_body;
+        self.arxignis.max_body_size = args.arxignis_max_body_size;
         if args.captcha_site_key.is_some() {
             self.arxignis.captcha.site_key = args.captcha_site_key.clone();
         }
@@ -359,9 +380,6 @@ impl Config {
         if let Ok(val) = env::var("AX_ACME_DOMAINS") {
             self.acme.domains = val.split(',').map(|s| s.trim().to_string()).collect();
         }
-        if let Ok(val) = env::var("AX_ACME_WILDCARDS") {
-            self.acme.wildcards = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
         if let Ok(val) = env::var("AX_ACME_CONTACTS") {
             self.acme.contacts = val.split(',').map(|s| s.trim().to_string()).collect();
         }
@@ -403,6 +421,17 @@ impl Config {
         }
         if let Ok(val) = env::var("AX_ARXIGNIS_BASE_URL") {
             self.arxignis.base_url = val;
+        }
+        if let Ok(val) = env::var("AX_ARXIGNIS_LOG_SENDING_ENABLED") {
+            if let Ok(parsed) = val.parse::<bool>() {
+                self.arxignis.log_sending_enabled = parsed;
+            }
+        }
+        if let Ok(val) = env::var("AX_ARXIGNIS_INCLUDE_RESPONSE_BODY") {
+            self.arxignis.include_response_body = val.parse().unwrap_or(true);
+        }
+        if let Ok(val) = env::var("AX_ARXIGNIS_MAX_BODY_SIZE") {
+            self.arxignis.max_body_size = val.parse().unwrap_or(1024 * 1024);
         }
 
         // Logging configuration overrides
@@ -510,12 +539,6 @@ pub struct Args {
     #[arg(long, value_delimiter = ',', num_args = 0..)]
     pub acme_domains: Vec<String>,
 
-    /// Domain wildcard patterns for filtering (comma separated or repeated).
-    /// Supports wildcards: *.example.com, api.*.example.com
-    /// These are checked along with acme_domains (OR logic).
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub domain_wildcards: Vec<String>,
-
     /// ACME contact addresses (mailto: optional, comma separated or repeated).
     #[arg(long, value_delimiter = ',', num_args = 0..)]
     pub acme_contacts: Vec<String>,
@@ -558,6 +581,18 @@ pub struct Args {
     /// Base URL for Arx Ignis API.
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
     pub arxignis_base_url: Option<String>,
+
+    /// Enable sending access logs to arxignis server
+    #[arg(long)]
+    pub arxignis_log_sending_enabled: Option<bool>,
+
+    /// Include response body in access logs
+    #[arg(long, default_value_t = true)]
+    pub arxignis_include_response_body: bool,
+
+    /// Maximum size for request/response bodies in access logs (bytes)
+    #[arg(long, default_value = "1048576")]
+    pub arxignis_max_body_size: usize,
 
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
