@@ -2681,6 +2681,16 @@ mod tests {
         let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
 
+        // Create a test server certificate info
+        let server_cert_info = Some(ServerCertInfo {
+            subject: "CN=example.com".to_string(),
+            issuer: "CN=Test CA".to_string(),
+            serial_number: "1234567890".to_string(),
+            not_before: "2023-01-01T00:00:00Z".to_string(),
+            not_after: "2024-01-01T00:00:00Z".to_string(),
+            fingerprint_sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+        });
+
         // Test the blocked request access log function
         let result = HttpAccessLog::create_from_parts(
             &req_parts,
@@ -2713,6 +2723,16 @@ mod tests {
         let req_body_bytes = Bytes::new();
         let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+        // Create a test server certificate info
+        let server_cert_info = Some(ServerCertInfo {
+            subject: "CN=example.com".to_string(),
+            issuer: "CN=Test CA".to_string(),
+            serial_number: "1234567890".to_string(),
+            not_before: "2023-01-01T00:00:00Z".to_string(),
+            not_after: "2024-01-01T00:00:00Z".to_string(),
+            fingerprint_sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+        });
 
         // Test the access log function
         let result = HttpAccessLog::create_from_parts(
