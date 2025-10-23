@@ -18,6 +18,7 @@ use crate::{bpf, utils::bpf_utils};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use clap::ValueEnum;
 use futures_rustls::rustls::{ClientConfig as AcmeClientConfig, RootCertStore};
 use http_body_util::{BodyExt, Full};
@@ -707,16 +708,51 @@ fn parse_cert_chain(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
         .collect())
 }
 
-// Minimal certificate info extractor (placeholder). For richer details, integrate x509-parser.
+// Extract certificate info from DER-encoded certificate using x509-parser
 fn extract_cert_info_from_der(cert_der: &CertificateDer<'static>) -> Option<ServerCertInfo> {
-    Some(ServerCertInfo {
-        subject: "unknown".to_string(),
-        issuer: "unknown".to_string(),
-        serial_number: "unknown".to_string(),
-        not_before: "unknown".to_string(),
-        not_after: "unknown".to_string(),
-        fingerprint_sha256: format!("{:x}", sha2::Sha256::digest(cert_der.as_ref())),
-    })
+    use x509_parser::parse_x509_certificate;
+
+    match parse_x509_certificate(cert_der.as_ref()) {
+        Ok((_, cert)) => {
+            // Extract subject
+            let subject = cert.subject().to_string();
+
+            // Extract issuer
+            let issuer = cert.issuer().to_string();
+
+            // Extract serial number
+            let serial_number = cert.serial.to_string();
+
+            // Extract validity dates
+            let validity = cert.validity();
+            let not_before = format!("{}", validity.not_before.to_datetime());
+            let not_after = format!("{}", validity.not_after.to_datetime());
+
+            // Calculate SHA256 fingerprint
+            let fingerprint_sha256 = format!("{:x}", sha2::Sha256::digest(cert_der.as_ref()));
+
+            Some(ServerCertInfo {
+                subject,
+                issuer,
+                serial_number,
+                not_before,
+                not_after,
+                fingerprint_sha256,
+            })
+        }
+        Err(e) => {
+            log::warn!("Failed to parse X.509 certificate: {}", e);
+            // Fallback to fingerprint-only info
+            Some(ServerCertInfo {
+                subject: "parse_error".to_string(),
+                issuer: "parse_error".to_string(),
+                serial_number: "parse_error".to_string(),
+                not_before: Utc::now().to_rfc3339(),
+                not_after: Utc::now().to_rfc3339(),
+                fingerprint_sha256: format!("{:x}", sha2::Sha256::digest(cert_der.as_ref())),
+            })
+        }
+    }
 }
 
 // Retry configuration for ACME operations
@@ -1254,11 +1290,11 @@ async fn handle_captcha_verification(
     // Parse form data from request body
     let form_data = match String::from_utf8(req_body_bytes.to_vec()) {
         Ok(body) => {
-            log::info!("Captcha verification request body: {}", body);
+            log::debug!("Captcha verification request body: {}", body);
             let parsed = form_urlencoded::parse(body.as_bytes())
                 .into_owned()
                 .collect::<HashMap<String, String>>();
-            log::info!("Parsed form data: {:?}", parsed);
+            log::debug!("Parsed form data: {:?}", parsed);
             parsed
         }
         Err(e) => {
@@ -1414,6 +1450,7 @@ pub async fn proxy_http_service(
     ctx: Arc<ProxyContext>,
     peer: Option<SocketAddr>,
     tls_fingerprint: Option<&TlsFingerprint>,
+    server_cert_info: Option<ServerCertInfo>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let peer_addr = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
@@ -1461,7 +1498,10 @@ pub async fn proxy_http_service(
                 peer_addr,
                 dst_addr,
                 tls_fingerprint,
-                ResponseData::for_blocked_request("tls_required", 426),
+                ResponseData::for_blocked_request("tls_required", 426, None, None),
+                None,
+                None,
+                server_cert_info.as_ref(),
             )
             .await
             {
@@ -1512,13 +1552,17 @@ pub async fn proxy_http_service(
 
                             // Generate access log for blocked request with content scanning details
                             let dst_addr = parse_upstream_addr(&ctx.upstream);
+                            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
                             if let Err(e) = HttpAccessLog::create_from_parts(
                                 &req_parts,
                                 &req_body_bytes,
                                 peer_addr,
                                 dst_addr,
                                 tls_fingerprint,
-                                ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error),
+                                ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error, None, threat_data.as_ref()),
+                                None,
+                                threat_data.as_ref(),
+                                server_cert_info.as_ref(),
                             )
                             .await
                             {
@@ -1557,13 +1601,16 @@ pub async fn proxy_http_service(
                 let temp_response = Response::from_parts(response_parts.clone(), Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
                 let mut response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|e| {
                     log::warn!("Failed to process response for logging: {}", e);
-                    ResponseData::for_blocked_request("logging_error", 500)
+                    ResponseData::for_blocked_request("logging_error", 500, None, None)
                 });
 
                 // Add access rules bypass information to the response data
                 if let Some(response_json) = response_data.response_json.as_object_mut() {
                     response_json.insert("access_rules_bypass".to_string(), serde_json::Value::Bool(true));
                 }
+
+                // Fetch threat intelligence data for trusted IP requests
+                let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
 
                 if let Err(e) = HttpAccessLog::create_from_parts(
                     &req_parts,
@@ -1572,6 +1619,9 @@ pub async fn proxy_http_service(
                     dst_addr,
                     tls_fingerprint,
                     response_data,
+                    None,
+                    threat_data.as_ref(),
+                    server_cert_info.as_ref(),
                 )
                 .await
                 {
@@ -1713,13 +1763,17 @@ pub async fn proxy_http_service(
 
             // Generate access log for captcha challenge
             let dst_addr = parse_upstream_addr(&ctx.upstream);
+            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
             if let Err(e) = HttpAccessLog::create_from_parts(
                 &req_parts,
                 &req_body_bytes,
                 peer_addr,
                 dst_addr,
                 tls_fingerprint,
-                ResponseData::for_blocked_request("captcha_challenge_required", 403),
+                ResponseData::for_blocked_request("captcha_challenge_required", 403, None, threat_data.as_ref()),
+                None,
+                threat_data.as_ref(),
+                server_cert_info.as_ref(),
             )
             .await
             {
@@ -1761,6 +1815,9 @@ pub async fn proxy_http_service(
 
                 match waf_result.action {
                     crate::wirefilter::WafAction::Block => {
+                        // Fetch threat intelligence data for access log
+                        let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
+
                         // Generate access log for blocked request
                         let dst_addr = parse_upstream_addr(&ctx.upstream);
                         if let Err(e) = HttpAccessLog::create_from_parts(
@@ -1769,7 +1826,10 @@ pub async fn proxy_http_service(
                             peer_addr,
                             dst_addr,
                             tls_fingerprint,
-                            ResponseData::for_blocked_request("request_blocked_by_filter", 403),
+                            ResponseData::for_blocked_request("request_blocked_by_filter", 403, Some(waf_result.clone()), threat_data.as_ref()),
+                            Some(&waf_result),
+                            threat_data.as_ref(),
+                            server_cert_info.as_ref(),
                         )
                         .await
                         {
@@ -1806,6 +1866,36 @@ pub async fn proxy_http_service(
 
                         if captcha_validated {
                             log::debug!("Captcha already validated for wirefilter challenge IP: {}, allowing request", peer_addr.ip());
+
+                            // Generate access log for challenged request that was allowed
+                            let dst_addr = parse_upstream_addr(&ctx.upstream);
+                            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
+
+                            // Create a temporary response for logging
+                            let temp_response = Response::builder()
+                                .status(200)
+                                .body(http_body_util::Full::new(bytes::Bytes::new()).map_err(|never| match never {}).boxed())
+                                .unwrap();
+                            let response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|_| {
+                                ResponseData::for_blocked_request("challenge_passed", 200, Some(waf_result.clone()), threat_data.as_ref())
+                            });
+
+                            if let Err(e) = HttpAccessLog::create_from_parts(
+                                &req_parts,
+                                &req_body_bytes,
+                                peer_addr,
+                                dst_addr,
+                                tls_fingerprint,
+                                response_data,
+                                Some(&waf_result),
+                                threat_data.as_ref(),
+                                server_cert_info.as_ref(),
+                            )
+                            .await
+                            {
+                                log::warn!("Failed to log challenged request: {}", e);
+                            }
+
                             // Continue processing the request
                         } else {
                             // Reuse existing token if available, otherwise generate new one
@@ -1859,7 +1949,8 @@ pub async fn proxy_http_service(
 
                         // Generate access log for captcha challenge
                         let dst_addr = parse_upstream_addr(&ctx.upstream);
-                        let response_data = ResponseData::for_blocked_request("captcha_challenge_required", 403);
+                        let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
+                        let response_data = ResponseData::for_blocked_request("captcha_challenge_required", 403, None, threat_data.as_ref());
                         if let Err(e) = HttpAccessLog::create_from_parts(
                             &req_parts,
                             &req_body_bytes,
@@ -1867,6 +1958,9 @@ pub async fn proxy_http_service(
                             dst_addr,
                             tls_fingerprint,
                             response_data,
+                            None,
+                            threat_data.as_ref(),
+                            server_cert_info.as_ref(),
                         ).await {
                             log::warn!("Failed to log captcha challenge request: {}", e);
                         }
@@ -1935,13 +2029,17 @@ pub async fn proxy_http_service(
 
                             // Generate access log for blocked request with content scanning details
                             let dst_addr = parse_upstream_addr(&ctx.upstream);
+                            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
                             if let Err(e) = HttpAccessLog::create_from_parts(
                                 &req_parts,
                                 &req_body_bytes,
                                 peer_addr,
                                 dst_addr,
                                 tls_fingerprint,
-                                ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error),
+                                ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error, None, threat_data.as_ref()),
+                                None,
+                                threat_data.as_ref(),
+                                server_cert_info.as_ref(),
                             )
                             .await
                             {
@@ -1983,19 +2081,41 @@ pub async fn proxy_http_service(
             let temp_response = Response::from_parts(response_parts.clone(), Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
             let response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|e| {
                 log::warn!("Failed to process response for logging: {}", e);
-                ResponseData::for_blocked_request("logging_error", 500)
+                ResponseData::for_blocked_request("logging_error", 500, None, None)
             });
-            if let Err(e) = HttpAccessLog::create_from_parts(
-                &req_parts,
-                &req_body_bytes,
-                peer_addr,
-                dst_addr,
-                tls_fingerprint,
-                response_data,
-            )
-            .await
-            {
-                log::warn!("Failed to log access request: {}", e);
+
+            // Fetch threat intelligence data for successful requests
+            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
+
+            // Check if this request was challenged by WAF (indicated by presence of captcha token)
+            let was_challenged = req_parts.headers.get("x-captcha-token").is_some() ||
+                                req_parts.headers.get("cookie")
+                                    .and_then(|h| h.to_str().ok())
+                                    .map_or(false, |s| s.contains("captcha_token="));
+
+            // Skip logging if this request was already logged due to WAF challenge
+            if was_challenged {
+                log::debug!("Skipping duplicate access log for challenged request from {}", peer_addr.ip());
+            } else {
+                // If the request was challenged, we need to determine which WAF rule triggered it
+                // For now, we'll create a generic WAF result for challenged requests
+                let waf_result = None; // No WAF result for non-challenged requests
+
+                if let Err(e) = HttpAccessLog::create_from_parts(
+                    &req_parts,
+                    &req_body_bytes,
+                    peer_addr,
+                    dst_addr,
+                    tls_fingerprint,
+                    response_data,
+                    waf_result.as_ref(),
+                    threat_data.as_ref(),
+                    server_cert_info.as_ref(),
+                )
+                .await
+                {
+                    log::warn!("Failed to log access request: {}", e);
+                }
             }
 
             // Reconstruct response
@@ -2021,7 +2141,7 @@ pub async fn serve_proxy_conn<S>(
     peer: Option<SocketAddr>,
     ctx: Arc<ProxyContext>,
     tls_fingerprint: Option<&TlsFingerprint>,
-    _server_cert_info: Option<ServerCertInfo>,
+    server_cert_info: Option<ServerCertInfo>,
 ) -> Result<(), anyhow::Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -2030,7 +2150,7 @@ where
     http1::Builder::new()
         .serve_connection(
             io,
-            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint)),
+            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint, server_cert_info.clone())),
         )
         .await
         .map_err(|e| anyhow!("http1 connection error: {e}"))
@@ -2082,9 +2202,10 @@ pub async fn run_custom_tls_proxy(
                         (stream, peer)
                     };
 
-                    // Skip TLS fingerprinting if PROXY protocol was used to avoid stream state conflicts
+                    // Handle TLS fingerprinting based on PROXY protocol setting
                     let (stream, fingerprint) = if ctx_clone.proxy_protocol_enabled {
                         // When PROXY protocol is enabled, skip fingerprinting to avoid stream conflicts
+                        // But we'll create a minimal fingerprint later when we know it's HTTPS
                         (stream, None)
                     } else {
                         // Normal TLS fingerprinting when PROXY protocol is disabled
@@ -2327,7 +2448,7 @@ pub async fn run_acme_http01_proxy(
                                                 .unwrap();
                                             return Ok(response);
                                         } else {
-                                            proxy_http_service(req, ctx_req, Some(real_client_addr), None).await
+                                            proxy_http_service(req, ctx_req, Some(real_client_addr), None, None).await
                                         }
                                     }
                                 });
@@ -2530,7 +2651,7 @@ async fn handle_http_connection(
 
     let service = service_fn(move |req| {
         let ctx = ctx.clone();
-        async move { proxy_http_service(req, ctx, Some(real_client_addr), None).await }
+        async move { proxy_http_service(req, ctx, Some(real_client_addr), None, None).await }
     });
 
     let io = TokioIo::new(stream);
@@ -2560,6 +2681,16 @@ mod tests {
         let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
 
+        // Create a test server certificate info
+        let server_cert_info = Some(ServerCertInfo {
+            subject: "CN=example.com".to_string(),
+            issuer: "CN=Test CA".to_string(),
+            serial_number: "1234567890".to_string(),
+            not_before: "2023-01-01T00:00:00Z".to_string(),
+            not_after: "2024-01-01T00:00:00Z".to_string(),
+            fingerprint_sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+        });
+
         // Test the blocked request access log function
         let result = HttpAccessLog::create_from_parts(
             &req_parts,
@@ -2567,8 +2698,11 @@ mod tests {
             peer_addr,
             dst_addr,
             None,
-            ResponseData::for_blocked_request("test_block_reason", 403),
-        )
+            ResponseData::for_blocked_request("test_block_reason", 403, None, None),
+            None,
+                                None,
+                                server_cert_info.as_ref(),
+                            )
         .await;
 
         // Should succeed
@@ -2590,6 +2724,16 @@ mod tests {
         let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let dst_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
 
+        // Create a test server certificate info
+        let server_cert_info = Some(ServerCertInfo {
+            subject: "CN=example.com".to_string(),
+            issuer: "CN=Test CA".to_string(),
+            serial_number: "1234567890".to_string(),
+            not_before: "2023-01-01T00:00:00Z".to_string(),
+            not_after: "2024-01-01T00:00:00Z".to_string(),
+            fingerprint_sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+        });
+
         // Test the access log function
         let result = HttpAccessLog::create_from_parts(
             &req_parts,
@@ -2597,8 +2741,11 @@ mod tests {
             peer_addr,
             dst_addr,
             None,
-            ResponseData::for_blocked_request("test_block_reason", 403),
-        )
+            ResponseData::for_blocked_request("test_block_reason", 403, None, None),
+            None,
+                                None,
+                                server_cert_info.as_ref(),
+                            )
         .await;
 
         // Should succeed
