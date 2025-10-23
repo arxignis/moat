@@ -3,6 +3,7 @@ permissions:
   # Allow this action to create releases.
   contents: write
   packages: write
+  discussions: write
 
 on:
   create:
@@ -221,14 +222,19 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: moat-*.tar.gz
+          pattern: moat-*
 
       - name: ls
         shell: bash
-        run: ls
+        run: |
+           ls
+           rm -rf moat-bake-meta
 
       - name: Release
         uses: softprops/action-gh-release@v2.2.1
         with:
           draft: true
+          discussion_category_name: Releases
+          generate_release_notes: true
           files: moat-*/moat-*
+          make_latest: true
