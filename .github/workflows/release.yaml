@@ -221,7 +221,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: moat-*
+          pattern: moat-*.tar.gz
 
       - name: ls
         shell: bash
