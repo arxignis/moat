@@ -413,6 +413,14 @@ Moat integrates with Arxignis API to provide real-time threat intelligence:
 - **Caching** - Redis-backed caching for improved performance
 - **JA4+** - SSL and TCP fingerpriting
 
+#### ⚠️ Degraded Features When Access Logs Disabled
+
+When access log sending is disabled (`--arxignis-log-sending-enabled=false`), the following features are degraded:
+
+- **Threat Intelligence (Degraded)** - Basic threat intelligence still works for real-time blocking, but detailed threat analysis and historical data collection is limited
+- **Anomaly Detection** - Advanced anomaly detection capabilities are not available without access log data
+- **Metrics** - Comprehensive metrics and analytics are not available without access log aggregation
+
 ### CAPTCHA Protection
 
 Moat supports multiple CAPTCHA providers for additional security:
