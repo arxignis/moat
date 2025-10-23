@@ -3,7 +3,6 @@ permissions:
   # Allow this action to create releases.
   contents: write
   packages: write
-  
 
 on:
   create:
@@ -16,6 +15,7 @@ env:
 
 jobs:
   docker-prepare:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
@@ -188,7 +188,7 @@ jobs:
       shell: bash
       run: |
         set -ex
-        version=`cargo pkgid --manifest-path Cargo.toml | cut -d "@" -f2`
+        version=`cargo pkgid --manifest-path Cargo.toml | cut -d "#" -f2`
         if [ "${{ github.ref_name }}" != "v$version" ]; then
           exit 1
         fi
