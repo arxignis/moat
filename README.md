@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/arxignis/moat/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-ELv2-green" alt="License - Elastic 2.0"></a> &nbsp;
-  <a href="https://github.com/arxignis/moat/actions?query=branch%3Amain"><img src="https://github.com/arxignis/moat/actions/workflows/build.yml/badge.svg" alt="CI Build"></a> &nbsp;
+  <a href="https://github.com/arxignis/moat/actions?query=branch%3Amain"><img src="https://github.com/arxignis/moat/actions/workflows/release.yaml/badge.svg" alt="CI Build"></a> &nbsp;
   <a href="https://github.com/arxignis/moat/releases"><img src="https://img.shields.io/github/release/arxignis/moat.svg?label=Release" alt="Release"></a> &nbsp;
   <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/arxignis/moat/total"> &nbsp;
   <a href="https://docs.arxignis.com/"><img alt="Static Badge" src="https://img.shields.io/badge/arxignis-documentation-page?style=flat&link=https%3A%2F%2Fdocs.arxignis.com%2F"></a> &nbsp;
