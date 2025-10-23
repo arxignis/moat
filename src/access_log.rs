@@ -8,6 +8,7 @@ use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use reqwest::Client;
+
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
@@ -179,6 +180,7 @@ pub struct HttpAccessLog {
     pub network: NetworkDetails,
     pub tls: Option<TlsDetails>,
     pub response: ResponseDetails,
+    pub remediation: Option<RemediationDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +241,24 @@ pub struct ResponseDetails {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemediationDetails {
+    pub waf_action: Option<String>,
+    pub waf_rule_id: Option<String>,
+    pub waf_rule_name: Option<String>,
+    pub threat_score: Option<u32>,
+    pub threat_confidence: Option<f64>,
+    pub threat_categories: Option<Vec<String>>,
+    pub threat_tags: Option<Vec<String>>,
+    pub threat_reason_code: Option<String>,
+    pub threat_reason_summary: Option<String>,
+    pub threat_advice: Option<String>,
+    pub ip_country: Option<String>,
+    pub ip_asn: Option<u32>,
+    pub ip_asn_org: Option<String>,
+    pub ip_asn_country: Option<String>,
+}
+
 impl HttpAccessLog {
     /// Create access log from request parts and response data
     pub async fn create_from_parts(
@@ -248,6 +268,8 @@ impl HttpAccessLog {
         dst_addr: SocketAddr,
         tls_fingerprint: Option<&TlsFingerprint>,
         response_data: ResponseData,
+        waf_result: Option<&crate::wirefilter::WafResult>,
+        threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
         let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
@@ -255,7 +277,15 @@ impl HttpAccessLog {
         // Extract request details
         let uri = &req_parts.uri;
         let method = req_parts.method.to_string();
-        let scheme = uri.scheme().map(|s| s.to_string()).unwrap_or_else(|| "http".to_string());
+
+        // Determine scheme: prefer URI scheme, fallback to TLS fingerprint presence, then default to http
+        let scheme = uri.scheme().map(|s| s.to_string()).unwrap_or_else(|| {
+            if tls_fingerprint.is_some() {
+                "https".to_string()
+            } else {
+                "http".to_string()
+            }
+        });
 
         // Extract host from URI, fallback to Host header if URI doesn't have host
         let host = uri.host().map(|h| h.to_string()).unwrap_or_else(|| {
@@ -266,6 +296,7 @@ impl HttpAccessLog {
                 .unwrap_or_else(|| "unknown".to_string())
         });
 
+        // Determine port: prefer URI port, fallback to scheme-based default
         let port = uri.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
         let path = uri.path().to_string();
         let query = uri.query().unwrap_or("").to_string();
@@ -315,7 +346,7 @@ impl HttpAccessLog {
         };
 
         // Process TLS details
-        let tls_details = tls_fingerprint.map(|fp| {
+        let tls_details = if let Some(fp) = tls_fingerprint {
             // Determine cipher based on TLS version
             let cipher = match fp.tls_version.as_str() {
                 "TLSv1.3" => "TLS_AES_256_GCM_SHA384", // Most common TLS 1.3 cipher
@@ -326,7 +357,7 @@ impl HttpAccessLog {
             // Calculate JA4L (simplified version)
             let ja4l = calculate_ja4l(&fp.tls_version, fp.alpn.as_deref());
 
-            TlsDetails {
+            Some(TlsDetails {
                 version: fp.tls_version.clone(),
                 cipher: cipher.to_string(),
                 alpn: fp.alpn.clone(),
@@ -337,8 +368,24 @@ impl HttpAccessLog {
                 ja4t: Some(fp.ja4_unsorted.clone()),
                 ja4h: Some(fp.ja4_unsorted.clone()),
                 server_cert: None, // TODO: extract server certificate details
-            }
-        });
+            })
+        } else if scheme == "https" {
+            // Create minimal TLS details for HTTPS connections without fingerprint (e.g., PROXY protocol)
+            Some(TlsDetails {
+                version: "TLS 1.3".to_string(),
+                cipher: "TLS_AES_256_GCM_SHA384".to_string(),
+                alpn: None,
+                sni: None,
+                ja4: Some("t13d".to_string()),
+                ja4one: Some("t13d".to_string()),
+                ja4l: Some("t13d".to_string()),
+                ja4t: Some("t13d".to_string()),
+                ja4h: Some("t13d".to_string()),
+                server_cert: None,
+            })
+        } else {
+            None
+        };
 
         // Create HTTP details
         let http_details = HttpDetails {
@@ -388,6 +435,9 @@ impl HttpAccessLog {
             body: response_body_truncated.to_string(),
         };
 
+        // Create remediation details
+        let remediation_details = Self::create_remediation_details(waf_result, threat_data);
+
         // Create the access log
         let access_log = HttpAccessLog {
             event_type: "http_access_log".to_string(),
@@ -398,6 +448,7 @@ impl HttpAccessLog {
             network: network_details,
             tls: tls_details,
             response: response_details,
+            remediation: remediation_details,
         };
 
         // Log to stdout (existing behavior)
@@ -409,6 +460,60 @@ impl HttpAccessLog {
         access_log.send_to_arxignis_background();
 
         Ok(())
+    }
+
+    /// Create remediation details from WAF result and threat intelligence data
+    fn create_remediation_details(
+        waf_result: Option<&crate::wirefilter::WafResult>,
+        threat_data: Option<&crate::threat::ThreatResponse>,
+    ) -> Option<RemediationDetails> {
+        // If neither WAF result nor threat data is available, return None
+        if waf_result.is_none() && threat_data.is_none() {
+            return None;
+        }
+
+        let mut remediation = RemediationDetails {
+            waf_action: None,
+            waf_rule_id: None,
+            waf_rule_name: None,
+            threat_score: None,
+            threat_confidence: None,
+            threat_categories: None,
+            threat_tags: None,
+            threat_reason_code: None,
+            threat_reason_summary: None,
+            threat_advice: None,
+            ip_country: None,
+            ip_asn: None,
+            ip_asn_org: None,
+            ip_asn_country: None,
+        };
+
+        // Populate WAF data if available
+        if let Some(waf) = waf_result {
+            remediation.waf_action = Some(format!("{:?}", waf.action).to_lowercase());
+            remediation.waf_rule_id = Some(waf.rule_id.clone());
+            remediation.waf_rule_name = Some(waf.rule_name.clone());
+        }
+
+        // Populate threat intelligence data if available
+        if let Some(threat) = threat_data {
+            remediation.threat_score = Some(threat.intel.score);
+            remediation.threat_confidence = Some(threat.intel.confidence);
+            remediation.threat_categories = Some(threat.intel.categories.clone());
+            remediation.threat_tags = Some(threat.intel.tags.clone());
+            remediation.threat_reason_code = Some(threat.intel.reason_code.clone());
+            remediation.threat_reason_summary = Some(threat.intel.reason_summary.clone());
+            remediation.threat_advice = Some(threat.advice.clone());
+            // Use iso_code directly from threat response
+            let country_code = threat.context.geo.iso_code.clone();
+            remediation.ip_country = Some(country_code);
+            remediation.ip_asn = Some(threat.context.asn);
+            remediation.ip_asn_org = Some(threat.context.org.clone());
+            remediation.ip_asn_country = Some(threat.context.geo.asn_iso_code.clone());
+        }
+
+        Some(remediation)
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -504,6 +609,8 @@ impl HttpAccessLog {
 pub struct ResponseData {
     pub response_json: serde_json::Value,
     pub blocking_info: Option<serde_json::Value>,
+    pub waf_result: Option<crate::wirefilter::WafResult>,
+    pub threat_data: Option<crate::threat::ThreatResponse>,
 }
 
 impl ResponseData {
@@ -529,11 +636,18 @@ impl ResponseData {
         Ok(ResponseData {
             response_json,
             blocking_info: None,
+            waf_result: None,
+            threat_data: None,
         })
     }
 
     /// Create response data for a blocked request
-    pub fn for_blocked_request(block_reason: &str, status_code: u16) -> Self {
+    pub fn for_blocked_request(
+        block_reason: &str,
+        status_code: u16,
+        waf_result: Option<crate::wirefilter::WafResult>,
+        threat_data: Option<&crate::threat::ThreatResponse>,
+    ) -> Self {
         let status_text = match status_code {
             403 => "Forbidden",
             426 => "Upgrade Required",
@@ -558,11 +672,18 @@ impl ResponseData {
         ResponseData {
             response_json,
             blocking_info: Some(blocking_info),
+            waf_result,
+            threat_data: threat_data.cloned(),
         }
     }
 
     /// Create response data for a malware-blocked request with scan details
-    pub fn for_malware_blocked_request(signature: Option<String>, scan_error: Option<String>) -> Self {
+    pub fn for_malware_blocked_request(
+        signature: Option<String>,
+        scan_error: Option<String>,
+        waf_result: Option<crate::wirefilter::WafResult>,
+        threat_data: Option<&crate::threat::ThreatResponse>,
+    ) -> Self {
         let response_json = serde_json::json!({
             "status": 403,
             "status_text": "Forbidden",
@@ -589,6 +710,8 @@ impl ResponseData {
         ResponseData {
             response_json,
             blocking_info: Some(blocking_info),
+            waf_result,
+            threat_data: threat_data.cloned(),
         }
     }
 }
@@ -802,6 +925,7 @@ mod tests {
                 content_length: Some(10),
                 body: "{\"ok\":true}".to_string(),
             },
+            remediation: None,
         };
 
         let json = log.to_json().unwrap();

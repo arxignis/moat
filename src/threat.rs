@@ -97,7 +97,7 @@ pub struct WafFields {
 impl From<&ThreatResponse> for WafFields {
     fn from(threat: &ThreatResponse) -> Self {
         Self {
-            ip_src_country: threat.context.geo.country.clone(),
+            ip_src_country: threat.context.geo.iso_code.clone(),
             ip_src_asn: threat.context.asn,
             ip_src_asn_org: threat.context.org.clone(),
             ip_src_asn_country: threat.context.geo.asn_iso_code.clone(),
