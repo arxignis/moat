@@ -32,4 +32,4 @@ go.work.sum
 # .vscode/
 
 target/
-Cargo.lock
+config.yaml

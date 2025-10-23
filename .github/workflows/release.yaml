@@ -1,0 +1,229 @@
+name: Release
+permissions:
+  # Allow this action to create releases.
+  contents: write
+  packages: write
+  
+
+on:
+  create:
+    tags:
+    - 'v*'
+  workflow_dispatch:
+
+env:
+  MOAT_REGISTRY_IMAGE: ghcr.io/arxignis/moat
+
+jobs:
+  docker-prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create matrix
+        id: platforms
+        run: |
+          echo "matrix=$(docker buildx bake -f docker-bake.hcl image-all --print | jq -cr '.target."image-all".platforms')" >>${GITHUB_OUTPUT}
+
+      - name: Show matrix
+        run: |
+          echo ${{ steps.platforms.outputs.matrix }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.MOAT_REGISTRY_IMAGE }}
+          tags: |
+            type=sha,format=short
+            type=match,pattern=v(\d+\.\d+\.\d+),group=1
+            type=match,pattern=v(\d+\.\d+),group=1
+            type=match,pattern=v(\d+),group=1
+            type=raw,value=latest
+
+      - name: Rename meta bake definition file
+        run: |
+          mv "${{ steps.meta.outputs.bake-file }}" "${{ runner.temp }}/moat-bake-meta.json"
+
+      - name: Upload meta bake definition
+        uses: actions/upload-artifact@v4
+        with:
+          name: moat-bake-meta
+          path: ${{ runner.temp }}/moat-bake-meta.json
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-build:
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    needs:
+      - docker-prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.docker-prepare.outputs.matrix) }}
+    steps:
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      - name: Download meta bake definition
+        uses: actions/download-artifact@v5
+        with:
+          name: moat-bake-meta
+          path: ${{ runner.temp }}
+
+      - name: Login to Github Packages
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        id: bake
+        uses: docker/bake-action@v6
+        with:
+          files: |
+            docker-bake.hcl
+            cwd://${{ runner.temp }}/moat-bake-meta.json
+          targets: image
+          set: |
+            *.tags=${{ env.MOAT_REGISTRY_IMAGE }}
+            *.platform=${{ matrix.platform }}
+            *.output=type=image,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ fromJSON(steps.bake.outputs.metadata).image['containerimage.digest'] }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: moat-digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-merge:
+    runs-on: ubuntu-latest
+    needs:
+      - docker-build
+    steps:
+      - name: Download meta bake definition
+        uses: actions/download-artifact@v5
+        with:
+          name: moat-bake-meta
+          path: ${{ runner.temp }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v5
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: moat-digests-*
+          merge-multiple: true
+
+      - name: Login to Github Packages
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.target."docker-metadata-action".tags | map(select(startswith("${{ env.MOAT_REGISTRY_IMAGE }}")) | "-t " + .) | join(" ")' ${{ runner.temp }}/moat-bake-meta.json) \
+            $(printf '${{ env.MOAT_REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.MOAT_REGISTRY_IMAGE }}:$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' ${{ runner.temp }}/moat-bake-meta.json)
+
+
+  build-artifacts:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    env:
+      CARGO_TERM_COLOR: always
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+        - linux-arm
+        - linux-intel
+        include:
+        - build: linux-intel
+          os: ubuntu-latest
+          target: x86_64-unknown-linux-gnu
+
+        - build: linux-arm
+          os: ubuntu-24.04-arm
+          target: aarch64-unknown-linux-gnu
+
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Check version number
+      shell: bash
+      run: |
+        set -ex
+        version=`cargo pkgid --manifest-path Cargo.toml | cut -d "@" -f2`
+        if [ "${{ github.ref_name }}" != "v$version" ]; then
+          exit 1
+        fi
+
+    - run: rustup target add ${{ matrix.target }}
+
+    - name: Build
+      run: cargo build --bin moat --release --target ${{ matrix.target }}
+
+    - name: Build archive
+      shell: bash
+      run: |
+        tar czf moat-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release moat
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: moat-${{ matrix.target }}
+        path: moat-*
+  publish-artifacts:
+      needs: [ build-artifacts ]
+      runs-on: ubuntu-latest
+
+      steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: moat-*
+
+      - name: ls
+        shell: bash
+        run: ls
+
+      - name: Release
+        uses: softprops/action-gh-release@v2.2.1
+        with:
+          draft: true
+          files: moat-*/moat-*

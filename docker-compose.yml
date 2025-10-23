@@ -6,7 +6,7 @@ services:
     image: redis:7-alpine
     container_name: moat-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     networks:
@@ -40,8 +40,8 @@ services:
       - "--log.level=INFO"
       - "--accesslog=true"
     ports:
-      - "8081:80"
-      - "8082:8080"
+      - "127.0.0.1:8081:80"
+      - "127.0.0.1:8082:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:

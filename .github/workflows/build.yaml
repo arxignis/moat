@@ -1,0 +1,60 @@
+name: Continuous integration
+on:
+  pull_request:
+      branches:
+        - main
+
+jobs:
+  build-amd64:
+    name: Build amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git/
+            ~/.cargo/registry/
+            target/
+          key: ${{ runner.os }}-moat-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-moat
+      - name: Install package
+        run: |
+          sudo apt-get update && sudo apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \
+          zlib1g-dev libzstd-dev pkg-config libcap-dev binutils-multiarch-dev curl cmake ca-certificates libelf-dev libelf1 libssl3
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build
+        run: cargo build --verbose
+      - name: Test
+        run: cargo test --verbose
+
+  build-arm64:
+    name: Build arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git/
+            ~/.cargo/registry/
+            target/
+          key: ${{ runner.os }}-moat-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-moat
+      - name: Install package
+        run: |
+          sudo apt-get update && sudo apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \
+          zlib1g-dev libzstd-dev pkg-config libcap-dev binutils-multiarch-dev curl cmake ca-certificates libelf-dev libelf1 libssl3
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build
+        run: cargo build --verbose
+      - name: Test
+        run: cargo test --verbose
