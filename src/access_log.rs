@@ -270,6 +270,7 @@ impl HttpAccessLog {
         response_data: ResponseData,
         waf_result: Option<&crate::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
+        server_cert_info: Option<&crate::http::ServerCertInfo>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
         let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
@@ -349,13 +350,18 @@ impl HttpAccessLog {
         let tls_details = if let Some(fp) = tls_fingerprint {
             // Determine cipher based on TLS version
             let cipher = match fp.tls_version.as_str() {
-                "TLSv1.3" => "TLS_AES_256_GCM_SHA384", // Most common TLS 1.3 cipher
-                "TLSv1.2" => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", // Most common TLS 1.2 cipher
-                _ => "Unknown",
+                "TLSv1.3" | "13" => "TLS_AES_256_GCM_SHA384", // Most common TLS 1.3 cipher
+                "TLSv1.2" | "12" => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", // Most common TLS 1.2 cipher
+                "TLSv1.1" | "11" => "TLS_RSA_WITH_AES_256_CBC_SHA",
+                "TLSv1.0" | "10" => "TLS_RSA_WITH_AES_256_CBC_SHA",
+                _ => "TLS_AES_256_GCM_SHA384", // Default to TLS 1.3 cipher
             };
 
             // Calculate JA4L (simplified version)
             let ja4l = calculate_ja4l(&fp.tls_version, fp.alpn.as_deref());
+
+            // Extract server certificate details if available
+            let server_cert = extract_server_cert_details(&fp, server_cert_info);
 
             Some(TlsDetails {
                 version: fp.tls_version.clone(),
@@ -367,7 +373,7 @@ impl HttpAccessLog {
                 ja4l: Some(ja4l),
                 ja4t: Some(fp.ja4_unsorted.clone()),
                 ja4h: Some(fp.ja4_unsorted.clone()),
-                server_cert: None, // TODO: extract server certificate details
+                server_cert,
             })
         } else if scheme == "https" {
             // Create minimal TLS details for HTTPS connections without fingerprint (e.g., PROXY protocol)
@@ -845,14 +851,35 @@ pub fn start_batch_log_processor() {
     });
 }
 
+/// Extract server certificate details from server certificate info
+fn extract_server_cert_details(_fp: &crate::http::tls_fingerprint::Fingerprint, server_cert_info: Option<&crate::http::ServerCertInfo>) -> Option<ServerCertDetails> {
+    server_cert_info.map(|cert_info| {
+        // Parse the date strings from ServerCertInfo
+        let not_before = chrono::DateTime::parse_from_rfc3339(&cert_info.not_before)
+            .unwrap_or_else(|_| Utc::now().into())
+            .with_timezone(&Utc);
+        let not_after = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after)
+            .unwrap_or_else(|_| Utc::now().into())
+            .with_timezone(&Utc);
+
+        ServerCertDetails {
+            issuer: cert_info.issuer.clone(),
+            subject: cert_info.subject.clone(),
+            not_before,
+            not_after,
+            fingerprint_sha256: cert_info.fingerprint_sha256.clone(),
+        }
+    })
+}
+
 /// Calculate JA4L fingerprint based on TLS version and ALPN
 fn calculate_ja4l(tls_version: &str, alpn: Option<&str>) -> String {
     // JA4L format: TLS_version_ALPN_length
     let version_code = match tls_version {
-        "TLSv1.3" => "13",
-        "TLSv1.2" => "12",
-        "TLSv1.1" => "11",
-        "TLSv1.0" => "10",
+        "TLSv1.3" | "13" => "13",
+        "TLSv1.2" | "12" => "12",
+        "TLSv1.1" | "11" => "11",
+        "TLSv1.0" | "10" => "10",
         _ => "00",
     };
 

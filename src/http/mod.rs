@@ -18,6 +18,7 @@ use crate::{bpf, utils::bpf_utils};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use clap::ValueEnum;
 use futures_rustls::rustls::{ClientConfig as AcmeClientConfig, RootCertStore};
 use http_body_util::{BodyExt, Full};
@@ -707,16 +708,51 @@ fn parse_cert_chain(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
         .collect())
 }
 
-// Minimal certificate info extractor (placeholder). For richer details, integrate x509-parser.
+// Extract certificate info from DER-encoded certificate using x509-parser
 fn extract_cert_info_from_der(cert_der: &CertificateDer<'static>) -> Option<ServerCertInfo> {
-    Some(ServerCertInfo {
-        subject: "unknown".to_string(),
-        issuer: "unknown".to_string(),
-        serial_number: "unknown".to_string(),
-        not_before: "unknown".to_string(),
-        not_after: "unknown".to_string(),
-        fingerprint_sha256: format!("{:x}", sha2::Sha256::digest(cert_der.as_ref())),
-    })
+    use x509_parser::parse_x509_certificate;
+
+    match parse_x509_certificate(cert_der.as_ref()) {
+        Ok((_, cert)) => {
+            // Extract subject
+            let subject = cert.subject().to_string();
+
+            // Extract issuer
+            let issuer = cert.issuer().to_string();
+
+            // Extract serial number
+            let serial_number = cert.serial.to_string();
+
+            // Extract validity dates
+            let validity = cert.validity();
+            let not_before = format!("{}", validity.not_before.to_datetime());
+            let not_after = format!("{}", validity.not_after.to_datetime());
+
+            // Calculate SHA256 fingerprint
+            let fingerprint_sha256 = format!("{:x}", sha2::Sha256::digest(cert_der.as_ref()));
+
+            Some(ServerCertInfo {
+                subject,
+                issuer,
+                serial_number,
+                not_before,
+                not_after,
+                fingerprint_sha256,
+            })
+        }
+        Err(e) => {
+            log::warn!("Failed to parse X.509 certificate: {}", e);
+            // Fallback to fingerprint-only info
+            Some(ServerCertInfo {
+                subject: "parse_error".to_string(),
+                issuer: "parse_error".to_string(),
+                serial_number: "parse_error".to_string(),
+                not_before: Utc::now().to_rfc3339(),
+                not_after: Utc::now().to_rfc3339(),
+                fingerprint_sha256: format!("{:x}", sha2::Sha256::digest(cert_der.as_ref())),
+            })
+        }
+    }
 }
 
 // Retry configuration for ACME operations
@@ -1414,6 +1450,7 @@ pub async fn proxy_http_service(
     ctx: Arc<ProxyContext>,
     peer: Option<SocketAddr>,
     tls_fingerprint: Option<&TlsFingerprint>,
+    server_cert_info: Option<ServerCertInfo>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let peer_addr = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
@@ -1464,6 +1501,7 @@ pub async fn proxy_http_service(
                 ResponseData::for_blocked_request("tls_required", 426, None, None),
                 None,
                 None,
+                server_cert_info.as_ref(),
             )
             .await
             {
@@ -1524,6 +1562,7 @@ pub async fn proxy_http_service(
                                 ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error, None, threat_data.as_ref()),
                                 None,
                                 threat_data.as_ref(),
+                                server_cert_info.as_ref(),
                             )
                             .await
                             {
@@ -1582,6 +1621,7 @@ pub async fn proxy_http_service(
                     response_data,
                     None,
                     threat_data.as_ref(),
+                    server_cert_info.as_ref(),
                 )
                 .await
                 {
@@ -1733,6 +1773,7 @@ pub async fn proxy_http_service(
                 ResponseData::for_blocked_request("captcha_challenge_required", 403, None, threat_data.as_ref()),
                 None,
                 threat_data.as_ref(),
+                server_cert_info.as_ref(),
             )
             .await
             {
@@ -1788,6 +1829,7 @@ pub async fn proxy_http_service(
                             ResponseData::for_blocked_request("request_blocked_by_filter", 403, Some(waf_result.clone()), threat_data.as_ref()),
                             Some(&waf_result),
                             threat_data.as_ref(),
+                            server_cert_info.as_ref(),
                         )
                         .await
                         {
@@ -1847,6 +1889,7 @@ pub async fn proxy_http_service(
                                 response_data,
                                 Some(&waf_result),
                                 threat_data.as_ref(),
+                                server_cert_info.as_ref(),
                             )
                             .await
                             {
@@ -1917,6 +1960,7 @@ pub async fn proxy_http_service(
                             response_data,
                             None,
                             threat_data.as_ref(),
+                            server_cert_info.as_ref(),
                         ).await {
                             log::warn!("Failed to log captcha challenge request: {}", e);
                         }
@@ -1995,6 +2039,7 @@ pub async fn proxy_http_service(
                                 ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error, None, threat_data.as_ref()),
                                 None,
                                 threat_data.as_ref(),
+                                server_cert_info.as_ref(),
                             )
                             .await
                             {
@@ -2065,6 +2110,7 @@ pub async fn proxy_http_service(
                     response_data,
                     waf_result.as_ref(),
                     threat_data.as_ref(),
+                    server_cert_info.as_ref(),
                 )
                 .await
                 {
@@ -2095,7 +2141,7 @@ pub async fn serve_proxy_conn<S>(
     peer: Option<SocketAddr>,
     ctx: Arc<ProxyContext>,
     tls_fingerprint: Option<&TlsFingerprint>,
-    _server_cert_info: Option<ServerCertInfo>,
+    server_cert_info: Option<ServerCertInfo>,
 ) -> Result<(), anyhow::Error>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -2104,7 +2150,7 @@ where
     http1::Builder::new()
         .serve_connection(
             io,
-            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint)),
+            service_fn(move |req| proxy_http_service(req, ctx.clone(), peer, tls_fingerprint, server_cert_info.clone())),
         )
         .await
         .map_err(|e| anyhow!("http1 connection error: {e}"))
@@ -2402,7 +2448,7 @@ pub async fn run_acme_http01_proxy(
                                                 .unwrap();
                                             return Ok(response);
                                         } else {
-                                            proxy_http_service(req, ctx_req, Some(real_client_addr), None).await
+                                            proxy_http_service(req, ctx_req, Some(real_client_addr), None, None).await
                                         }
                                     }
                                 });
@@ -2605,7 +2651,7 @@ async fn handle_http_connection(
 
     let service = service_fn(move |req| {
         let ctx = ctx.clone();
-        async move { proxy_http_service(req, ctx, Some(real_client_addr), None).await }
+        async move { proxy_http_service(req, ctx, Some(real_client_addr), None, None).await }
     });
 
     let io = TokioIo::new(stream);
@@ -2644,8 +2690,9 @@ mod tests {
             None,
             ResponseData::for_blocked_request("test_block_reason", 403, None, None),
             None,
-            None,
-        )
+                                None,
+                                server_cert_info.as_ref(),
+                            )
         .await;
 
         // Should succeed
@@ -2676,8 +2723,9 @@ mod tests {
             None,
             ResponseData::for_blocked_request("test_block_reason", 403, None, None),
             None,
-            None,
-        )
+                                None,
+                                server_cert_info.as_ref(),
+                            )
         .await;
 
         // Should succeed
