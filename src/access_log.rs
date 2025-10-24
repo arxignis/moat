@@ -447,7 +447,7 @@ impl HttpAccessLog {
         // Create the access log
         let access_log = HttpAccessLog {
             event_type: "http_access_log".to_string(),
-            schema_version: "1.2.0".to_string(),
+            schema_version: "1.0.0".to_string(),
             timestamp,
             request_id,
             http: http_details,
@@ -917,7 +917,7 @@ mod tests {
         // For now, just test the structure creation
         let log = HttpAccessLog {
             event_type: "http_access_log".to_string(),
-            schema_version: "1.2.0".to_string(),
+            schema_version: "1.0.0".to_string(),
             timestamp: Utc::now(),
             request_id: "test_123".to_string(),
             http: HttpDetails {
