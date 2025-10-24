@@ -1638,6 +1638,26 @@ pub async fn proxy_http_service(
                     peer.map(|p| p.to_string())
                         .unwrap_or_else(|| "<unknown>".into())
                 );
+
+                // Create access log for upstream error
+                let dst_addr = parse_upstream_addr(&ctx.upstream);
+                let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
+                if let Err(e) = HttpAccessLog::create_from_parts(
+                    &req_parts,
+                    &req_body_bytes,
+                    peer_addr,
+                    dst_addr,
+                    tls_fingerprint,
+                    ResponseData::for_blocked_request("proxy_error", 502, None, threat_data.as_ref()),
+                    None,
+                    threat_data.as_ref(),
+                    server_cert_info.as_ref(),
+                )
+                .await
+                {
+                    log::warn!("Failed to log upstream error: {}", e);
+                }
+
                 return Ok(build_proxy_error_response(
                     StatusCode::BAD_GATEWAY,
                     "proxy_error",
@@ -2128,6 +2148,26 @@ pub async fn proxy_http_service(
                 peer.map(|p| p.to_string())
                     .unwrap_or_else(|| "<unknown>".into())
             );
+
+            // Create access log for upstream error
+            let dst_addr = parse_upstream_addr(&ctx.upstream);
+            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
+            if let Err(e) = HttpAccessLog::create_from_parts(
+                &req_parts,
+                &req_body_bytes,
+                peer_addr,
+                dst_addr,
+                tls_fingerprint,
+                ResponseData::for_blocked_request("proxy_error", 502, None, threat_data.as_ref()),
+                None,
+                threat_data.as_ref(),
+                server_cert_info.as_ref(),
+            )
+            .await
+            {
+                log::warn!("Failed to log upstream error: {}", e);
+            }
+
             Ok(build_proxy_error_response(
                 StatusCode::BAD_GATEWAY,
                 "proxy_error",
