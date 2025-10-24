@@ -190,8 +190,11 @@ impl HttpFilter {
             }
         }
 
+        let rules_count = compiled_rules.len();
         *self.rules.write().unwrap() = compiled_rules;
         *self.rules_hash.write().unwrap() = Some(new_hash);
+
+        log::info!("HTTP filter updated with {} WAF rules from config", rules_count);
 
         Ok(())
     }
@@ -488,18 +491,7 @@ pub async fn update_with_config(base_url: String, api_key: String) -> anyhow::Re
         match fetch_config(base_url.clone(), api_key.clone()).await {
             Ok(config_response) => {
                 if let Some(filter) = HTTP_FILTER.get() {
-                    // Capture previous hash to decide logging level
-                    let prev_hash = filter.rules_hash.read().unwrap().clone();
                     filter.update_from_config(&config_response.config)?;
-                    let new_hash = filter.rules_hash.read().unwrap().clone();
-                    if new_hash.is_some() && new_hash == prev_hash {
-                        log::debug!("HTTP filter WAF rules unchanged; skipping update log");
-                    } else {
-                        log::info!(
-                            "HTTP filter updated with {} WAF rules from config",
-                            config_response.config.waf_rules.rules.len()
-                        );
-                    }
                 } else {
                     log::warn!("HTTP filter not initialized, cannot update");
                 }
@@ -524,18 +516,7 @@ pub async fn update_with_config(base_url: String, api_key: String) -> anyhow::Re
 /// Update the global HTTP filter using an already-fetched Config value
 pub fn update_http_filter_from_config_value(config: &Config) -> anyhow::Result<()> {
     if let Some(filter) = HTTP_FILTER.get() {
-        // Capture previous hash to decide logging level
-        let prev_hash = filter.rules_hash.read().unwrap().clone();
         filter.update_from_config(config)?;
-        let new_hash = filter.rules_hash.read().unwrap().clone();
-        if new_hash.is_some() && new_hash == prev_hash {
-            log::debug!("HTTP filter WAF rules unchanged; skipping update log");
-        } else {
-            log::info!(
-                "HTTP filter updated with {} WAF rules from config",
-                config.waf_rules.rules.len()
-            );
-        }
         Ok(())
     } else {
         log::warn!("HTTP filter not initialized, cannot update");
