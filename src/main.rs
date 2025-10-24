@@ -25,6 +25,7 @@ pub mod content_scanning;
 pub mod domain_filter;
 pub mod firewall;
 pub mod http;
+pub mod http_client;
 pub mod utils;
 pub mod wirefilter;
 pub mod proxy_utils;
@@ -55,6 +56,7 @@ use crate::utils::bpf_utils;
 use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
 use crate::access_log::{LogSenderConfig, set_log_sender_config, start_batch_log_processor};
 use crate::authcheck::validate_api_key;
+use crate::http_client::init_global_client;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -83,6 +85,13 @@ async fn main() -> Result<()> {
         builder.filter_level(args.log_level.to_level_filter());
         builder.format_timestamp_secs();
         builder.try_init().ok();
+    }
+
+    // Initialize global HTTP client with keepalive configuration
+    if let Err(e) = init_global_client() {
+        log::warn!("Failed to initialize global HTTP client: {}", e);
+    } else {
+        log::info!("Global HTTP client initialized with keepalive configuration");
     }
 
 

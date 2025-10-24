@@ -7,7 +7,6 @@ use hyper::Response;
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use reqwest::Client;
 
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -16,6 +15,7 @@ use tokio::time::interval;
 
 use crate::http::tls_fingerprint::Fingerprint as TlsFingerprint;
 use crate::proxy_utils::ProxyBody;
+use crate::http_client::get_global_reqwest_client;
 
 /// Configuration for sending access logs to arxignis server
 #[derive(Debug, Clone)]
@@ -550,10 +550,9 @@ impl HttpAccessLog {
             None => return Ok(()),
         };
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .user_agent("Moat/1.0")
-            .build()?;
+        // Use shared HTTP client with keepalive instead of creating new client
+        let client = get_global_reqwest_client()
+            .map_err(|e| anyhow::anyhow!("Failed to get global HTTP client: {}", e))?;
 
         let url = format!("{}/logs", config.base_url);
         let logs_array = vec![self.clone()];
@@ -744,10 +743,9 @@ async fn send_log_batch(logs: Vec<HttpAccessLog>) -> Result<(), Box<dyn std::err
         None => return Ok(()),
     };
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Moat/1.0")
-        .build()?;
+    // Use shared HTTP client with keepalive instead of creating new client
+    let client = get_global_reqwest_client()
+        .map_err(|e| format!("Failed to get global HTTP client: {}", e))?;
 
     let url = format!("{}/logs", config.base_url);
     let json = serde_json::to_string(&logs)?;

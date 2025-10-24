@@ -264,8 +264,8 @@ impl Config {
         if let Some(upstream) = &args.upstream {
             self.server.upstream = upstream.clone();
         }
-        if let Some(base_url) = &args.arxignis_base_url {
-            self.arxignis.base_url = base_url.clone();
+        if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.arxignis.com/v1" {
+            self.arxignis.base_url = args.arxignis_base_url.clone();
         }
         if let Some(log_sending_enabled) = args.arxignis_log_sending_enabled {
             self.arxignis.log_sending_enabled = log_sending_enabled;
@@ -415,7 +415,7 @@ impl Config {
             self.network.disable_xdp = val.parse().unwrap_or(false);
         }
 
-        // Arx Ignis configuration overrides
+        // Arxignis configuration overrides
         if let Ok(val) = env::var("AX_ARXIGNIS_API_KEY") {
             self.arxignis.api_key = val;
         }
@@ -578,9 +578,9 @@ pub struct Args {
     #[arg(long)]
     pub arxignis_api_key: Option<String>,
 
-    /// Base URL for Arx Ignis API.
+    /// Base URL for Arxignis API.
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
-    pub arxignis_base_url: Option<String>,
+    pub arxignis_base_url: String,
 
     /// Enable sending access logs to arxignis server
     #[arg(long)]
