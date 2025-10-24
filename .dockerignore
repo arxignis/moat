@@ -7,3 +7,4 @@ docs
 .devcontainer
 images
 *.md
+docker/volumes

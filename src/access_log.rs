@@ -899,7 +899,7 @@ mod tests {
         let _req = Request::builder()
             .method("GET")
             .uri("https://example.com/test?param=value")
-            .header("User-Agent", "TestAgent/1.0")
+            .header("User-Agent", format!("TestAgent/{}", env!("CARGO_PKG_VERSION")))
             .body(http_body_util::Full::new(bytes::Bytes::new()))
             .unwrap();
 
@@ -929,7 +929,7 @@ mod tests {
                 query: "param=value".to_string(),
                 query_hash: Some("abc123".to_string()),
                 headers: HashMap::new(),
-                user_agent: Some("TestAgent/1.0".to_string()),
+                user_agent: Some(format!("TestAgent/{}", env!("CARGO_PKG_VERSION"))),
                 content_type: None,
                 content_length: None,
                 body: "".to_string(),
