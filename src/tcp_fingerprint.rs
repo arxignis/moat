@@ -3,10 +3,9 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use std::net::Ipv4Addr;
 use libbpf_rs::MapCore;
-use crate::access_log::get_log_sender_config;
+use crate::event_queue::{send_event, UnifiedEvent};
 
 use crate::bpf::FilterSkel;
-use crate::http_client;
 
 /// TCP fingerprinting configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -692,14 +691,10 @@ impl TcpFingerprintCollector {
                 log::debug!("TCP Fingerprint Events JSON: {}", json);
             }
 
-            // Send events to base URL
-            let events_clone = events.clone();
-            let collector_clone = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = collector_clone.send_fingerprint_events_to_api(&events_clone).await {
-                    log::warn!("Failed to send TCP fingerprint events to API: {}", e);
-                }
-            });
+            // Send events to unified queue
+            for event in events.events {
+                send_event(UnifiedEvent::TcpFingerprint(event));
+            }
 
             // Reset the counters after logging
             self.reset_fingerprint_counters()?;
@@ -710,59 +705,6 @@ impl TcpFingerprintCollector {
         Ok(())
     }
 
-    /// Send TCP fingerprint events to the API endpoint
-    pub async fn send_fingerprint_events_to_api(&self, events: &TcpFingerprintEvents) -> Result<(), Box<dyn std::error::Error>> {
-        if events.events.is_empty() {
-            return Ok(());
-        }
-
-        log::info!("Sending TCP fingerprint events to API");
-
-        let config = {
-            let config_store = get_log_sender_config();
-            let config_guard = config_store.read().unwrap();
-            config_guard.as_ref().cloned()
-        };
-
-        let config = match config {
-            Some(config) => {
-                if !config.should_send_logs() {
-                    return Ok(());
-                }
-                config
-            }
-            None => return Ok(()),
-        };
-
-        // Get the HTTP client
-        let client = http_client::get_global_reqwest_client()
-            .map_err(|e| format!("Failed to get HTTP client: {}", e))?;
-
-        // Convert events to JSON array format
-        let events_json = serde_json::to_string(&events.events)
-            .map_err(|e| format!("Failed to serialize events: {}", e))?;
-
-        log::info!("Events JSON: {}", events_json);
-        log::debug!("Sending {} TCP fingerprint events to {}", events.events.len(), config.base_url);
-
-        // Send POST request with events array
-        let response = client
-            .post(&format!("{}/events/tcp_fingerprints", config.base_url))
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", config.api_key))
-            .body(events_json)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to send request: {}", e))?;
-
-        if response.status().is_success() {
-            log::debug!("Successfully sent {} TCP fingerprint events to API", events.events.len());
-        } else {
-            return Err(format!("API returned error status: {}", response.status()).into());
-        }
-
-        Ok(())
-    }
 
     /// Reset TCP fingerprint counters in BPF maps
     pub fn reset_fingerprint_counters(&self) -> Result<(), Box<dyn std::error::Error>> {

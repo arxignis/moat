@@ -41,6 +41,7 @@ pub mod bpf {
 
 pub mod bpf_stats;
 pub mod tcp_fingerprint;
+pub mod event_queue;
 
 use tokio::signal;
 use tokio::sync::watch;
@@ -60,7 +61,8 @@ use crate::wirefilter::init_config;
 use crate::content_scanning::{init_content_scanner, ContentScanningConfig};
 use crate::utils::bpf_utils;
 use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
-use crate::access_log::{LogSenderConfig, set_log_sender_config, start_batch_log_processor};
+use crate::access_log::{LogSenderConfig, set_log_sender_config};
+use crate::event_queue::start_batch_event_processor;
 use crate::authcheck::validate_api_key;
 use crate::http_client::init_global_client;
 
@@ -290,11 +292,11 @@ async fn main() -> Result<()> {
     set_log_sender_config(log_sender_config);
 
     if config.arxignis.log_sending_enabled && !config.arxignis.api_key.is_empty() {
-        log::info!("Access log sending to arxignis server enabled with batching (10s timeout, 5MB limit)");
-        // Start the background batch log processor
-        start_batch_log_processor();
+        log::info!("Event sending to arxignis server enabled with unified queue (10s timeout, 5MB limit)");
+        // Start the background unified event processor
+        start_batch_event_processor();
     } else {
-        log::info!("Access log sending to arxignis server disabled (enabled: {}, api_key configured: {})",
+        log::info!("Event sending to arxignis server disabled (enabled: {}, api_key configured: {})",
                    config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());
     }
 

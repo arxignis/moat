@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use libbpf_rs::MapCore;
+use crate::event_queue::{send_event, UnifiedEvent};
 
 use crate::bpf::FilterSkel;
 
@@ -37,9 +38,7 @@ pub struct DroppedIpEvent {
     pub ip_address: String,
     pub ip_version: IpVersion,
     pub drop_count: u64,
-    pub drop_reason: DropReason,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
+    pub drop_reason: DropReason
 }
 
 /// IP version enumeration
@@ -255,14 +254,12 @@ impl DroppedIpEvent {
     ) -> Self {
         let now = Utc::now();
         Self {
-            event_type: "dropped_ip".to_string(),
+            event_type: "dropped_ips".to_string(),
             timestamp: now,
             ip_address,
             ip_version,
             drop_count,
-            drop_reason,
-            first_seen: now,
-            last_seen: now,
+            drop_reason
         }
     }
 
@@ -504,7 +501,12 @@ impl BpfStatsCollector {
                 log::info!("Dropped IP Events JSON: {}", json);
             }
 
-             // Reset the counters after logging
+            // Send events to unified queue
+            for event in events.events {
+                send_event(UnifiedEvent::DroppedIp(event));
+            }
+
+            // Reset the counters after logging
             self.reset_dropped_ip_counters()?;
         } else {
             log::debug!("No dropped IP events found");
@@ -512,6 +514,7 @@ impl BpfStatsCollector {
 
         Ok(())
     }
+
 
     /// Reset dropped IP address counters in BPF maps
     pub fn reset_dropped_ip_counters(&self) -> Result<(), Box<dyn std::error::Error>> {

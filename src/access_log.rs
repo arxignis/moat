@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH, Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use hyper::Response;
@@ -10,12 +10,10 @@ use sha2::{Digest, Sha256};
 
 use std::sync::Arc;
 use std::sync::RwLock;
-use tokio::sync::mpsc;
-use tokio::time::interval;
 
 use crate::http::tls_fingerprint::Fingerprint as TlsFingerprint;
 use crate::proxy_utils::ProxyBody;
-use crate::http_client::get_global_reqwest_client;
+use crate::event_queue::{send_event, UnifiedEvent};
 
 /// Configuration for sending access logs to arxignis server
 #[derive(Debug, Clone)]
@@ -50,98 +48,8 @@ impl LogSenderConfig {
     }
 }
 
-/// Buffer for storing access logs before batch sending
-#[derive(Debug)]
-pub struct LogBuffer {
-    logs: Vec<HttpAccessLog>,
-    failed_logs: Vec<HttpAccessLog>, // Store logs that failed to send
-    total_size_bytes: usize,
-    failed_size_bytes: usize,
-    last_flush_time: Instant,
-    last_retry_time: Instant, // Track when we last tried to resend failed logs
-}
-
-impl LogBuffer {
-    fn new() -> Self {
-        Self {
-            logs: Vec::new(),
-            failed_logs: Vec::new(),
-            total_size_bytes: 0,
-            failed_size_bytes: 0,
-            last_flush_time: Instant::now(),
-            last_retry_time: Instant::now(),
-        }
-    }
-
-    fn add_log(&mut self, log: HttpAccessLog) -> usize {
-        // Estimate log size (rough approximation)
-        let log_size = estimate_log_size(&log);
-        self.logs.push(log);
-        self.total_size_bytes += log_size;
-        self.logs.len()
-    }
-
-    fn should_flush(&self, config: &LogSenderConfig) -> bool {
-        self.logs.len() >= config.batch_size_limit ||
-        self.total_size_bytes >= config.batch_size_bytes ||
-        self.last_flush_time.elapsed().as_secs() >= config.batch_timeout_secs
-    }
-
-    fn take_logs(&mut self) -> Vec<HttpAccessLog> {
-        self.total_size_bytes = 0;
-        self.last_flush_time = Instant::now();
-        std::mem::take(&mut self.logs)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.logs.is_empty()
-    }
-
-    fn add_failed_logs(&mut self, logs: Vec<HttpAccessLog>) {
-        for log in logs {
-            let log_size = estimate_log_size(&log);
-            self.failed_logs.push(log);
-            self.failed_size_bytes += log_size;
-        }
-    }
-
-    fn should_retry_failed_logs(&self) -> bool {
-        // Retry failed logs every 30 seconds
-        !self.failed_logs.is_empty() &&
-        self.last_retry_time.elapsed().as_secs() >= 30
-    }
-
-    fn take_failed_logs(&mut self) -> Vec<HttpAccessLog> {
-        self.failed_size_bytes = 0;
-        self.last_retry_time = Instant::now();
-        std::mem::take(&mut self.failed_logs)
-    }
-
-    fn has_failed_logs(&self) -> bool {
-        !self.failed_logs.is_empty()
-    }
-}
-
-/// Estimate the size of a log entry in bytes
-fn estimate_log_size(log: &HttpAccessLog) -> usize {
-    // Rough estimation based on JSON serialization
-    // This is an approximation - actual size may vary
-    let base_size = 1000; // Base overhead
-    let body_size = log.http.body.len();
-    let headers_size = log.http.headers.len() * 50; // Rough estimate for headers
-    let response_size = log.response.body.len();
-
-    base_size + body_size + headers_size + response_size
-}
-
 /// Global log sender configuration
 static LOG_SENDER_CONFIG: std::sync::OnceLock<Arc<RwLock<Option<LogSenderConfig>>>> = std::sync::OnceLock::new();
-
-/// Global log buffer for batching logs
-static LOG_BUFFER: std::sync::OnceLock<Arc<RwLock<LogBuffer>>> = std::sync::OnceLock::new();
-
-/// Channel for sending logs to the batch processor
-static LOG_CHANNEL: std::sync::OnceLock<mpsc::UnboundedSender<HttpAccessLog>> = std::sync::OnceLock::new();
 
 pub fn get_log_sender_config() -> Arc<RwLock<Option<LogSenderConfig>>> {
     LOG_SENDER_CONFIG
@@ -149,25 +57,11 @@ pub fn get_log_sender_config() -> Arc<RwLock<Option<LogSenderConfig>>> {
         .clone()
 }
 
-pub fn get_log_buffer() -> Arc<RwLock<LogBuffer>> {
-    LOG_BUFFER
-        .get_or_init(|| Arc::new(RwLock::new(LogBuffer::new())))
-        .clone()
-}
-
-pub fn get_log_channel() -> Option<&'static mpsc::UnboundedSender<HttpAccessLog>> {
-    LOG_CHANNEL.get()
-}
-
 pub fn set_log_sender_config(config: LogSenderConfig) {
     let store = get_log_sender_config();
     if let Ok(mut guard) = store.write() {
         *guard = Some(config);
     }
-}
-
-pub fn set_log_channel(sender: mpsc::UnboundedSender<HttpAccessLog>) {
-    let _ = LOG_CHANNEL.set(sender);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,8 +356,8 @@ impl HttpAccessLog {
             log::warn!("Failed to log access log to stdout: {}", e);
         }
 
-        // Send to arxignis server in background
-        access_log.send_to_arxignis_background();
+        // Send to unified event queue
+        send_event(UnifiedEvent::HttpAccessLog(access_log));
 
         Ok(())
     }
@@ -532,81 +426,6 @@ impl HttpAccessLog {
         Ok(())
     }
 
-    /// Send access log to arxignis server asynchronously (single log)
-    pub async fn send_to_arxignis(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let config = {
-            let config_store = get_log_sender_config();
-            let config_guard = config_store.read().unwrap();
-            config_guard.as_ref().cloned()
-        };
-
-        let config = match config {
-            Some(config) => {
-                if !config.should_send_logs() {
-                    return Ok(());
-                }
-                config
-            }
-            None => return Ok(()),
-        };
-
-        // Use shared HTTP client with keepalive instead of creating new client
-        let client = get_global_reqwest_client()
-            .map_err(|e| anyhow::anyhow!("Failed to get global HTTP client: {}", e))?;
-
-        let url = format!("{}/events/http_access_logs", config.base_url);
-        let logs_array = vec![self.clone()];
-        let json = serde_json::to_string(&logs_array)?;
-
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", config.api_key))
-            .header("Content-Type", "application/json")
-            .body(json)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            log::warn!("Failed to send access log to arxignis: {} - {}", status, error_text);
-        } else {
-            log::debug!("Successfully sent access log to arxignis");
-        }
-
-        Ok(())
-    }
-
-    /// Add log to buffer for batch sending
-    pub fn add_to_buffer(&self) {
-        if let Some(sender) = get_log_channel() {
-            if let Err(e) = sender.send(self.clone()) {
-                log::warn!("Failed to send log to buffer: {}", e);
-            }
-        } else {
-            // Log channel not initialized - this is expected when log_sending_enabled is false
-            log::trace!("Log channel not initialized, skipping log buffering");
-        }
-    }
-
-    /// Send access log to arxignis server in background (fire-and-forget)
-    pub fn send_to_arxignis_background(&self) {
-        // Check if log sending is enabled before adding to buffer
-        let config = {
-            let config_store = get_log_sender_config();
-            let config_guard = config_store.read().unwrap();
-            config_guard.as_ref().cloned()
-        };
-
-        if let Some(config) = config {
-            if !config.should_send_logs() {
-                return; // Don't add to buffer if log sending is disabled
-            }
-        }
-
-        // Use buffering instead of immediate sending
-        self.add_to_buffer();
-    }
 
 }
 
@@ -722,133 +541,6 @@ impl ResponseData {
     }
 }
 
-/// Send a batch of logs to arxignis server
-async fn send_log_batch(logs: Vec<HttpAccessLog>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if logs.is_empty() {
-        return Ok(());
-    }
-
-    let config = {
-        let config_store = get_log_sender_config();
-        let config_guard = config_store.read().unwrap();
-        config_guard.as_ref().cloned()
-    };
-
-    let config = match config {
-        Some(config) => {
-            if !config.should_send_logs() {
-                return Ok(());
-            }
-            config
-        }
-        None => return Ok(()),
-    };
-
-    // Use shared HTTP client with keepalive instead of creating new client
-    let client = get_global_reqwest_client()
-        .map_err(|e| format!("Failed to get global HTTP client: {}", e))?;
-
-    let url = format!("{}/events/http_access_logs", config.base_url);
-    let json = serde_json::to_string(&logs)?;
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .body(json)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        log::warn!("Failed to send log batch to arxignis: {} - {} (batch size: {})", status, error_text, logs.len());
-        return Err(format!("HTTP {}: {}", status, error_text).into());
-    } else {
-        log::debug!("Successfully sent log batch to arxignis (batch size: {})", logs.len());
-    }
-
-    Ok(())
-}
-
-/// Start the background batch log processor
-pub fn start_batch_log_processor() {
-    let (sender, mut receiver) = mpsc::unbounded_channel::<HttpAccessLog>();
-    set_log_channel(sender);
-
-    tokio::spawn(async move {
-        let mut buffer = LogBuffer::new();
-        let mut flush_interval = interval(Duration::from_secs(1)); // Check every second
-
-        loop {
-            tokio::select! {
-                // Receive new logs
-                log = receiver.recv() => {
-                    match log {
-                        Some(log) => {
-                            let count = buffer.add_log(log);
-                            log::trace!("Added log to buffer, total: {}", count);
-                        }
-                        None => {
-                            log::info!("Log channel closed, flushing remaining logs");
-                            // Flush any remaining logs before exiting
-                            if !buffer.is_empty() {
-                                let logs = buffer.take_logs();
-                                if let Err(e) = send_log_batch(logs.clone()).await {
-                                    log::warn!("Failed to send final log batch: {}, storing locally", e);
-                                    buffer.add_failed_logs(logs);
-                                }
-                            }
-                            // Also try to flush any remaining failed logs
-                            if buffer.has_failed_logs() {
-                                let failed_logs = buffer.take_failed_logs();
-                                log::warn!("Storing {} failed logs locally (endpoint unavailable)", failed_logs.len());
-                                // In a real implementation, you might want to write these to disk
-                                // For now, we just log the count
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // Periodic flush check
-                _ = flush_interval.tick() => {
-                    let config = {
-                        let config_store = get_log_sender_config();
-                        let config_guard = config_store.read().unwrap();
-                        config_guard.as_ref().cloned()
-                    };
-
-                    if let Some(config) = config {
-                        // Handle regular log flushing
-                        if buffer.should_flush(&config) {
-                            let logs = buffer.take_logs();
-                            if !logs.is_empty() {
-                                log::debug!("Flushing log batch: {} logs", logs.len());
-                                if let Err(e) = send_log_batch(logs.clone()).await {
-                                    log::warn!("Failed to send log batch: {}, storing locally for retry", e);
-                                    buffer.add_failed_logs(logs);
-                                }
-                            }
-                        }
-
-                        // Handle retry of failed logs
-                        if buffer.should_retry_failed_logs() {
-                            let failed_logs = buffer.take_failed_logs();
-                            if !failed_logs.is_empty() {
-                                log::debug!("Retrying failed log batch: {} logs", failed_logs.len());
-                                if let Err(e) = send_log_batch(failed_logs.clone()).await {
-                                    log::warn!("Failed to retry log batch: {}, storing locally again", e);
-                                    buffer.add_failed_logs(failed_logs);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
 
 /// Extract server certificate details from server certificate info
 fn extract_server_cert_details(_fp: &crate::http::tls_fingerprint::Fingerprint, server_cert_info: Option<&crate::http::ServerCertInfo>) -> Option<ServerCertDetails> {
