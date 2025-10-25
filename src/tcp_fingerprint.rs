@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use std::net::Ipv4Addr;
 use libbpf_rs::MapCore;
+use crate::access_log::get_log_sender_config;
 
 use crate::bpf::FilterSkel;
 use crate::http_client;
@@ -12,7 +13,6 @@ use crate::http_client;
 pub struct TcpFingerprintConfig {
     pub enabled: bool,
     pub log_interval_secs: u64,
-    pub include_in_access_logs: bool,
     pub enable_fingerprint_events: bool,
     pub fingerprint_events_interval_secs: u64,
     pub min_packet_count: u32,
@@ -24,7 +24,6 @@ impl Default for TcpFingerprintConfig {
         Self {
             enabled: true,
             log_interval_secs: 60,
-            include_in_access_logs: true,
             enable_fingerprint_events: true,
             fingerprint_events_interval_secs: 30,
             min_packet_count: 3,
@@ -39,7 +38,6 @@ impl TcpFingerprintConfig {
         Self {
             enabled: cli_config.enabled,
             log_interval_secs: cli_config.log_interval_secs,
-            include_in_access_logs: cli_config.include_in_access_logs,
             enable_fingerprint_events: cli_config.enable_fingerprint_events,
             fingerprint_events_interval_secs: cli_config.fingerprint_events_interval_secs,
             min_packet_count: cli_config.min_packet_count,
@@ -106,9 +104,7 @@ pub struct TcpFingerprintEvent {
     pub mss: u16,
     pub window_size: u16,
     pub window_scale: u8,
-    pub packet_count: u32,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
+    pub packet_count: u32
 }
 
 /// Collection of TCP fingerprint events
@@ -656,9 +652,7 @@ impl TcpFingerprintCollector {
                     mss: entry.data.mss,
                     window_size: entry.data.window_size,
                     window_scale: entry.data.window_scale,
-                    packet_count: entry.data.packet_count,
-                    first_seen: entry.data.first_seen,
-                    last_seen: entry.data.last_seen,
+                    packet_count: entry.data.packet_count
                 };
 
                 unique_ips.insert(event.src_ip.clone());
@@ -722,6 +716,24 @@ impl TcpFingerprintCollector {
             return Ok(());
         }
 
+        log::info!("Sending TCP fingerprint events to API");
+
+        let config = {
+            let config_store = get_log_sender_config();
+            let config_guard = config_store.read().unwrap();
+            config_guard.as_ref().cloned()
+        };
+
+        let config = match config {
+            Some(config) => {
+                if !config.should_send_logs() {
+                    return Ok(());
+                }
+                config
+            }
+            None => return Ok(()),
+        };
+
         // Get the HTTP client
         let client = http_client::get_global_reqwest_client()
             .map_err(|e| format!("Failed to get HTTP client: {}", e))?;
@@ -731,19 +743,13 @@ impl TcpFingerprintCollector {
             .map_err(|e| format!("Failed to serialize events: {}", e))?;
 
         log::info!("Events JSON: {}", events_json);
-
-        // Get base URL from environment or config
-        let base_url = std::env::var("ARXIGNIS_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-
-        let endpoint = format!("{}/tcp-fingerprints", base_url);
-
-        log::debug!("Sending {} TCP fingerprint events to {}", events.events.len(), endpoint);
+        log::debug!("Sending {} TCP fingerprint events to {}", events.events.len(), config.base_url);
 
         // Send POST request with events array
         let response = client
-            .post(&endpoint)
+            .post(&format!("{}/events/tcp_fingerprints", config.base_url))
             .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", config.api_key))
             .body(events_json)
             .send()
             .await
@@ -867,7 +873,6 @@ mod tests {
         let config = TcpFingerprintConfig::default();
         assert!(config.enabled);
         assert_eq!(config.log_interval_secs, 60);
-        assert!(config.include_in_access_logs);
         assert!(config.enable_fingerprint_events);
         assert_eq!(config.fingerprint_events_interval_secs, 30);
     }
@@ -892,9 +897,7 @@ mod tests {
             mss: 1460,
             window_size: 65535,
             window_scale: 7,
-            packet_count: 1,
-            first_seen: Utc::now(),
-            last_seen: Utc::now(),
+            packet_count: 1
         };
 
         let summary = event.summary();

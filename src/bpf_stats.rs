@@ -6,7 +6,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use libbpf_rs::MapCore;
 
 use crate::bpf::FilterSkel;
-use crate::http_client;
 
 /// BPF statistics collected from kernel-level access rule enforcement
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -505,61 +504,10 @@ impl BpfStatsCollector {
                 log::info!("Dropped IP Events JSON: {}", json);
             }
 
-            // Send events to base URL
-            let events_clone = events.clone();
-            let collector_clone = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = collector_clone.send_events_to_api(&events_clone).await {
-                    log::warn!("Failed to send dropped IP events to API: {}", e);
-                }
-            });
-
-            // Reset the counters after logging
+             // Reset the counters after logging
             self.reset_dropped_ip_counters()?;
         } else {
             log::debug!("No dropped IP events found");
-        }
-
-        Ok(())
-    }
-
-    /// Send dropped IP events to the API endpoint
-    pub async fn send_events_to_api(&self, events: &DroppedIpEvents) -> Result<(), Box<dyn std::error::Error>> {
-        if events.events.is_empty() {
-            return Ok(());
-        }
-
-        // Get the HTTP client
-        let client = http_client::get_global_reqwest_client()
-            .map_err(|e| format!("Failed to get HTTP client: {}", e))?;
-
-        // Convert events to JSON array format
-        let events_json = serde_json::to_string(&events.events)
-            .map_err(|e| format!("Failed to serialize events: {}", e))?;
-
-        log::info!("Events JSON: {}", events_json);
-
-        // Get base URL from environment or config
-        let base_url = std::env::var("ARXIGNIS_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-
-        let endpoint = format!("{}/events", base_url);
-
-        log::debug!("Sending {} events to {}", events.events.len(), endpoint);
-
-        // Send POST request with events array
-        let response = client
-            .post(&endpoint)
-            .header("Content-Type", "application/json")
-            .body(events_json)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to send request: {}", e))?;
-
-        if response.status().is_success() {
-            log::debug!("Successfully sent {} events to API", events.events.len());
-        } else {
-            return Err(format!("API returned error status: {}", response.status()).into());
         }
 
         Ok(())

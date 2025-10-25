@@ -686,8 +686,6 @@ pub struct TcpFingerprintConfig {
     pub enabled: bool,
     #[serde(default = "default_tcp_fingerprint_log_interval")]
     pub log_interval_secs: u64,
-    #[serde(default = "default_tcp_fingerprint_include_in_access_logs")]
-    pub include_in_access_logs: bool,
     #[serde(default = "default_tcp_fingerprint_enable_fingerprint_events")]
     pub enable_fingerprint_events: bool,
     #[serde(default = "default_tcp_fingerprint_events_interval")]
@@ -700,7 +698,6 @@ pub struct TcpFingerprintConfig {
 
 fn default_tcp_fingerprint_enabled() -> bool { true }
 fn default_tcp_fingerprint_log_interval() -> u64 { 60 }
-fn default_tcp_fingerprint_include_in_access_logs() -> bool { true }
 fn default_tcp_fingerprint_enable_fingerprint_events() -> bool { true }
 fn default_tcp_fingerprint_events_interval() -> u64 { 30 }
 fn default_tcp_fingerprint_min_packet_count() -> u32 { 3 }

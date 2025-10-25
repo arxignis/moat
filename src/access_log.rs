@@ -554,7 +554,7 @@ impl HttpAccessLog {
         let client = get_global_reqwest_client()
             .map_err(|e| anyhow::anyhow!("Failed to get global HTTP client: {}", e))?;
 
-        let url = format!("{}/logs", config.base_url);
+        let url = format!("{}/events/http_access_logs", config.base_url);
         let logs_array = vec![self.clone()];
         let json = serde_json::to_string(&logs_array)?;
 
@@ -748,7 +748,7 @@ async fn send_log_batch(logs: Vec<HttpAccessLog>) -> Result<(), Box<dyn std::err
     let client = get_global_reqwest_client()
         .map_err(|e| format!("Failed to get global HTTP client: {}", e))?;
 
-    let url = format!("{}/logs", config.base_url);
+    let url = format!("{}/events/http_access_logs", config.base_url);
     let json = serde_json::to_string(&logs)?;
 
     let response = client
