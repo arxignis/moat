@@ -1,6 +1,29 @@
-version: '3.8'
-
 services:
+
+  moat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - redis
+      - clamav
+    container_name: moat
+    privileged: true
+    cap_add:
+          - SYS_ADMIN
+          - NET_ADMIN
+          - BPF
+          - SYS_RESOURCE
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+    networks:
+      - moat-network
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml"]
 
   redis:
     image: redis:7-alpine
@@ -55,10 +78,26 @@ services:
       timeout: 5s
       retries: 3
 
+  clamav:
+    image: clamav/clamav:latest
+    container_name: moat-clamav
+    ports:
+      - "3310"
+    volumes:
+      - clamav-data:/data
+    networks:
+      - moat-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clamscan", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 networks:
   moat-network:
     driver: bridge
 
 volumes:
   redis-data:
-
+  clamav-data:

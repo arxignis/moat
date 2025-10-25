@@ -68,10 +68,6 @@ pub fn init_access_rules_from_global(
     }
     if let Ok(guard) = global_config().read() {
         if let Some(cfg) = guard.as_ref() {
-            // Update WAF wirefilter too to stay consistent
-            if let Err(e) = update_http_filter_from_config_value(cfg) {
-                log::error!("failed to update HTTP filter from config: {e}");
-            }
             let previous_rules: PreviousRules = Arc::new(Mutex::new(std::collections::HashSet::new()));
             let previous_rules_v6: PreviousRulesV6 = Arc::new(Mutex::new(std::collections::HashSet::new()));
             let resp = config::ConfigApiResponse { success: true, config: cfg.clone() };

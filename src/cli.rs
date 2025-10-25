@@ -18,6 +18,10 @@ pub struct Config {
     pub arxignis: ArxignisConfig,
     pub content_scanning: ContentScanningCliConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub bpf_stats: BpfStatsConfig,
+    #[serde(default)]
+    pub tcp_fingerprint: TcpFingerprintConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +245,8 @@ impl Config {
             logging: LoggingConfig {
                 level: "info".to_string(),
             },
+            bpf_stats: BpfStatsConfig::default(),
+            tcp_fingerprint: TcpFingerprintConfig::default(),
         }
     }
 
@@ -264,8 +270,8 @@ impl Config {
         if let Some(upstream) = &args.upstream {
             self.server.upstream = upstream.clone();
         }
-        if let Some(base_url) = &args.arxignis_base_url {
-            self.arxignis.base_url = base_url.clone();
+        if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.arxignis.com/v1" {
+            self.arxignis.base_url = args.arxignis_base_url.clone();
         }
         if let Some(log_sending_enabled) = args.arxignis_log_sending_enabled {
             self.arxignis.log_sending_enabled = log_sending_enabled;
@@ -415,7 +421,7 @@ impl Config {
             self.network.disable_xdp = val.parse().unwrap_or(false);
         }
 
-        // Arx Ignis configuration overrides
+        // Arxignis configuration overrides
         if let Ok(val) = env::var("AX_ARXIGNIS_API_KEY") {
             self.arxignis.api_key = val;
         }
@@ -578,9 +584,9 @@ pub struct Args {
     #[arg(long)]
     pub arxignis_api_key: Option<String>,
 
-    /// Base URL for Arx Ignis API.
+    /// Base URL for Arxignis API.
     #[arg(long, default_value = "https://api.arxignis.com/v1")]
-    pub arxignis_base_url: Option<String>,
+    pub arxignis_base_url: String,
 
     /// Enable sending access logs to arxignis server
     #[arg(long)]
@@ -656,3 +662,43 @@ impl LogLevel {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BpfStatsConfig {
+    #[serde(default = "default_bpf_stats_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_bpf_stats_log_interval")]
+    pub log_interval_secs: u64,
+    #[serde(default = "default_bpf_stats_enable_dropped_ip_events")]
+    pub enable_dropped_ip_events: bool,
+    #[serde(default = "default_bpf_stats_dropped_ip_events_interval")]
+    pub dropped_ip_events_interval_secs: u64,
+}
+
+fn default_bpf_stats_enabled() -> bool { true }
+fn default_bpf_stats_log_interval() -> u64 { 60 }
+fn default_bpf_stats_enable_dropped_ip_events() -> bool { true }
+fn default_bpf_stats_dropped_ip_events_interval() -> u64 { 30 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TcpFingerprintConfig {
+    #[serde(default = "default_tcp_fingerprint_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_tcp_fingerprint_log_interval")]
+    pub log_interval_secs: u64,
+    #[serde(default = "default_tcp_fingerprint_enable_fingerprint_events")]
+    pub enable_fingerprint_events: bool,
+    #[serde(default = "default_tcp_fingerprint_events_interval")]
+    pub fingerprint_events_interval_secs: u64,
+    #[serde(default = "default_tcp_fingerprint_min_packet_count")]
+    pub min_packet_count: u32,
+    #[serde(default = "default_tcp_fingerprint_min_connection_duration")]
+    pub min_connection_duration_secs: u64,
+}
+
+fn default_tcp_fingerprint_enabled() -> bool { true }
+fn default_tcp_fingerprint_log_interval() -> u64 { 60 }
+fn default_tcp_fingerprint_enable_fingerprint_events() -> bool { true }
+fn default_tcp_fingerprint_events_interval() -> u64 { 30 }
+fn default_tcp_fingerprint_min_packet_count() -> u32 { 3 }
+fn default_tcp_fingerprint_min_connection_duration() -> u64 { 1 }

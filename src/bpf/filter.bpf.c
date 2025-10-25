@@ -11,6 +11,12 @@
 #define IP_OFFSET       0x1FFF
 #define NEXTHDR_FRAGMENT    44
 
+// TCP fingerprinting constants
+#define TCP_FINGERPRINT_MAX_ENTRIES    10000
+#define TCP_FP_KEY_SIZE                20  // 4 bytes IP + 2 bytes port + 14 bytes fingerprint
+#define TCP_FP_MAX_OPTIONS             10
+#define TCP_FP_MAX_OPTION_LEN          40
+
 
 static inline bool is_frag_v4(const struct iphdr *iph)
 {
@@ -31,6 +37,31 @@ struct lpm_key {
 struct lpm_key_v6 {
     __u32 prefixlen;
     __u8 addr[16];
+};
+
+// TCP fingerprinting structures
+struct tcp_fingerprint_key {
+    __be32 src_ip;      // Source IP address
+    __be16 src_port;    // Source port
+    __u8 fingerprint[14]; // TCP fingerprint string (null-terminated)
+};
+
+struct tcp_fingerprint_data {
+    __u64 first_seen;   // Timestamp of first packet
+    __u64 last_seen;    // Timestamp of last packet
+    __u32 packet_count; // Number of packets seen
+    __u16 ttl;          // Initial TTL
+    __u16 mss;          // Maximum Segment Size
+    __u16 window_size;  // TCP window size
+    __u8 window_scale; // Window scaling factor
+    __u8 options_len;   // Length of TCP options
+    __u8 options[TCP_FP_MAX_OPTION_LEN]; // TCP options data
+};
+
+struct tcp_syn_stats {
+    __u64 total_syns;
+    __u64 unique_fingerprints;
+    __u64 last_reset;
 };
 
 // IPv4 maps: permanently banned and recently banned
@@ -75,6 +106,79 @@ struct {
 
 volatile int shootdowns = 0;
 
+// Statistics maps for tracking access rule hits
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv4_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv4_recently_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv6_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv6_recently_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} total_packets_processed SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} total_packets_dropped SEC(".maps");
+
+// TCP fingerprinting maps
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, TCP_FINGERPRINT_MAX_ENTRIES);
+	__type(key, struct tcp_fingerprint_key);
+	__type(value, struct tcp_fingerprint_data);
+} tcp_fingerprints SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct tcp_syn_stats);
+} tcp_syn_stats SEC(".maps");
+
+// Maps to track dropped IP addresses with counters
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);  // Track up to 1000 unique dropped IPs
+    __type(key, __be32);         // IPv4 address
+    __type(value, __u64);        // Drop count
+} dropped_ipv4_addresses SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);  // Track up to 1000 unique dropped IPv6s
+    __type(key, __u8[16]);      // IPv6 address
+    __type(value, __u64);        // Drop count
+} dropped_ipv6_addresses SEC(".maps");
+
 /*
  * Helper for bounds checking and advancing a cursor.
  *
@@ -94,6 +198,239 @@ static void *parse_and_advance(void **cursor, void *end, __u32 len)
     return current;
 }
 
+/*
+ * Helper functions for incrementing statistics counters
+ */
+static void increment_ipv4_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv4_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_ipv4_recently_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv4_recently_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_ipv6_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv6_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_ipv6_recently_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv6_recently_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_total_packets_processed(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&total_packets_processed, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_total_packets_dropped(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&total_packets_dropped, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_dropped_ipv4_address(__be32 ip_addr)
+{
+    __u64 *value = bpf_map_lookup_elem(&dropped_ipv4_addresses, &ip_addr);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    } else {
+        // First time dropping this IP, initialize counter
+        __u64 initial_count = 1;
+        bpf_map_update_elem(&dropped_ipv4_addresses, &ip_addr, &initial_count, BPF_ANY);
+    }
+}
+
+static void increment_dropped_ipv6_address(struct in6_addr ip_addr)
+{
+    __u8 *addr_bytes = (__u8 *)&ip_addr;
+    __u64 *value = bpf_map_lookup_elem(&dropped_ipv6_addresses, addr_bytes);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    } else {
+        // First time dropping this IP, initialize counter
+        __u64 initial_count = 1;
+        bpf_map_update_elem(&dropped_ipv6_addresses, addr_bytes, &initial_count, BPF_ANY);
+    }
+}
+
+/*
+ * TCP fingerprinting helper functions
+ */
+static void increment_tcp_syn_stats(void)
+{
+    __u32 key = 0;
+    struct tcp_syn_stats *stats = bpf_map_lookup_elem(&tcp_syn_stats, &key);
+    if (stats) {
+        __sync_fetch_and_add(&stats->total_syns, 1);
+    } else {
+        struct tcp_syn_stats new_stats = {0};
+        new_stats.total_syns = 1;
+        bpf_map_update_elem(&tcp_syn_stats, &key, &new_stats, BPF_ANY);
+    }
+}
+
+static void increment_unique_fingerprints(void)
+{
+    __u32 key = 0;
+    struct tcp_syn_stats *stats = bpf_map_lookup_elem(&tcp_syn_stats, &key);
+    if (stats) {
+        __sync_fetch_and_add(&stats->unique_fingerprints, 1);
+    }
+}
+
+static int parse_tcp_mss_wscale(struct tcphdr *tcp, void *data_end, __u16 *mss_out, __u8 *wscale_out)
+{
+    __u8 *ptr = (__u8 *)tcp + sizeof(struct tcphdr);
+    __u8 *end = ptr + (tcp->doff * 4) - sizeof(struct tcphdr);
+
+    // Ensure we don't exceed packet bounds
+    if (end > (__u8 *)data_end) {
+        end = (__u8 *)data_end;
+    }
+
+    // Safety check
+    if (ptr >= end || ptr >= (__u8 *)data_end) {
+        return 0;
+    }
+
+    // Parse options - limit to 10 iterations
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+        if (ptr >= end || ptr >= (__u8 *)data_end) break;
+        if (ptr + 1 > (__u8 *)data_end) break;
+
+        __u8 kind = *ptr;
+        if (kind == 0) break; // End of options
+
+        if (kind == 1) {
+            // NOP option
+            ptr++;
+            continue;
+        }
+
+        // Check bounds for option length
+        if (ptr + 2 > (__u8 *)data_end) break;
+        __u8 len = *(ptr + 1);
+        if (len < 2 || ptr + len > (__u8 *)data_end) break;
+
+        // MSS option (kind=2, len=4)
+        if (kind == 2 && len == 4 && ptr + 4 <= (__u8 *)data_end) {
+            *mss_out = (*(ptr + 2) << 8) | *(ptr + 3);
+        }
+        // Window scale option (kind=3, len=3)
+        else if (kind == 3 && len == 3 && ptr + 3 <= (__u8 *)data_end) {
+            *wscale_out = *(ptr + 2);
+        }
+
+        ptr += len;
+    }
+
+    return 0;
+}
+
+static void generate_tcp_fingerprint(struct tcphdr *tcp, void *data_end, __u16 ttl, __u8 *fingerprint)
+{
+    // Generate JA4T-style fingerprint: ttl:mss:window:scale
+    __u16 mss = 0;
+    __u8 window_scale = 0;
+
+    // Parse TCP options to extract MSS and window scaling
+    parse_tcp_mss_wscale(tcp, data_end, &mss, &window_scale);
+
+    // Generate fingerprint string manually (BPF doesn't support complex formatting)
+    __u16 window = bpf_ntohs(tcp->window);
+
+    // Format: "ttl:mss:window:scale" (max 14 chars)
+    fingerprint[0] = '0' + (ttl / 100);
+    fingerprint[1] = '0' + ((ttl / 10) % 10);
+    fingerprint[2] = '0' + (ttl % 10);
+    fingerprint[3] = ':';
+    fingerprint[4] = '0' + (mss / 1000);
+    fingerprint[5] = '0' + ((mss / 100) % 10);
+    fingerprint[6] = '0' + ((mss / 10) % 10);
+    fingerprint[7] = '0' + (mss % 10);
+    fingerprint[8] = ':';
+    fingerprint[9] = '0' + (window / 10000);
+    fingerprint[10] = '0' + ((window / 1000) % 10);
+    fingerprint[11] = '0' + ((window / 100) % 10);
+    fingerprint[12] = '0' + ((window / 10) % 10);
+    fingerprint[13] = '0' + (window % 10);
+    // Note: window_scale is not included due to space constraints
+}
+
+static void record_tcp_fingerprint(__be32 src_ip, __be16 src_port,
+                                struct tcphdr *tcp, void *data_end, __u16 ttl)
+{
+    // Skip localhost traffic to reduce noise
+    // Check for 127.0.0.0/8 range (127.0.0.1 to 127.255.255.255)
+    if ((src_ip & bpf_htonl(0xff000000)) == bpf_htonl(0x7f000000)) {
+        return;
+    }
+
+    struct tcp_fingerprint_key key = {0};
+    struct tcp_fingerprint_data data = {0};
+    __u64 timestamp = bpf_ktime_get_ns();
+
+    key.src_ip = src_ip;
+    key.src_port = src_port;
+
+    // Generate fingerprint
+    generate_tcp_fingerprint(tcp, data_end, ttl, key.fingerprint);
+
+    // Check if fingerprint already exists
+    struct tcp_fingerprint_data *existing = bpf_map_lookup_elem(&tcp_fingerprints, &key);
+    if (existing) {
+        // Update existing entry
+        existing->last_seen = timestamp;
+        existing->packet_count++;
+        bpf_map_update_elem(&tcp_fingerprints, &key, existing, BPF_ANY);
+    } else {
+        // Create new entry
+        data.first_seen = timestamp;
+        data.last_seen = timestamp;
+        data.packet_count = 1;
+        data.ttl = ttl;
+        data.window_size = bpf_ntohs(tcp->window);
+
+        // Extract MSS and window scale from options
+        parse_tcp_mss_wscale(tcp, data_end, &data.mss, &data.window_scale);
+
+        bpf_map_update_elem(&tcp_fingerprints, &key, &data, BPF_ANY);
+        increment_unique_fingerprints();
+
+        // Log new TCP fingerprint
+        bpf_printk("TCP_FP: New fingerprint from %pI4:%d - TTL:%d MSS:%d WS:%d Window:%d",
+                   &src_ip, bpf_ntohs(src_port), ttl, data.mss, data.window_scale, data.window_size);
+    }
+}
+
 SEC("xdp")
 int arxignis_xdp_filter(struct xdp_md *ctx)
 {
@@ -104,11 +441,21 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
     void *data_end = (void *)(long)ctx->data_end;
     void *cursor = (void *)(long)ctx->data;
 
+    // Debug: Count all packets
+    __u32 zero = 0;
+    __u32 *packet_count = bpf_map_lookup_elem(&total_packets_processed, &zero);
+    if (packet_count) {
+        __sync_fetch_and_add(packet_count, 1);
+    }
+
     struct ethhdr *eth = parse_and_advance(&cursor, data_end, sizeof(*eth));
     if (!eth)
         return XDP_PASS;
 
     __u16 h_proto = eth->h_proto;
+
+    // Increment total packets processed counter
+    increment_total_packets_processed();
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *iph = parse_and_advance(&cursor, data_end, sizeof(*iph));
@@ -121,11 +468,15 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
         };
 
         if (bpf_map_lookup_elem(&banned_ips, &key)) {
+            increment_ipv4_banned_stats();
+            increment_total_packets_dropped();
+            increment_dropped_ipv4_address(iph->saddr);
             bpf_printk("XDP: BLOCKED incoming permanently banned IPv4 %pI4", &iph->saddr);
             return XDP_DROP;
         }
 
         if (bpf_map_lookup_elem(&recently_banned_ips, &key)) {
+            increment_ipv4_recently_banned_stats();
             // Block UDP and ICMP from recently banned IPs, but allow DNS
             if (iph->protocol == IPPROTO_UDP) {
                 struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
@@ -136,6 +487,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips, &key);
+                increment_total_packets_dropped();
+                increment_dropped_ipv4_address(iph->saddr);
                 bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                 return XDP_DROP;
             }
@@ -143,6 +496,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips, &key);
+                increment_total_packets_dropped();
+                increment_dropped_ipv4_address(iph->saddr);
                 bpf_printk("XDP: BLOCKED incoming ICMP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                 return XDP_DROP;
             }
@@ -150,15 +505,47 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
             if (iph->protocol == IPPROTO_TCP) {
                 struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
                 if (tcph) {
+                    // Perform TCP fingerprinting on all TCP packets (not just SYN)
+                    // This helps reduce noise by tracking full connection patterns
+                    if (tcph->syn || tcph->ack || tcph->fin || tcph->rst) {
+                        if (tcph->syn && !tcph->ack) {
+                            increment_tcp_syn_stats();
+                        }
+                        record_tcp_fingerprint(iph->saddr, tcph->source, tcph, data_end, iph->ttl);
+                    }
+
                     if (tcph->fin || tcph->rst) {
                         ip_flag_t one = 1;
                         bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                         bpf_map_delete_elem(&recently_banned_ips, &key);
+                        increment_total_packets_dropped();
+                        increment_dropped_ipv4_address(iph->saddr);
                         bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                     }
                 }
             }
             return XDP_PASS;
+        }
+
+        // Perform TCP fingerprinting on all TCP packets
+        if (iph->protocol == IPPROTO_TCP) {
+            // Debug: Count all TCP packets
+            __u32 *tcp_count = bpf_map_lookup_elem(&tcp_syn_stats, &zero);
+            if (tcp_count) {
+                __sync_fetch_and_add(tcp_count, 1);
+            }
+
+            struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
+            if (tcph) {
+                // Perform TCP fingerprinting on all TCP packets (not just SYN)
+                // This helps reduce noise by tracking full connection patterns
+                if (tcph->syn || tcph->ack || tcph->fin || tcph->rst) {
+                    if (tcph->syn && !tcph->ack) {
+                        increment_tcp_syn_stats();
+                    }
+                    record_tcp_fingerprint(iph->saddr, tcph->source, tcph, data_end, iph->ttl);
+                }
+            }
         }
 
         return XDP_PASS;
@@ -188,11 +575,15 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
         __builtin_memcpy(key6.addr, &ip6h->saddr, 16);
 
         if (bpf_map_lookup_elem(&banned_ips_v6, &key6)) {
+            increment_ipv6_banned_stats();
+            increment_total_packets_dropped();
+            increment_dropped_ipv6_address(ip6h->saddr);
             bpf_printk("XDP: BLOCKED incoming permanently banned IPv6");
             return XDP_DROP;
         }
 
         if (bpf_map_lookup_elem(&recently_banned_ips_v6, &key6)) {
+            increment_ipv6_recently_banned_stats();
             // Block UDP and ICMP from recently banned IPv6 IPs, but allow DNS
             if (ip6h->nexthdr == IPPROTO_UDP) {
                 struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
@@ -203,6 +594,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                increment_total_packets_dropped();
+                increment_dropped_ipv6_address(ip6h->saddr);
                 bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv6, promoted to permanent ban");
                 return XDP_DROP;
             }
@@ -210,6 +603,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                increment_total_packets_dropped();
+                increment_dropped_ipv6_address(ip6h->saddr);
                 bpf_printk("XDP: BLOCKED incoming ICMPv6 from recently banned IPv6, promoted to permanent ban");
                 return XDP_DROP;
             }
@@ -221,11 +616,71 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         ip_flag_t one = 1;
                         bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                         bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                        increment_total_packets_dropped();
+                        increment_dropped_ipv6_address(ip6h->saddr);
                         bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv6, promoted to permanent ban");
                     }
                 }
             }
             return XDP_PASS; // Allow if recently banned
+        }
+
+        // Perform TCP fingerprinting on IPv6 TCP packets
+        if (ip6h->nexthdr == IPPROTO_TCP) {
+            struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
+            if (tcph) {
+                // Perform TCP fingerprinting on all TCP packets (not just SYN)
+                // This helps reduce noise by tracking full connection patterns
+                if (tcph->syn || tcph->ack || tcph->fin || tcph->rst) {
+                    // Skip IPv6 localhost traffic to reduce noise
+                    // Check for ::1 (IPv6 localhost)
+                    __u32 localhost_v6[4] = {0, 0, 0, bpf_htonl(1)};
+                    if (__builtin_memcmp(&ip6h->saddr, localhost_v6, 16) == 0) {
+                        return XDP_PASS;
+                    }
+
+                    // Extract TTL from IPv6 hop limit
+                    __u16 ttl = ip6h->hop_limit;
+
+                    // Create IPv6 fingerprint key
+                    struct tcp_fingerprint_key key = {0};
+                    struct tcp_fingerprint_data data = {0};
+                    __u64 timestamp = bpf_ktime_get_ns();
+
+                    // Use IPv6 address as source IP (store in IPv4 field for compatibility)
+                    __builtin_memcpy(&key.src_ip, &ip6h->saddr, 4); // Use first 4 bytes
+                    key.src_port = tcph->source;
+
+                    // Generate fingerprint
+                    generate_tcp_fingerprint(tcph, data_end, ttl, key.fingerprint);
+
+                    // Check if fingerprint already exists
+                    struct tcp_fingerprint_data *existing = bpf_map_lookup_elem(&tcp_fingerprints, &key);
+                    if (existing) {
+                        // Update existing entry
+                        existing->last_seen = timestamp;
+                        existing->packet_count++;
+                        bpf_map_update_elem(&tcp_fingerprints, &key, existing, BPF_ANY);
+                    } else {
+                        // Create new entry
+                        data.first_seen = timestamp;
+                        data.last_seen = timestamp;
+                        data.packet_count = 1;
+                        data.ttl = ttl;
+                        data.window_size = bpf_ntohs(tcph->window);
+
+                        // Extract MSS and window scale from options
+                        parse_tcp_mss_wscale(tcph, data_end, &data.mss, &data.window_scale);
+
+                        bpf_map_update_elem(&tcp_fingerprints, &key, &data, BPF_ANY);
+                        increment_unique_fingerprints();
+
+                        // Log new IPv6 TCP fingerprint
+                        bpf_printk("TCP_FP: New IPv6 fingerprint from %pI6:%d - TTL:%d MSS:%d WS:%d Window:%d",
+                                   &ip6h->saddr, bpf_ntohs(tcph->source), ttl, data.mss, data.window_scale, data.window_size);
+                    }
+                }
+            }
         }
 
         return XDP_PASS;

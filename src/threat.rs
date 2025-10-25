@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::{RwLock, OnceCell};
 
 use crate::redis::RedisManager;
+use crate::http_client::get_global_reqwest_client;
 
 /// Custom deserializer for optional datetime fields that can be empty strings or missing
 fn deserialize_optional_datetime<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
@@ -30,7 +31,7 @@ where
     }
 }
 
-/// Threat intelligence response from Arx Ignis API
+/// Threat intelligence response from Arxignis API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatResponse {
     pub schema_version: String,
@@ -177,11 +178,14 @@ impl ThreatClient {
         }
     }
 
-    /// Fetch threat data from Arx Ignis API
+    /// Fetch threat data from Arxignis API
     async fn fetch_from_api(&self, ip: &str) -> Result<Option<ThreatResponse>> {
         let url = format!("{}/threat?ip={}", self.base_url, ip);
 
-        let client = reqwest::Client::new();
+        // Use shared HTTP client with keepalive instead of creating new client
+        let client = get_global_reqwest_client()
+            .context("Failed to get global HTTP client")?;
+
         let response = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", &self.api_key))

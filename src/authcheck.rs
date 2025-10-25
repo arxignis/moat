@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use crate::http_client::get_global_reqwest_client;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthCheckResponse {
@@ -15,13 +14,9 @@ pub async fn validate_api_key(base_url: &str, api_key: &str) -> Result<()> {
         return Err(anyhow::anyhow!("Base URL and API key must be provided"));
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .danger_accept_invalid_certs(false)
-        .user_agent("Moat/1.0")
-        .build()
-        .context("Failed to create HTTP client")?;
+    // Use shared HTTP client with keepalive instead of creating new client
+    let client = get_global_reqwest_client()
+        .context("Failed to get global HTTP client")?;
 
     let url = format!("{}/authcheck", base_url);
 

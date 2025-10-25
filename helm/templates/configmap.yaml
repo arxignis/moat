@@ -103,12 +103,12 @@ data:
       # Disable XDP packet filtering (run without BPF/XDP)
       disable_xdp: {{ .Values.moat.network.disableXdp }}
 
-    # Arx Ignis Configuration
+    # Arxignis Configuration
     arxignis:
-      # API key for Arx Ignis service
+      # API key for Arxignis service
       api_key: "{{ .Values.moat.arxignis.apiKey }}"
 
-      # Base URL for Arx Ignis API
+      # Base URL for Arxignis API
       base_url: "{{ .Values.moat.arxignis.baseUrl }}"
 
       # Captcha Configuration
