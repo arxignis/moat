@@ -20,6 +20,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub bpf_stats: BpfStatsConfig,
+    #[serde(default)]
+    pub tcp_fingerprint: TcpFingerprintConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +246,7 @@ impl Config {
                 level: "info".to_string(),
             },
             bpf_stats: BpfStatsConfig::default(),
+            tcp_fingerprint: TcpFingerprintConfig::default(),
         }
     }
 
@@ -666,8 +669,6 @@ pub struct BpfStatsConfig {
     pub enabled: bool,
     #[serde(default = "default_bpf_stats_log_interval")]
     pub log_interval_secs: u64,
-    #[serde(default = "default_bpf_stats_include_in_access_logs")]
-    pub include_in_access_logs: bool,
     #[serde(default = "default_bpf_stats_enable_dropped_ip_events")]
     pub enable_dropped_ip_events: bool,
     #[serde(default = "default_bpf_stats_dropped_ip_events_interval")]
@@ -676,6 +677,31 @@ pub struct BpfStatsConfig {
 
 fn default_bpf_stats_enabled() -> bool { true }
 fn default_bpf_stats_log_interval() -> u64 { 60 }
-fn default_bpf_stats_include_in_access_logs() -> bool { true }
 fn default_bpf_stats_enable_dropped_ip_events() -> bool { true }
 fn default_bpf_stats_dropped_ip_events_interval() -> u64 { 30 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TcpFingerprintConfig {
+    #[serde(default = "default_tcp_fingerprint_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_tcp_fingerprint_log_interval")]
+    pub log_interval_secs: u64,
+    #[serde(default = "default_tcp_fingerprint_include_in_access_logs")]
+    pub include_in_access_logs: bool,
+    #[serde(default = "default_tcp_fingerprint_enable_fingerprint_events")]
+    pub enable_fingerprint_events: bool,
+    #[serde(default = "default_tcp_fingerprint_events_interval")]
+    pub fingerprint_events_interval_secs: u64,
+    #[serde(default = "default_tcp_fingerprint_min_packet_count")]
+    pub min_packet_count: u32,
+    #[serde(default = "default_tcp_fingerprint_min_connection_duration")]
+    pub min_connection_duration_secs: u64,
+}
+
+fn default_tcp_fingerprint_enabled() -> bool { true }
+fn default_tcp_fingerprint_log_interval() -> u64 { 60 }
+fn default_tcp_fingerprint_include_in_access_logs() -> bool { true }
+fn default_tcp_fingerprint_enable_fingerprint_events() -> bool { true }
+fn default_tcp_fingerprint_events_interval() -> u64 { 30 }
+fn default_tcp_fingerprint_min_packet_count() -> u32 { 3 }
+fn default_tcp_fingerprint_min_connection_duration() -> u64 { 1 }

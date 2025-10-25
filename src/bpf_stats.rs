@@ -537,6 +537,8 @@ impl BpfStatsCollector {
         let events_json = serde_json::to_string(&events.events)
             .map_err(|e| format!("Failed to serialize events: {}", e))?;
 
+        log::info!("Events JSON: {}", events_json);
+
         // Get base URL from environment or config
         let base_url = std::env::var("ARXIGNIS_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
@@ -624,7 +626,6 @@ impl BpfStatsCollector {
 pub struct BpfStatsConfig {
     pub enabled: bool,
     pub log_interval_secs: u64,
-    pub include_in_access_logs: bool,
 }
 
 impl Default for BpfStatsConfig {
@@ -632,18 +633,16 @@ impl Default for BpfStatsConfig {
         Self {
             enabled: true,
             log_interval_secs: 60, // Log stats every minute
-            include_in_access_logs: true,
         }
     }
 }
 
 impl BpfStatsConfig {
     /// Create a new configuration
-    pub fn new(enabled: bool, log_interval_secs: u64, include_in_access_logs: bool) -> Self {
+    pub fn new(enabled: bool, log_interval_secs: u64) -> Self {
         Self {
             enabled,
             log_interval_secs,
-            include_in_access_logs,
         }
     }
 }
