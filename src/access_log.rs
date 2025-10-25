@@ -16,6 +16,7 @@ use tokio::time::interval;
 use crate::http::tls_fingerprint::Fingerprint as TlsFingerprint;
 use crate::proxy_utils::ProxyBody;
 use crate::http_client::get_global_reqwest_client;
+use crate::bpf_stats::BpfAccessStats;
 
 /// Configuration for sending access logs to arxignis server
 #[derive(Debug, Clone)]
@@ -181,6 +182,7 @@ pub struct HttpAccessLog {
     pub tls: Option<TlsDetails>,
     pub response: ResponseDetails,
     pub remediation: Option<RemediationDetails>,
+    pub bpf_stats: Option<BpfAccessStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +273,7 @@ impl HttpAccessLog {
         waf_result: Option<&crate::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
         server_cert_info: Option<&crate::http::ServerCertInfo>,
+        bpf_stats: Option<BpfAccessStats>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
         let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
@@ -455,6 +458,7 @@ impl HttpAccessLog {
             tls: tls_details,
             response: response_details,
             remediation: remediation_details,
+            bpf_stats,
         };
 
         // Log to stdout (existing behavior)
@@ -606,6 +610,50 @@ impl HttpAccessLog {
 
         // Use buffering instead of immediate sending
         self.add_to_buffer();
+    }
+
+    /// Create access log with optional BPF statistics
+    pub async fn create_with_bpf_stats(
+        req_parts: &hyper::http::request::Parts,
+        req_body_bytes: &bytes::Bytes,
+        peer_addr: SocketAddr,
+        dst_addr: SocketAddr,
+        tls_fingerprint: Option<&TlsFingerprint>,
+        response_data: ResponseData,
+        waf_result: Option<&crate::wirefilter::WafResult>,
+        threat_data: Option<&crate::threat::ThreatResponse>,
+        server_cert_info: Option<&crate::http::ServerCertInfo>,
+        bpf_stats_collector: Option<&crate::bpf_stats::BpfStatsCollector>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Collect BPF statistics if collector is available and enabled
+        let bpf_stats = if let Some(collector) = bpf_stats_collector {
+            if collector.is_enabled() {
+                match collector.collect_aggregated_stats() {
+                    Ok(stats) => Some(stats),
+                    Err(e) => {
+                        log::debug!("Failed to collect BPF stats: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Self::create_from_parts(
+            req_parts,
+            req_body_bytes,
+            peer_addr,
+            dst_addr,
+            tls_fingerprint,
+            response_data,
+            waf_result,
+            threat_data,
+            server_cert_info,
+            bpf_stats,
+        ).await
     }
 }
 
@@ -951,6 +999,7 @@ mod tests {
                 body: "{\"ok\":true}".to_string(),
             },
             remediation: None,
+            bpf_stats: None,
         };
 
         let json = log.to_json().unwrap();

@@ -75,6 +75,64 @@ struct {
 
 volatile int shootdowns = 0;
 
+// Statistics maps for tracking access rule hits
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv4_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv4_recently_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv6_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ipv6_recently_banned_stats SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} total_packets_processed SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} total_packets_dropped SEC(".maps");
+
+// Maps to track dropped IP addresses with counters
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);  // Track up to 1000 unique dropped IPs
+    __type(key, __be32);         // IPv4 address
+    __type(value, __u64);        // Drop count
+} dropped_ipv4_addresses SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1000);  // Track up to 1000 unique dropped IPv6s
+    __type(key, __u8[16]);      // IPv6 address
+    __type(value, __u64);        // Drop count
+} dropped_ipv6_addresses SEC(".maps");
+
 /*
  * Helper for bounds checking and advancing a cursor.
  *
@@ -94,6 +152,88 @@ static void *parse_and_advance(void **cursor, void *end, __u32 len)
     return current;
 }
 
+/*
+ * Helper functions for incrementing statistics counters
+ */
+static void increment_ipv4_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv4_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_ipv4_recently_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv4_recently_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_ipv6_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv6_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_ipv6_recently_banned_stats(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&ipv6_recently_banned_stats, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_total_packets_processed(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&total_packets_processed, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_total_packets_dropped(void)
+{
+    __u32 key = 0;
+    __u64 *value = bpf_map_lookup_elem(&total_packets_dropped, &key);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
+static void increment_dropped_ipv4_address(__be32 ip_addr)
+{
+    __u64 *value = bpf_map_lookup_elem(&dropped_ipv4_addresses, &ip_addr);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    } else {
+        // First time dropping this IP, initialize counter
+        __u64 initial_count = 1;
+        bpf_map_update_elem(&dropped_ipv4_addresses, &ip_addr, &initial_count, BPF_ANY);
+    }
+}
+
+static void increment_dropped_ipv6_address(struct in6_addr ip_addr)
+{
+    __u8 *addr_bytes = (__u8 *)&ip_addr;
+    __u64 *value = bpf_map_lookup_elem(&dropped_ipv6_addresses, addr_bytes);
+    if (value) {
+        __sync_fetch_and_add(value, 1);
+    } else {
+        // First time dropping this IP, initialize counter
+        __u64 initial_count = 1;
+        bpf_map_update_elem(&dropped_ipv6_addresses, addr_bytes, &initial_count, BPF_ANY);
+    }
+}
+
 SEC("xdp")
 int arxignis_xdp_filter(struct xdp_md *ctx)
 {
@@ -110,6 +250,9 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
 
     __u16 h_proto = eth->h_proto;
 
+    // Increment total packets processed counter
+    increment_total_packets_processed();
+
     if (h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *iph = parse_and_advance(&cursor, data_end, sizeof(*iph));
         if (!iph)
@@ -121,11 +264,15 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
         };
 
         if (bpf_map_lookup_elem(&banned_ips, &key)) {
+            increment_ipv4_banned_stats();
+            increment_total_packets_dropped();
+            increment_dropped_ipv4_address(iph->saddr);
             bpf_printk("XDP: BLOCKED incoming permanently banned IPv4 %pI4", &iph->saddr);
             return XDP_DROP;
         }
 
         if (bpf_map_lookup_elem(&recently_banned_ips, &key)) {
+            increment_ipv4_recently_banned_stats();
             // Block UDP and ICMP from recently banned IPs, but allow DNS
             if (iph->protocol == IPPROTO_UDP) {
                 struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
@@ -136,6 +283,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips, &key);
+                increment_total_packets_dropped();
+                increment_dropped_ipv4_address(iph->saddr);
                 bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                 return XDP_DROP;
             }
@@ -143,6 +292,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips, &key);
+                increment_total_packets_dropped();
+                increment_dropped_ipv4_address(iph->saddr);
                 bpf_printk("XDP: BLOCKED incoming ICMP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                 return XDP_DROP;
             }
@@ -154,6 +305,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         ip_flag_t one = 1;
                         bpf_map_update_elem(&banned_ips, &key, &one, BPF_ANY);
                         bpf_map_delete_elem(&recently_banned_ips, &key);
+                        increment_total_packets_dropped();
+                        increment_dropped_ipv4_address(iph->saddr);
                         bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                     }
                 }
@@ -188,11 +341,15 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
         __builtin_memcpy(key6.addr, &ip6h->saddr, 16);
 
         if (bpf_map_lookup_elem(&banned_ips_v6, &key6)) {
+            increment_ipv6_banned_stats();
+            increment_total_packets_dropped();
+            increment_dropped_ipv6_address(ip6h->saddr);
             bpf_printk("XDP: BLOCKED incoming permanently banned IPv6");
             return XDP_DROP;
         }
 
         if (bpf_map_lookup_elem(&recently_banned_ips_v6, &key6)) {
+            increment_ipv6_recently_banned_stats();
             // Block UDP and ICMP from recently banned IPv6 IPs, but allow DNS
             if (ip6h->nexthdr == IPPROTO_UDP) {
                 struct udphdr *udph = parse_and_advance(&cursor, data_end, sizeof(*udph));
@@ -203,6 +360,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                increment_total_packets_dropped();
+                increment_dropped_ipv6_address(ip6h->saddr);
                 bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv6, promoted to permanent ban");
                 return XDP_DROP;
             }
@@ -210,6 +369,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 ip_flag_t one = 1;
                 bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                 bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                increment_total_packets_dropped();
+                increment_dropped_ipv6_address(ip6h->saddr);
                 bpf_printk("XDP: BLOCKED incoming ICMPv6 from recently banned IPv6, promoted to permanent ban");
                 return XDP_DROP;
             }
@@ -221,6 +382,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         ip_flag_t one = 1;
                         bpf_map_update_elem(&banned_ips_v6, &key6, &one, BPF_ANY);
                         bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
+                        increment_total_packets_dropped();
+                        increment_dropped_ipv6_address(ip6h->saddr);
                         bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv6, promoted to permanent ban");
                     }
                 }

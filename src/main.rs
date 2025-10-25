@@ -39,6 +39,8 @@ pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/filter.skel.rs"));
 }
 
+pub mod bpf_stats;
+
 use tokio::signal;
 use tokio::sync::watch;
 
@@ -57,6 +59,7 @@ use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_clien
 use crate::access_log::{LogSenderConfig, set_log_sender_config, start_batch_log_processor};
 use crate::authcheck::validate_api_key;
 use crate::http_client::init_global_client;
+use crate::bpf_stats::BpfStatsCollector;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -163,10 +166,14 @@ async fn main() -> Result<()> {
         config.tls.cert_path.as_ref().map(|p| p.clone()),
     );
 
+    // Create BPF statistics collector
+    let bpf_stats_collector = BpfStatsCollector::new(skels.clone(), config.bpf_stats.enabled);
+
     let state = AppState {
         skels: skels.clone(),
         tls_state: tls_state.clone(),
         ifindices: ifindices.clone(),
+        bpf_stats_collector,
     };
 
 
@@ -308,6 +315,30 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Start BPF statistics logging task
+    let bpf_stats_handle = if config.bpf_stats.enabled && !state.skels.is_empty() {
+        let collector = state.bpf_stats_collector.clone();
+        let log_interval = config.bpf_stats.log_interval_secs;
+        let shutdown = shutdown_rx.clone();
+        Some(start_bpf_stats_logging(collector, log_interval, shutdown))
+    } else {
+        log::info!("Skipping BPF statistics logging (disabled or XDP not available)");
+        None
+    };
+
+    // Start dropped IP events logging task
+    let dropped_ip_events_handle = if config.bpf_stats.enabled &&
+                                       config.bpf_stats.enable_dropped_ip_events &&
+                                       !state.skels.is_empty() {
+        let collector = state.bpf_stats_collector.clone();
+        let log_interval = config.bpf_stats.dropped_ip_events_interval_secs;
+        let shutdown = shutdown_rx.clone();
+        Some(start_dropped_ip_events_logging(collector, log_interval, shutdown))
+    } else {
+        log::info!("Skipping dropped IP events logging (disabled or XDP not available)");
+        None
+    };
+
     let tls_handle = {
         let mut builder = Client::builder(TokioExecutor::new());
         builder.timer(TokioTimer::new());
@@ -335,6 +366,7 @@ async fn main() -> Result<()> {
             tls_only: config.tls.only,
             proxy_protocol_enabled: config.server.proxy_protocol.enabled,
             proxy_protocol_timeout_ms: config.server.proxy_protocol.timeout_ms,
+            bpf_stats_collector: Some(state.bpf_stats_collector.clone()),
         });
 
         match tls_mode {
@@ -521,6 +553,18 @@ async fn main() -> Result<()> {
         log::error!("access-rules task join error: {err}");
     }
 
+    if let Some(handle) = bpf_stats_handle
+        && let Err(err) = handle.await
+    {
+        log::error!("bpf-stats task join error: {err}");
+    }
+
+    if let Some(handle) = dropped_ip_events_handle
+        && let Err(err) = handle.await
+    {
+        log::error!("dropped-ip-events task join error: {err}");
+    }
+
     if let Err(err) = health_check_handle.await {
         log::error!("health-check task join error: {err}");
     }
@@ -536,4 +580,56 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Start a background task that logs BPF statistics periodically
+fn start_bpf_stats_logging(
+    collector: BpfStatsCollector,
+    log_interval_secs: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(log_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = collector.log_stats() {
+                        log::warn!("Failed to log BPF statistics: {}", e);
+                    }
+                }
+            }
+        }
+
+        log::info!("BPF statistics logging task stopped");
+    })
+}
+
+/// Start a background task that logs dropped IP events periodically
+fn start_dropped_ip_events_logging(
+    collector: BpfStatsCollector,
+    log_interval_secs: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(log_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = collector.log_dropped_ip_events() {
+                        log::warn!("Failed to log dropped IP events: {}", e);
+                    }
+                }
+            }
+        }
+
+        log::info!("Dropped IP events logging task stopped");
+    })
 }

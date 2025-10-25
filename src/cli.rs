@@ -18,6 +18,8 @@ pub struct Config {
     pub arxignis: ArxignisConfig,
     pub content_scanning: ContentScanningCliConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub bpf_stats: BpfStatsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,7 @@ impl Config {
             logging: LoggingConfig {
                 level: "info".to_string(),
             },
+            bpf_stats: BpfStatsConfig::default(),
         }
     }
 
@@ -656,3 +659,23 @@ impl LogLevel {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BpfStatsConfig {
+    #[serde(default = "default_bpf_stats_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_bpf_stats_log_interval")]
+    pub log_interval_secs: u64,
+    #[serde(default = "default_bpf_stats_include_in_access_logs")]
+    pub include_in_access_logs: bool,
+    #[serde(default = "default_bpf_stats_enable_dropped_ip_events")]
+    pub enable_dropped_ip_events: bool,
+    #[serde(default = "default_bpf_stats_dropped_ip_events_interval")]
+    pub dropped_ip_events_interval_secs: u64,
+}
+
+fn default_bpf_stats_enabled() -> bool { true }
+fn default_bpf_stats_log_interval() -> u64 { 60 }
+fn default_bpf_stats_include_in_access_logs() -> bool { true }
+fn default_bpf_stats_enable_dropped_ip_events() -> bool { true }
+fn default_bpf_stats_dropped_ip_events_interval() -> u64 { 30 }

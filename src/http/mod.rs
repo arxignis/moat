@@ -456,6 +456,7 @@ pub struct ProxyContext {
     pub tls_only: bool,
     pub proxy_protocol_enabled: bool,
     pub proxy_protocol_timeout_ms: u64,
+    pub bpf_stats_collector: Option<crate::bpf_stats::BpfStatsCollector>,
 }
 
 #[derive(Clone)]
@@ -1492,7 +1493,7 @@ pub async fn proxy_http_service(
         if !is_acme_challenge && !is_captcha_verify && tls_fingerprint.is_none() {
             // Generate access log for TLS required block
             let dst_addr = parse_upstream_addr(&ctx.upstream);
-            if let Err(e) = HttpAccessLog::create_from_parts(
+            if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                 &req_parts,
                 &req_body_bytes,
                 peer_addr,
@@ -1502,6 +1503,7 @@ pub async fn proxy_http_service(
                 None,
                 None,
                 server_cert_info.as_ref(),
+                ctx.bpf_stats_collector.as_ref(),
             )
             .await
             {
@@ -1553,7 +1555,7 @@ pub async fn proxy_http_service(
                             // Generate access log for blocked request with content scanning details
                             let dst_addr = parse_upstream_addr(&ctx.upstream);
                             let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-                            if let Err(e) = HttpAccessLog::create_from_parts(
+                            if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                                 &req_parts,
                                 &req_body_bytes,
                                 peer_addr,
@@ -1563,6 +1565,7 @@ pub async fn proxy_http_service(
                                 None,
                                 threat_data.as_ref(),
                                 server_cert_info.as_ref(),
+                                ctx.bpf_stats_collector.as_ref(),
                             )
                             .await
                             {
@@ -1612,7 +1615,7 @@ pub async fn proxy_http_service(
                 // Fetch threat intelligence data for trusted IP requests
                 let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
 
-                if let Err(e) = HttpAccessLog::create_from_parts(
+                if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                     &req_parts,
                     &req_body_bytes,
                     peer_addr,
@@ -1622,6 +1625,7 @@ pub async fn proxy_http_service(
                     None,
                     threat_data.as_ref(),
                     server_cert_info.as_ref(),
+                    ctx.bpf_stats_collector.as_ref(),
                 )
                 .await
                 {
@@ -1638,26 +1642,6 @@ pub async fn proxy_http_service(
                     peer.map(|p| p.to_string())
                         .unwrap_or_else(|| "<unknown>".into())
                 );
-
-                // Create access log for upstream error
-                let dst_addr = parse_upstream_addr(&ctx.upstream);
-                let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-                if let Err(e) = HttpAccessLog::create_from_parts(
-                    &req_parts,
-                    &req_body_bytes,
-                    peer_addr,
-                    dst_addr,
-                    tls_fingerprint,
-                    ResponseData::for_blocked_request("proxy_error", 502, None, threat_data.as_ref()),
-                    None,
-                    threat_data.as_ref(),
-                    server_cert_info.as_ref(),
-                )
-                .await
-                {
-                    log::warn!("Failed to log upstream error: {}", e);
-                }
-
                 return Ok(build_proxy_error_response(
                     StatusCode::BAD_GATEWAY,
                     "proxy_error",
@@ -1784,7 +1768,7 @@ pub async fn proxy_http_service(
             // Generate access log for captcha challenge
             let dst_addr = parse_upstream_addr(&ctx.upstream);
             let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-            if let Err(e) = HttpAccessLog::create_from_parts(
+            if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                 &req_parts,
                 &req_body_bytes,
                 peer_addr,
@@ -1794,6 +1778,7 @@ pub async fn proxy_http_service(
                 None,
                 threat_data.as_ref(),
                 server_cert_info.as_ref(),
+                ctx.bpf_stats_collector.as_ref(),
             )
             .await
             {
@@ -1840,7 +1825,7 @@ pub async fn proxy_http_service(
 
                         // Generate access log for blocked request
                         let dst_addr = parse_upstream_addr(&ctx.upstream);
-                        if let Err(e) = HttpAccessLog::create_from_parts(
+                        if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                             &req_parts,
                             &req_body_bytes,
                             peer_addr,
@@ -1850,6 +1835,7 @@ pub async fn proxy_http_service(
                             Some(&waf_result),
                             threat_data.as_ref(),
                             server_cert_info.as_ref(),
+                            ctx.bpf_stats_collector.as_ref(),
                         )
                         .await
                         {
@@ -1900,7 +1886,7 @@ pub async fn proxy_http_service(
                                 ResponseData::for_blocked_request("challenge_passed", 200, Some(waf_result.clone()), threat_data.as_ref())
                             });
 
-                            if let Err(e) = HttpAccessLog::create_from_parts(
+                            if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                                 &req_parts,
                                 &req_body_bytes,
                                 peer_addr,
@@ -1910,6 +1896,7 @@ pub async fn proxy_http_service(
                                 Some(&waf_result),
                                 threat_data.as_ref(),
                                 server_cert_info.as_ref(),
+                                ctx.bpf_stats_collector.as_ref(),
                             )
                             .await
                             {
@@ -1971,7 +1958,7 @@ pub async fn proxy_http_service(
                         let dst_addr = parse_upstream_addr(&ctx.upstream);
                         let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
                         let response_data = ResponseData::for_blocked_request("captcha_challenge_required", 403, None, threat_data.as_ref());
-                        if let Err(e) = HttpAccessLog::create_from_parts(
+                        if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                             &req_parts,
                             &req_body_bytes,
                             peer_addr,
@@ -1981,6 +1968,7 @@ pub async fn proxy_http_service(
                             None,
                             threat_data.as_ref(),
                             server_cert_info.as_ref(),
+                            ctx.bpf_stats_collector.as_ref(),
                         ).await {
                             log::warn!("Failed to log captcha challenge request: {}", e);
                         }
@@ -2050,7 +2038,7 @@ pub async fn proxy_http_service(
                             // Generate access log for blocked request with content scanning details
                             let dst_addr = parse_upstream_addr(&ctx.upstream);
                             let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-                            if let Err(e) = HttpAccessLog::create_from_parts(
+                            if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                                 &req_parts,
                                 &req_body_bytes,
                                 peer_addr,
@@ -2060,6 +2048,7 @@ pub async fn proxy_http_service(
                                 None,
                                 threat_data.as_ref(),
                                 server_cert_info.as_ref(),
+                                ctx.bpf_stats_collector.as_ref(),
                             )
                             .await
                             {
@@ -2121,7 +2110,7 @@ pub async fn proxy_http_service(
                 // For now, we'll create a generic WAF result for challenged requests
                 let waf_result = None; // No WAF result for non-challenged requests
 
-                if let Err(e) = HttpAccessLog::create_from_parts(
+                if let Err(e) = HttpAccessLog::create_with_bpf_stats(
                     &req_parts,
                     &req_body_bytes,
                     peer_addr,
@@ -2131,6 +2120,7 @@ pub async fn proxy_http_service(
                     waf_result.as_ref(),
                     threat_data.as_ref(),
                     server_cert_info.as_ref(),
+                    ctx.bpf_stats_collector.as_ref(),
                 )
                 .await
                 {
@@ -2148,26 +2138,6 @@ pub async fn proxy_http_service(
                 peer.map(|p| p.to_string())
                     .unwrap_or_else(|| "<unknown>".into())
             );
-
-            // Create access log for upstream error
-            let dst_addr = parse_upstream_addr(&ctx.upstream);
-            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-            if let Err(e) = HttpAccessLog::create_from_parts(
-                &req_parts,
-                &req_body_bytes,
-                peer_addr,
-                dst_addr,
-                tls_fingerprint,
-                ResponseData::for_blocked_request("proxy_error", 502, None, threat_data.as_ref()),
-                None,
-                threat_data.as_ref(),
-                server_cert_info.as_ref(),
-            )
-            .await
-            {
-                log::warn!("Failed to log upstream error: {}", e);
-            }
-
             Ok(build_proxy_error_response(
                 StatusCode::BAD_GATEWAY,
                 "proxy_error",
@@ -2732,7 +2702,7 @@ mod tests {
         });
 
         // Test the blocked request access log function
-        let result = HttpAccessLog::create_from_parts(
+        let result = HttpAccessLog::create_with_bpf_stats(
             &req_parts,
             &req_body_bytes,
             peer_addr,
@@ -2742,6 +2712,7 @@ mod tests {
             None,
                                 None,
                                 server_cert_info.as_ref(),
+                                ctx.bpf_stats_collector.as_ref(),
                             )
         .await;
 
@@ -2775,7 +2746,7 @@ mod tests {
         });
 
         // Test the access log function
-        let result = HttpAccessLog::create_from_parts(
+        let result = HttpAccessLog::create_with_bpf_stats(
             &req_parts,
             &req_body_bytes,
             peer_addr,
@@ -2785,6 +2756,7 @@ mod tests {
             None,
                                 None,
                                 server_cert_info.as_ref(),
+                                ctx.bpf_stats_collector.as_ref(),
                             )
         .await;
 
