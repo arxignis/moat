@@ -1,5 +1,4 @@
-![Arxignis logo](./images/logo_dark.png#gh-dark-mode-only)
-![Arxignis logo](./images/logo_light.png#gh-light-mode-only)
+![Arxignis logo](./images/logo.png)
 
 <p align="center">
   <a href="https://github.com/arxignis/moat/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-ELv2-green" alt="License - Elastic 2.0"></a> &nbsp;
