@@ -1,6 +1,5 @@
-<div align="center">
-  <img height=100 weight=100 src="images/logo.svg" alt="arxgnis logo" />
-</div>
+![Arxignis logo](./images/logo_dark.png#gh-dark-mode-only)
+![Arxignis logo](./images/logo_light.png#gh-light-mode-only)
 
 <p align="center">
   <a href="https://github.com/arxignis/moat/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-ELv2-green" alt="License - Elastic 2.0"></a> &nbsp;
@@ -23,17 +22,32 @@ You can read [here](./STORY.md).
 
 Moat is a high-performance reverse proxy and firewall built with Rust, featuring:
 
-- **XDP-based packet filtering** for ultra-low latency protection
+- **XDP-based packet filtering** for ultra-low latency protection at kernel level
+- **Dynamic access rules** with automatic updates from Arxignis API
+- **BPF statistics collection** for packet processing and dropped IP monitoring
+- **TCP fingerprinting** for behavioral analysis and threat detection
+- **TLS fingerprinting** with JA4/JA4L support for client identification
 - **Automatic TLS certificate management** with ACME/Let's Encrypt integration
-- **Threat intelligence integration** with Arxignis API
+- **Threat intelligence integration** with Arxignis API for real-time protection
 - **CAPTCHA protection** with support for hCaptcha, reCAPTCHA, and Cloudflare Turnstile
 - **Content scanning** with ClamAV integration for malware detection
-- **PROXY protocol support** for preserving client IP addresses
+- **PROXY protocol support** for preserving client IP addresses through load balancers
 - **Health check endpoints** for monitoring and load balancer integration
-- **Redis-backed caching** for certificates, threat intelligence, and CAPTCHA validation
+- **Redis-backed caching** for certificates, threat intelligence, and validation results
 - **Domain filtering** with whitelist support
 - **Wirefilter expressions** for advanced request filtering
-- **Environment variable configuration** for containerized deployments
+- **Unified event queue** with batched processing for logs, statistics, and events
+- **Flexible configuration** via YAML files, command line arguments, or environment variables
+
+## Configuration Methods
+
+Moat supports three configuration methods with the following priority (highest to lowest):
+
+1. **YAML Configuration File** - Comprehensive configuration via `config.yaml`
+2. **Command Line Arguments** - Override specific settings via CLI flags
+3. **Environment Variables** - Set configuration via `AX_*` prefixed environment variables
+
+Configuration from higher priority sources overrides lower priority sources. For example, a YAML file setting will override the same setting from an environment variable.
 
 ## Quick Start
 
@@ -49,13 +63,15 @@ docker run --cap-add=SYS_ADMIN --cap-add=BPF \
 --arxignis-api-key="your-key" --upstream "http://127.0.0.1:8081"
 ```
 
-### Docker with Health Checks
+### Docker with Health Checks and Statistics
 ```bash
-# Run with health check configuration via environment variables
+# Run with health check configuration and statistics collection via environment variables
 docker run --cap-add=SYS_ADMIN --cap-add=BPF --cap-add=NET_ADMIN \
 -e AX_SERVER_HEALTH_CHECK_ENABLED=true \
 -e AX_SERVER_HEALTH_CHECK_PORT=0.0.0.0:8080 \
 -e AX_SERVER_HEALTH_CHECK_ENDPOINT=/health \
+-e AX_BPF_STATS_ENABLED=true \
+-e AX_TCP_FINGERPRINT_ENABLED=true \
 -p 8080:8080 \
 moat --iface eth0 --arxignis-api-key="your-key" --upstream "http://127.0.0.1:8081"
 ```
@@ -186,6 +202,9 @@ The configuration file supports all features including:
 - Redis caching configuration
 - Network interface and XDP settings
 - Arxignis API integration
+- Access log sending configuration with response body options
+- BPF statistics collection and logging
+- TCP fingerprinting with configurable thresholds
 - CAPTCHA protection settings
 - Content scanning with ClamAV integration
 - Domain filtering rules
@@ -245,6 +264,25 @@ export AX_PROXY_PROTOCOL_TIMEOUT="1000"
 
 # Logging
 export AX_LOGGING_LEVEL="info"
+
+# BPF Statistics configuration
+export AX_BPF_STATS_ENABLED="true"
+export AX_BPF_STATS_LOG_INTERVAL="60"
+export AX_BPF_STATS_ENABLE_DROPPED_IP_EVENTS="true"
+export AX_BPF_STATS_DROPPED_IP_EVENTS_INTERVAL="30"
+
+# TCP Fingerprinting configuration
+export AX_TCP_FINGERPRINT_ENABLED="true"
+export AX_TCP_FINGERPRINT_LOG_INTERVAL="60"
+export AX_TCP_FINGERPRINT_ENABLE_FINGERPRINT_EVENTS="true"
+export AX_TCP_FINGERPRINT_EVENTS_INTERVAL="30"
+export AX_TCP_FINGERPRINT_MIN_PACKET_COUNT="3"
+export AX_TCP_FINGERPRINT_MIN_CONNECTION_DURATION="1"
+
+# Arxignis log sending configuration
+export AX_ARXIGNIS_LOG_SENDING_ENABLED="true"
+export AX_ARXIGNIS_INCLUDE_RESPONSE_BODY="true"
+export AX_ARXIGNIS_MAX_BODY_SIZE="1048576"
 ```
 
 ## Command Line Options
@@ -411,15 +449,39 @@ Moat integrates with Arxignis API to provide real-time threat intelligence:
 - **Geolocation filtering** - Block or allow traffic based on geographic location
 - **Threat context** - Rich context about detected threats
 - **Caching** - Redis-backed caching for improved performance
-- **JA4+** - SSL and TCP fingerpriting
+- **Dynamic access rules** - Automatic updates of access rules (allow/block lists) from Arxignis API
+- **JA4/JA4L fingerprinting** - TLS client fingerprinting with JA4, JA4 raw, and JA4L support
 
-#### ⚠️ Degraded Features When Access Logs Disabled
+### Dynamic Access Rules
 
-When access log sending is disabled (`--arxignis-log-sending-enabled=false`), the following features are degraded:
+Kernel-level IP filtering with automatic updates:
+
+- **Allow/Block lists** - Configure IP addresses, ASNs, and countries for allow/block rules
+- **Automatic updates** - Rules are fetched from Arxignis API and updated periodically
+- **BPF map integration** - Rules are enforced at kernel level via XDP for maximum performance
+- **IPv4 and IPv6 support** - Both IP versions are supported with separate rule sets
+- **Recently banned tracking** - Track recently banned IPs for UDP, ICMP, and TCP FIN/RST packets
+- **Zero downtime updates** - Rules are updated without interrupting traffic
+
+### Wirefilter Expression Engine
+
+Advanced request filtering with powerful expression language:
+
+- **Flexible expressions** - Use wirefilter expressions for complex filtering rules
+- **HTTP field matching** - Filter based on request method, path, headers, and more
+- **Content scanning triggers** - Define when to scan content based on request characteristics
+- **WAF integration** - Wirefilter expressions are fetched from Arxignis API for centralized management
+- **Action support** - Configure actions (allow, block, challenge) based on expression matches
+
+### ⚠️ Degraded Features When Access Logs Disabled
+
+When access log sending is disabled (`AX_ARXIGNIS_LOG_SENDING_ENABLED=false` or `--arxignis-log-sending-enabled=false`), the following features are degraded:
 
 - **Threat Intelligence (Degraded)** - Basic threat intelligence still works for real-time blocking, but detailed threat analysis and historical data collection is limited
 - **Anomaly Detection** - Advanced anomaly detection capabilities are not available without access log data
-- **Metrics** - Comprehensive metrics and analytics are not available without access log aggregation
+- **Metrics & Analytics** - Comprehensive metrics and analytics are not available without access log aggregation
+- **BPF Statistics** - Statistics can still be collected locally but won't be sent to Arxignis API for centralized analysis
+- **TCP Fingerprinting** - Fingerprints can still be collected locally but won't be sent to Arxignis API for behavioral analysis
 
 ### CAPTCHA Protection
 
@@ -535,6 +597,39 @@ Moat uses eXpress Data Path (XDP) for ultra-low latency packet filtering:
 - **Multiple interfaces** - Support for attaching to multiple network interfaces
 - **Fallback mode** - Can run without XDP for environments that don't support it
 
+### BPF Statistics and Monitoring
+
+Comprehensive kernel-level statistics collection:
+
+- **Packet counters** - Total packets processed and dropped
+- **Access rule statistics** - IPv4/IPv6 banned and recently banned hit counts
+- **Dropped IP tracking** - Detailed tracking of dropped IP addresses with drop counts
+- **Drop reason classification** - Categorize drops by access rules, UDP, ICMP, or TCP FIN/RST
+- **Periodic logging** - Configurable intervals for statistics and event logging
+- **Event streaming** - Send statistics to Arxignis API for analysis
+
+### TCP Fingerprinting
+
+Advanced TCP-level fingerprinting capabilities:
+
+- **TCP SYN fingerprinting** - Extract unique fingerprints from TCP SYN packets
+- **Connection tracking** - Track TTL, MSS, window size, window scale, and TCP options
+- **Pattern analysis** - Identify unique fingerprint patterns and track by IP address
+- **Configurable thresholds** - Filter by minimum packet count and connection duration
+- **Periodic collection** - Configurable intervals for fingerprint collection and logging
+- **Event streaming** - Send fingerprint data to Arxignis API for behavioral analysis
+
+### Event Processing and Batching
+
+Efficient event handling with unified queue:
+
+- **Unified event queue** - Single queue for access logs, BPF statistics, and TCP fingerprints
+- **Batch processing** - Events are batched with configurable limits (5000 logs per batch, 5MB size limit)
+- **Timeout-based flushing** - Batches are sent every 10 seconds regardless of size
+- **Automatic retries** - Failed requests are retried with exponential backoff
+- **Memory efficient** - Events are processed in batches to minimize memory overhead
+- **Non-blocking** - Event processing happens in background tasks without blocking main proxy
+
 ### TLS Management
 
 Comprehensive TLS support with multiple modes:
@@ -553,9 +648,14 @@ Comprehensive TLS support with multiple modes:
 - **TLS Server** - Manages HTTPS connections and certificate handling
 - **Reverse Proxy** - Forwards requests to upstream services
 - **Threat Intelligence** - Integrates with Arxignis API for real-time threat data
+- **Access Rules Engine** - Dynamic IP allow/block lists with periodic updates from Arxignis API
+- **BPF Statistics Collector** - Tracks packet processing, drops, and banned IP hits at kernel level
+- **TCP Fingerprint Collector** - Extracts and analyzes TCP SYN fingerprints for behavioral analysis
+- **TLS Fingerprint Engine** - JA4/JA4L TLS client fingerprinting for connection analysis
 - **CAPTCHA Engine** - Validates CAPTCHA responses from multiple providers
 - **Content Scanner** - ClamAV integration for malware detection
 - **PROXY Protocol Handler** - Preserves client IP addresses through load balancers
+- **Event Queue** - Unified batch processing for logs, statistics, and events
 - **Redis Cache** - Stores certificates, threat intelligence, CAPTCHA validation results, and content scan results
 
 ### Performance
@@ -594,10 +694,16 @@ Comprehensive TLS support with multiple modes:
 - Domain filtering supports exact matches (whitelist)
 - When using Docker, ensure the required capabilities (`SYS_ADMIN`, `BPF`, `NET_ADMIN`) are added
 - The XDP program attaches to the specified network interface for packet filtering
+- BPF statistics and TCP fingerprinting require XDP to be enabled (not available with `--disable-xdp`)
+- Access rules are automatically updated from Arxignis API at regular intervals
+- BPF statistics track packet processing metrics and dropped IPs at kernel level
+- TCP fingerprinting collects SYN packet characteristics for behavioral analysis
+- TLS fingerprinting generates JA4 and JA4L fingerprints from ClientHello messages
 - CAPTCHA tokens are JWT-signed for security and can be cached for performance
 - Threat intelligence data is cached in Redis to minimize API calls
 - Multiple network interfaces can be configured for high availability setups
 - Content scanning requires a running ClamAV server and is disabled by default
 - PROXY protocol support enables proper client IP preservation through load balancers
 - Health check endpoints can be configured for monitoring and load balancer integration
-- Configuration files take precedence over command line arguments, which override environment variables
+- Access logs, statistics, and events are batched and sent to Arxignis API for analysis
+- Configuration priority: YAML file > Command line arguments > Environment variables
