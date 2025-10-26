@@ -11,6 +11,7 @@ use jsonwebtoken::{encode, decode, Header, Algorithm, Validation, EncodingKey, D
 use uuid::Uuid;
 
 use crate::redis::RedisManager;
+use crate::http_client::get_global_reqwest_client;
 
 /// Captcha provider types supported by Arxignis
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
@@ -624,10 +625,9 @@ impl CaptchaClient {
 
     /// Validate with hCaptcha API
     async fn validate_hcaptcha(&self, request: &CaptchaValidationRequest) -> Result<bool> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(2000))
-            .build()
-            .context("Failed to create HTTP client")?;
+        // Use shared HTTP client with keepalive instead of creating new client
+        let client = get_global_reqwest_client()
+            .context("Failed to get global HTTP client")?;
 
         let mut params = HashMap::new();
         params.insert("response", &request.response_token);
@@ -688,10 +688,9 @@ impl CaptchaClient {
 
     /// Validate with reCAPTCHA API
     async fn validate_recaptcha(&self, request: &CaptchaValidationRequest) -> Result<bool> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(2000))
-            .build()
-            .context("Failed to create HTTP client")?;
+        // Use shared HTTP client with keepalive instead of creating new client
+        let client = get_global_reqwest_client()
+            .context("Failed to get global HTTP client")?;
 
         let mut params = HashMap::new();
         params.insert("response", &request.response_token);
@@ -751,10 +750,9 @@ impl CaptchaClient {
 
     /// Validate with Cloudflare Turnstile API
     async fn validate_turnstile(&self, request: &CaptchaValidationRequest) -> Result<bool> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(2000))
-            .build()
-            .context("Failed to create HTTP client")?;
+        // Use shared HTTP client with keepalive instead of creating new client
+        let client = get_global_reqwest_client()
+            .context("Failed to get global HTTP client")?;
 
         let mut params = HashMap::new();
         params.insert("response", &request.response_token);

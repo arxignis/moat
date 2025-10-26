@@ -5,6 +5,7 @@ use std::io::Read;
 use flate2::read::GzDecoder;
 use std::sync::{Arc, OnceLock, RwLock};
 use crate::content_scanning::ContentScanningConfig;
+use crate::http_client::get_global_reqwest_client;
 
 pub type Details = serde_json::Value;
 
@@ -83,12 +84,10 @@ pub async fn fetch_config(
     base_url: String,
     api_key: String,
 ) -> Result<ConfigApiResponse, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .danger_accept_invalid_certs(false)
-        .user_agent("Moat/1.0")
-        .build()?;
+    // Use shared HTTP client with keepalive instead of creating new client
+    let client = get_global_reqwest_client()
+        .map_err(|e| anyhow::anyhow!("Failed to get global HTTP client: {}", e))?;
+
     let url = format!("{}/config", base_url);
 
     let response = client

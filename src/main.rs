@@ -25,6 +25,7 @@ pub mod content_scanning;
 pub mod domain_filter;
 pub mod firewall;
 pub mod http;
+pub mod http_client;
 pub mod utils;
 pub mod wirefilter;
 pub mod proxy_utils;
@@ -38,10 +39,17 @@ pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/filter.skel.rs"));
 }
 
+pub mod bpf_stats;
+pub mod tcp_fingerprint;
+pub mod event_queue;
+
 use tokio::signal;
 use tokio::sync::watch;
 
 use crate::app_state::AppState;
+use crate::bpf_stats::BpfStatsCollector;
+use crate::tcp_fingerprint::TcpFingerprintCollector;
+use crate::tcp_fingerprint::TcpFingerprintConfig;
 use crate::cli::{Args, Config};
 use crate::domain_filter::DomainFilter;
 use crate::http::{
@@ -53,8 +61,10 @@ use crate::wirefilter::init_config;
 use crate::content_scanning::{init_content_scanner, ContentScanningConfig};
 use crate::utils::bpf_utils;
 use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
-use crate::access_log::{LogSenderConfig, set_log_sender_config, start_batch_log_processor};
+use crate::access_log::{LogSenderConfig, set_log_sender_config};
+use crate::event_queue::start_batch_event_processor;
 use crate::authcheck::validate_api_key;
+use crate::http_client::init_global_client;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -83,6 +93,13 @@ async fn main() -> Result<()> {
         builder.filter_level(args.log_level.to_level_filter());
         builder.format_timestamp_secs();
         builder.try_init().ok();
+    }
+
+    // Initialize global HTTP client with keepalive configuration
+    if let Err(e) = init_global_client() {
+        log::warn!("Failed to initialize global HTTP client: {}", e);
+    } else {
+        log::info!("Global HTTP client initialized with keepalive configuration");
     }
 
 
@@ -154,10 +171,21 @@ async fn main() -> Result<()> {
         config.tls.cert_path.as_ref().map(|p| p.clone()),
     );
 
+    // Create BPF statistics collector
+    let bpf_stats_collector = BpfStatsCollector::new(skels.clone(), config.bpf_stats.enabled);
+
+    // Create TCP fingerprinting collector
+    let tcp_fingerprint_collector = TcpFingerprintCollector::new_with_config(
+        skels.clone(),
+        TcpFingerprintConfig::from_cli_config(&config.tcp_fingerprint)
+    );
+
     let state = AppState {
         skels: skels.clone(),
         tls_state: tls_state.clone(),
         ifindices: ifindices.clone(),
+        bpf_stats_collector,
+        tcp_fingerprint_collector,
     };
 
 
@@ -264,11 +292,11 @@ async fn main() -> Result<()> {
     set_log_sender_config(log_sender_config);
 
     if config.arxignis.log_sending_enabled && !config.arxignis.api_key.is_empty() {
-        log::info!("Access log sending to arxignis server enabled with batching (10s timeout, 5MB limit)");
-        // Start the background batch log processor
-        start_batch_log_processor();
+        log::info!("Event sending to arxignis server enabled with unified queue (10s timeout, 5MB limit)");
+        // Start the background unified event processor
+        start_batch_event_processor();
     } else {
-        log::info!("Access log sending to arxignis server disabled (enabled: {}, api_key configured: {})",
+        log::info!("Event sending to arxignis server disabled (enabled: {}, api_key configured: {})",
                    config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());
     }
 
@@ -296,6 +324,56 @@ async fn main() -> Result<()> {
         Some(access_rules::start_access_rules_updater(base_url, skels, api_key, shutdown))
     } else {
         log::info!("Skipping access rules updater (XDP disabled)");
+        None
+    };
+
+    // Start BPF statistics logging task
+    let bpf_stats_handle = if config.bpf_stats.enabled && !state.skels.is_empty() {
+        let collector = state.bpf_stats_collector.clone();
+        let log_interval = config.bpf_stats.log_interval_secs;
+        let shutdown = shutdown_rx.clone();
+        Some(start_bpf_stats_logging(collector, log_interval, shutdown))
+    } else {
+        log::info!("Skipping BPF statistics logging (disabled or XDP not available)");
+        None
+    };
+
+    // Start dropped IP events logging task
+    let dropped_ip_events_handle = if config.bpf_stats.enabled &&
+                                       config.bpf_stats.enable_dropped_ip_events &&
+                                       !state.skels.is_empty() {
+        let collector = state.bpf_stats_collector.clone();
+        let log_interval = config.bpf_stats.dropped_ip_events_interval_secs;
+        let shutdown = shutdown_rx.clone();
+        Some(start_dropped_ip_events_logging(collector, log_interval, shutdown))
+    } else {
+        log::info!("Skipping dropped IP events logging (disabled or XDP not available)");
+        None
+    };
+
+    // Start TCP fingerprinting statistics logging task
+    let tcp_fingerprint_stats_handle = if config.tcp_fingerprint.enabled && !state.skels.is_empty() {
+        let collector = state.tcp_fingerprint_collector.clone();
+        let log_interval = config.tcp_fingerprint.log_interval_secs;
+        let shutdown = shutdown_rx.clone();
+        let state_clone = Arc::new(state.clone());
+        Some(start_tcp_fingerprint_stats_logging(collector, log_interval, shutdown, state_clone))
+    } else {
+        log::info!("Skipping TCP fingerprinting statistics logging (disabled or XDP not available)");
+        None
+    };
+
+    // Start TCP fingerprinting events logging task
+    let tcp_fingerprint_events_handle = if config.tcp_fingerprint.enabled &&
+                                           config.tcp_fingerprint.enable_fingerprint_events &&
+                                           !state.skels.is_empty() {
+        let collector = state.tcp_fingerprint_collector.clone();
+        let log_interval = config.tcp_fingerprint.fingerprint_events_interval_secs;
+        let shutdown = shutdown_rx.clone();
+        let state_clone = Arc::new(state.clone());
+        Some(start_tcp_fingerprint_events_logging(collector, log_interval, shutdown, state_clone))
+    } else {
+        log::info!("Skipping TCP fingerprinting events logging (disabled or XDP not available)");
         None
     };
 
@@ -512,6 +590,30 @@ async fn main() -> Result<()> {
         log::error!("access-rules task join error: {err}");
     }
 
+    if let Some(handle) = bpf_stats_handle
+        && let Err(err) = handle.await
+    {
+        log::error!("bpf-stats task join error: {err}");
+    }
+
+    if let Some(handle) = dropped_ip_events_handle
+        && let Err(err) = handle.await
+    {
+        log::error!("dropped-ip-events task join error: {err}");
+    }
+
+    if let Some(handle) = tcp_fingerprint_stats_handle
+        && let Err(err) = handle.await
+    {
+        log::error!("tcp-fingerprint-stats task join error: {err}");
+    }
+
+    if let Some(handle) = tcp_fingerprint_events_handle
+        && let Err(err) = handle.await
+    {
+        log::error!("tcp-fingerprint-events task join error: {err}");
+    }
+
     if let Err(err) = health_check_handle.await {
         log::error!("health-check task join error: {err}");
     }
@@ -527,4 +629,110 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Start a background task that logs BPF statistics periodically
+fn start_bpf_stats_logging(
+    collector: BpfStatsCollector,
+    log_interval_secs: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(log_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = collector.log_stats() {
+                        log::warn!("Failed to log BPF statistics: {}", e);
+                    }
+                }
+            }
+        }
+
+        log::info!("BPF statistics logging task stopped");
+    })
+}
+
+/// Start a background task that logs dropped IP events periodically
+fn start_dropped_ip_events_logging(
+    collector: BpfStatsCollector,
+    log_interval_secs: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(log_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = collector.log_dropped_ip_events() {
+                        log::warn!("Failed to log dropped IP events: {}", e);
+                    }
+                }
+            }
+        }
+
+        log::info!("Dropped IP events logging task stopped");
+    })
+}
+
+/// Start a background task that logs TCP fingerprinting statistics periodically
+fn start_tcp_fingerprint_stats_logging(
+    collector: TcpFingerprintCollector,
+    log_interval_secs: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    _state: Arc<AppState>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(log_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = collector.log_stats() {
+                        log::warn!("Failed to log TCP fingerprinting statistics: {}", e);
+                    }
+                }
+            }
+        }
+
+        log::info!("TCP fingerprinting statistics logging task stopped");
+    })
+}
+
+/// Start a background task that logs TCP fingerprinting events periodically
+fn start_tcp_fingerprint_events_logging(
+    collector: TcpFingerprintCollector,
+    log_interval_secs: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    _state: Arc<AppState>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(log_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = collector.log_fingerprint_events() {
+                        log::warn!("Failed to log TCP fingerprinting events: {}", e);
+                    }
+                }
+            }
+        }
+
+        log::info!("TCP fingerprinting events logging task stopped");
+    })
 }
