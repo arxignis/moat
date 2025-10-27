@@ -183,3 +183,63 @@ logging:
   # Log level: error, warn, info, debug, trace
   level: "info"
 
+# BPF Statistics Configuration
+bpf_stats:
+  # Enable BPF statistics collection
+  enabled: true
+
+  # Log statistics every N seconds
+  log_interval_secs: 60
+
+  # Enable separate dropped IP events logging
+  enable_dropped_ip_events: true
+
+  # Log dropped IP events every N seconds (separate from general stats)
+  dropped_ip_events_interval_secs: 30
+
+# TCP Fingerprinting Configuration
+tcp_fingerprint:
+  # Enable TCP fingerprinting
+  enabled: true
+
+  # Log TCP fingerprinting statistics every N seconds
+  log_interval_secs: 60
+
+  # Enable separate TCP fingerprint events logging
+  enable_fingerprint_events: true
+
+  # Log TCP fingerprint events every N seconds (separate from general stats)
+  fingerprint_events_interval_secs: 30
+
+  # Minimum packet count to include in events (reduces noise from single-packet scans)
+  min_packet_count: 3
+
+  # Minimum connection duration in seconds to include in events
+  min_connection_duration_secs: 1
+
+# Daemon Configuration
+daemon:
+  # Enable daemon mode (run as background process)
+  enabled: false
+
+  # PID file path
+  pid_file: "/var/run/moat.pid"
+
+  # Working directory for daemon
+  working_directory: "/"
+
+  # Stdout log file (application logs: info, debug, warn, error)
+  stdout: "/var/log/moat.out"
+
+  # Stderr log file (panic messages and system errors)
+  stderr: "/var/log/moat.err"
+
+  # User to run daemon as (optional, e.g., "nobody")
+  user: null
+
+  # Group to run daemon as (optional, e.g., "daemon")
+  group: null
+
+  # Change ownership of PID file to daemon user/group
+  chown_pid_file: true
+

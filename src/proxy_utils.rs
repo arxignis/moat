@@ -67,7 +67,9 @@ pub async fn forward_to_upstream_with_body(
 
     // Copy all headers from the original request, including Host
     for (name, value) in req_parts.headers.iter() {
-        builder = builder.header(name, value.clone());
+        if name != HOST {
+            builder = builder.header(name, value.clone());
+        }
     }
 
     let mut outbound = builder
@@ -112,7 +114,7 @@ pub async fn forward_to_upstream_with_body(
             outbound.headers_mut().insert(
                 hyper::header::HeaderName::from_static("ax-asn"),
                 value,
-            );
+        );
         }
     }
 
@@ -129,8 +131,6 @@ pub async fn forward_to_upstream_with_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::{Method, Version};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn test_header_json() {

@@ -22,6 +22,8 @@ pub struct Config {
     pub bpf_stats: BpfStatsConfig,
     #[serde(default)]
     pub tcp_fingerprint: TcpFingerprintConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +249,7 @@ impl Config {
             },
             bpf_stats: BpfStatsConfig::default(),
             tcp_fingerprint: TcpFingerprintConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 
@@ -297,6 +300,29 @@ impl Config {
         }
         if args.proxy_protocol_timeout != 1000 {
             self.server.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
+        }
+
+        // Daemon configuration overrides
+        if args.daemon {
+            self.daemon.enabled = true;
+        }
+        if args.daemon_pid_file != "/var/run/moat.pid" {
+            self.daemon.pid_file = args.daemon_pid_file.clone();
+        }
+        if args.daemon_working_dir != "/" {
+            self.daemon.working_directory = args.daemon_working_dir.clone();
+        }
+        if args.daemon_stdout != "/var/log/moat.out" {
+            self.daemon.stdout = args.daemon_stdout.clone();
+        }
+        if args.daemon_stderr != "/var/log/moat.err" {
+            self.daemon.stderr = args.daemon_stderr.clone();
+        }
+        if args.daemon_user.is_some() {
+            self.daemon.user = args.daemon_user.clone();
+        }
+        if args.daemon_group.is_some() {
+            self.daemon.group = args.daemon_group.clone();
         }
 
         // Redis configuration overrides
@@ -492,6 +518,32 @@ impl Config {
         if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
             self.server.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
         }
+
+        // Daemon configuration overrides
+        if let Ok(val) = env::var("AX_DAEMON_ENABLED") {
+            self.daemon.enabled = val.parse().unwrap_or(false);
+        }
+        if let Ok(val) = env::var("AX_DAEMON_PID_FILE") {
+            self.daemon.pid_file = val;
+        }
+        if let Ok(val) = env::var("AX_DAEMON_WORKING_DIRECTORY") {
+            self.daemon.working_directory = val;
+        }
+        if let Ok(val) = env::var("AX_DAEMON_STDOUT") {
+            self.daemon.stdout = val;
+        }
+        if let Ok(val) = env::var("AX_DAEMON_STDERR") {
+            self.daemon.stderr = val;
+        }
+        if let Ok(val) = env::var("AX_DAEMON_USER") {
+            self.daemon.user = Some(val);
+        }
+        if let Ok(val) = env::var("AX_DAEMON_GROUP") {
+            self.daemon.group = Some(val);
+        }
+        if let Ok(val) = env::var("AX_DAEMON_CHOWN_PID_FILE") {
+            self.daemon.chown_pid_file = val.parse().unwrap_or(true);
+        }
     }
 }
 
@@ -640,6 +692,34 @@ pub struct Args {
     /// PROXY protocol timeout in milliseconds
     #[arg(long, default_value = "1000")]
     pub proxy_protocol_timeout: u64,
+
+    /// Run as daemon in background
+    #[arg(long, short = 'd', default_value_t = false)]
+    pub daemon: bool,
+
+    /// PID file path for daemon mode
+    #[arg(long, default_value = "/var/run/moat.pid")]
+    pub daemon_pid_file: String,
+
+    /// Working directory for daemon mode
+    #[arg(long, default_value = "/")]
+    pub daemon_working_dir: String,
+
+    /// Stdout log file for daemon mode
+    #[arg(long, default_value = "/var/log/moat.out")]
+    pub daemon_stdout: String,
+
+    /// Stderr log file for daemon mode
+    #[arg(long, default_value = "/var/log/moat.err")]
+    pub daemon_stderr: String,
+
+    /// User to run daemon as
+    #[arg(long)]
+    pub daemon_user: Option<String>,
+
+    /// Group to run daemon as
+    #[arg(long)]
+    pub daemon_group: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -702,3 +782,28 @@ fn default_tcp_fingerprint_enable_fingerprint_events() -> bool { true }
 fn default_tcp_fingerprint_events_interval() -> u64 { 30 }
 fn default_tcp_fingerprint_min_packet_count() -> u32 { 3 }
 fn default_tcp_fingerprint_min_connection_duration() -> u64 { 1 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaemonConfig {
+    #[serde(default = "default_daemon_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_daemon_pid_file")]
+    pub pid_file: String,
+    #[serde(default = "default_daemon_working_directory")]
+    pub working_directory: String,
+    #[serde(default = "default_daemon_stdout")]
+    pub stdout: String,
+    #[serde(default = "default_daemon_stderr")]
+    pub stderr: String,
+    pub user: Option<String>,
+    pub group: Option<String>,
+    #[serde(default = "default_daemon_chown_pid_file")]
+    pub chown_pid_file: bool,
+}
+
+fn default_daemon_enabled() -> bool { false }
+fn default_daemon_pid_file() -> String { "/var/run/moat.pid".to_string() }
+fn default_daemon_working_directory() -> String { "/".to_string() }
+fn default_daemon_stdout() -> String { "/var/log/moat.out".to_string() }
+fn default_daemon_stderr() -> String { "/var/log/moat.err".to_string() }
+fn default_daemon_chown_pid_file() -> bool { true }
