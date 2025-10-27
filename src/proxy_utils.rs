@@ -7,6 +7,7 @@ use hyper::header::HOST;
 // Client and HttpConnector types are not referenced directly here
 
 use crate::http::ProxyContext;
+use crate::threat;
 
 pub type ProxyBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
@@ -94,6 +95,25 @@ pub async fn forward_to_upstream_with_body(
             hyper::header::HeaderName::from_static("x-forwarded-host"),
             host.clone(),
         );
+    }
+
+    // Add AX-Country and AX-ASN headers from threat intelligence
+    if let Ok(Some(waf_fields)) = threat::get_waf_fields(&peer_addr.ip().to_string()).await {
+        // Add AX-Country header
+        if let Ok(value) = HeaderValue::from_str(&waf_fields.ip_src_country) {
+            outbound.headers_mut().insert(
+                hyper::header::HeaderName::from_static("ax-country"),
+                value,
+            );
+        }
+
+        // Add AX-ASN header
+        if let Ok(value) = HeaderValue::from_str(&waf_fields.ip_src_asn.to_string()) {
+            outbound.headers_mut().insert(
+                hyper::header::HeaderName::from_static("ax-asn"),
+                value,
+            );
+        }
     }
 
     let response = ctx
