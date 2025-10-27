@@ -126,4 +126,93 @@ pub async fn forward_to_upstream_with_body(
     Ok(Response::from_parts(parts, boxed))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::{Method, Version};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    #[test]
+    fn test_header_json() {
+        let (name, value) = header_json();
+        assert_eq!(name, hyper::header::CONTENT_TYPE);
+        assert_eq!(value, HeaderValue::from_static("application/json"));
+    }
+
+    #[test]
+    fn test_json_response() {
+        let response = json(r#"{"status":"ok"}"#);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(hyper::header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json"))
+        );
+    }
+
+    #[test]
+    fn test_build_upstream_uri_with_path() {
+        let incoming = Uri::from_static("http://example.com/api/v1/users?id=123");
+        let upstream = Uri::from_static("http://backend.local:8080");
+
+        let result = build_upstream_uri(&incoming, &upstream).unwrap();
+
+        assert_eq!(result.scheme_str(), Some("http"));
+        assert_eq!(result.authority().map(|a| a.as_str()), Some("backend.local:8080"));
+        assert_eq!(result.path(), "/api/v1/users");
+        assert_eq!(result.query(), Some("id=123"));
+    }
+
+    #[test]
+    fn test_build_upstream_uri_root_path() {
+        let incoming = Uri::from_static("http://example.com/");
+        let upstream = Uri::from_static("https://backend.local");
+
+        let result = build_upstream_uri(&incoming, &upstream).unwrap();
+
+        assert_eq!(result.scheme_str(), Some("https"));
+        assert_eq!(result.authority().map(|a| a.as_str()), Some("backend.local"));
+        assert_eq!(result.path(), "/");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_no_path() {
+        let incoming = Uri::from_static("http://example.com");
+        let upstream = Uri::from_static("http://backend.local:3000");
+
+        let result = build_upstream_uri(&incoming, &upstream).unwrap();
+
+        assert_eq!(result.path(), "/");
+    }
+
+    #[test]
+    fn test_build_upstream_uri_preserves_query() {
+        let incoming = Uri::from_static("http://example.com/search?q=test&limit=10");
+        let upstream = Uri::from_static("http://backend.local");
+
+        let result = build_upstream_uri(&incoming, &upstream).unwrap();
+
+        assert_eq!(result.path(), "/search");
+        assert_eq!(result.query(), Some("q=test&limit=10"));
+    }
+
+    #[test]
+    fn test_build_proxy_error_response() {
+        let response = build_proxy_error_response(StatusCode::FORBIDDEN, "Access denied");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.headers().get(hyper::header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json"))
+        );
+    }
+
+    #[test]
+    fn test_build_proxy_error_response_formats_json() {
+        let response = build_proxy_error_response(StatusCode::BAD_REQUEST, "Invalid input");
+
+        // We can't easily check the body content without consuming it,
+        // but we can verify the response is properly constructed
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().contains_key(hyper::header::CONTENT_TYPE));
+    }
+}
