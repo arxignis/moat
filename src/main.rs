@@ -2,10 +2,12 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::str::FromStr;
 use std::net::SocketAddr;
+use std::fs::File;
 
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
+use daemonize::Daemonize;
 use http_body_util::Full;
 use hyper::Uri;
 use hyper::body::Bytes;
@@ -66,8 +68,7 @@ use crate::event_queue::start_batch_event_processor;
 use crate::authcheck::validate_api_key;
 use crate::http_client::init_global_client;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     install_ring_crypto_provider()?;
 
     let args = Args::parse();
@@ -86,13 +87,67 @@ async fn main() -> Result<()> {
     let config = Config::load_from_args(&args)
         .context("Failed to load configuration")?;
 
+    // Handle daemonization before starting tokio runtime
+    if config.daemon.enabled {
+        let stdout = File::create(&config.daemon.stdout)
+            .with_context(|| format!("Failed to create stdout file: {}", config.daemon.stdout))?;
+        let stderr = File::create(&config.daemon.stderr)
+            .with_context(|| format!("Failed to create stderr file: {}", config.daemon.stderr))?;
+
+        let mut daemonize = Daemonize::new()
+            .pid_file(&config.daemon.pid_file)
+            .chown_pid_file(config.daemon.chown_pid_file)
+            .working_directory(&config.daemon.working_directory)
+            .stdout(stdout)
+            .stderr(stderr);
+
+        if let Some(user) = &config.daemon.user {
+            daemonize = daemonize.user(user.as_str());
+        }
+
+        if let Some(group) = &config.daemon.group {
+            daemonize = daemonize.group(group.as_str());
+        }
+
+        match daemonize.start() {
+            Ok(_) => {
+                // We're now in the daemon process, continue with application startup
+            }
+            Err(e) => {
+                eprintln!("Failed to daemonize: {}", e);
+                return Err(anyhow::anyhow!("Daemonization failed: {}", e));
+            }
+        }
+    }
+
     // Initialize logger using CLI level
+    // Note: env_logger writes to stderr by default, which is standard practice
     {
         use env_logger::Env;
         let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
         builder.filter_level(args.log_level.to_level_filter());
         builder.format_timestamp_secs();
+
+        // In daemon mode, write to stdout instead of stderr for better log separation
+        if config.daemon.enabled {
+            builder.target(env_logger::Target::Stdout);
+        }
+
         builder.try_init().ok();
+    }
+
+    // Start the tokio runtime and run the async application
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(args, config))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn async_main(args: Args, config: Config) -> Result<()> {
+
+    if config.daemon.enabled {
+        log::info!("Running in daemon mode (PID file: {})", config.daemon.pid_file);
     }
 
     // Initialize global HTTP client with keepalive configuration

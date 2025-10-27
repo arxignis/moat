@@ -1584,7 +1584,7 @@ pub async fn proxy_http_service(
         }
 
         // Forward directly to upstream without threat intelligence or WAF checks
-        match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone(), peer_addr, tls_fingerprint.is_some()).await {
+        match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
             Ok(response) => {
                 // Capture response body for logging
                 let (response_parts, response_body) = response.into_parts();
@@ -2064,7 +2064,7 @@ pub async fn proxy_http_service(
         log::debug!("No content scanner found");
     }
 
-    match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone(), peer_addr, tls_fingerprint.is_some()).await {
+    match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone()).await {
         Ok(response) => {
             // Capture response body for logging
             let (response_parts, response_body) = response.into_parts();

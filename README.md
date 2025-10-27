@@ -261,6 +261,16 @@ export AX_CONTENT_SCAN_EXPRESSION="http.request.method eq \"POST\" or http.reque
 export AX_PROXY_PROTOCOL_ENABLED="true"
 export AX_PROXY_PROTOCOL_TIMEOUT="1000"
 
+# Daemon mode
+export AX_DAEMON_ENABLED="false"
+export AX_DAEMON_PID_FILE="/var/run/moat.pid"
+export AX_DAEMON_WORKING_DIRECTORY="/"
+export AX_DAEMON_STDOUT="/var/log/moat.out"
+export AX_DAEMON_STDERR="/var/log/moat.err"
+export AX_DAEMON_USER="nobody"
+export AX_DAEMON_GROUP="daemon"
+export AX_DAEMON_CHOWN_PID_FILE="true"
+
 # Logging
 export AX_LOGGING_LEVEL="info"
 
@@ -376,6 +386,16 @@ moat [OPTIONS]
 - `--proxy-protocol-enabled` - Enable PROXY protocol support for TCP connections
 - `--proxy-protocol-timeout <MILLISECONDS>` - PROXY protocol timeout in milliseconds (default: `1000`)
 
+### Daemon Mode Configuration
+
+- `--daemon`, `-d` - Run as daemon in background
+- `--daemon-pid-file <PATH>` - PID file path for daemon mode (default: `/var/run/moat.pid`)
+- `--daemon-working-dir <PATH>` - Working directory for daemon mode (default: `/`)
+- `--daemon-stdout <PATH>` - Stdout log file for daemon mode (default: `/var/log/moat.out`)
+- `--daemon-stderr <PATH>` - Stderr log file for daemon mode (default: `/var/log/moat.err`)
+- `--daemon-user <USER>` - User to run daemon as (optional, e.g., `nobody`)
+- `--daemon-group <GROUP>` - Group to run daemon as (optional, e.g., `daemon`)
+
 ### Logging Configuration
 
 - `--log-level <LEVEL>` - Log level: `error`, `warn`, `info`, `debug`, `trace` (default: `info`)
@@ -430,6 +450,22 @@ moat --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-ke
 #### With PROXY Protocol Support
 ```bash
 moat --iface eth0 --proxy-protocol-enabled --proxy-protocol-timeout 2000 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
+```
+
+#### Running as Daemon
+```bash
+# Run as daemon with default settings
+moat --daemon --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
+
+# Run as daemon with custom settings
+moat --daemon \
+  --daemon-pid-file /var/run/moat.pid \
+  --daemon-working-dir / \
+  --daemon-stdout /var/log/moat.out \
+  --daemon-stderr /var/log/moat.err \
+  --daemon-user nobody \
+  --daemon-group daemon \
+  --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
 ```
 
 #### Using Configuration File
@@ -514,6 +550,57 @@ Moat supports PROXY protocol for preserving client information:
 - **TCP PROXY protocol** - Preserves original client IP addresses through load balancers
 - **Configurable timeout** - Customizable timeout for PROXY protocol parsing
 - **Load balancer integration** - Works with HAProxy, AWS ALB, and other load balancers
+
+### Daemon Mode
+
+Moat supports running as a daemon (background service) with privilege dropping capabilities:
+
+#### Features
+- **Background execution** - Runs as a background daemon process
+- **PID file management** - Creates and manages PID files for process control
+- **Privilege dropping** - Can drop privileges to a specified user and group for security
+- **Output redirection** - Redirects stdout and stderr to log files
+- **Working directory** - Configurable working directory for the daemon
+- **Signal handling** - Proper signal handling for graceful shutdown
+
+#### Configuration
+
+**YAML Configuration:**
+```yaml
+daemon:
+  enabled: false                        # Enable daemon mode
+  pid_file: "/var/run/moat.pid"       # PID file path
+  working_directory: "/"               # Working directory
+  stdout: "/var/log/moat.out"         # Application logs (info, debug, warn, error)
+  stderr: "/var/log/moat.err"         # Panic messages and system errors
+  user: "nobody"                       # User to run as (optional)
+  group: "daemon"                      # Group to run as (optional)
+  chown_pid_file: true                # Change PID file ownership
+```
+
+**Command Line:**
+```bash
+moat --daemon \
+  --daemon-pid-file /var/run/moat.pid \
+  --daemon-working-dir / \
+  --daemon-stdout /var/log/moat.out \
+  --daemon-stderr /var/log/moat.err \
+  --daemon-user nobody \
+  --daemon-group daemon \
+  --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
+```
+
+**Environment Variables:**
+```bash
+export AX_DAEMON_ENABLED="true"
+export AX_DAEMON_PID_FILE="/var/run/moat.pid"
+export AX_DAEMON_WORKING_DIRECTORY="/"
+export AX_DAEMON_STDOUT="/var/log/moat.out"
+export AX_DAEMON_STDERR="/var/log/moat.err"
+export AX_DAEMON_USER="nobody"
+export AX_DAEMON_GROUP="daemon"
+export AX_DAEMON_CHOWN_PID_FILE="true"
+```
 
 ### Health Check Endpoints
 
