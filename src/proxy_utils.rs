@@ -131,8 +131,6 @@ pub async fn forward_to_upstream_with_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::{Method, Version};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn test_header_json() {
