@@ -55,6 +55,8 @@ pub async fn forward_to_upstream_with_body(
     req_parts: &hyper::http::request::Parts,
     body_bytes: bytes::Bytes,
     ctx: std::sync::Arc<ProxyContext>,
+    peer_addr: std::net::SocketAddr,
+    is_tls: bool,
 ) -> Result<Response<ProxyBody>> {
     let upstream_uri = build_upstream_uri(&req_parts.uri, &ctx.upstream)?;
     let mut builder = Request::builder()
@@ -62,21 +64,35 @@ pub async fn forward_to_upstream_with_body(
         .version(req_parts.version)
         .uri(upstream_uri.clone());
 
+    // Copy all headers from the original request, including Host
     for (name, value) in req_parts.headers.iter() {
-        if name != HOST {
-            builder = builder.header(name, value.clone());
-        }
+        builder = builder.header(name, value.clone());
     }
 
     let mut outbound = builder
         .body(Full::new(body_bytes))
         .map_err(|e| anyhow!("failed to build proxy request: {e}"))?;
 
-    if let Some(authority) = upstream_uri.authority() {
+    // Add X-Forwarded-For header with client IP
+    let client_ip = peer_addr.ip().to_string();
+    outbound.headers_mut().insert(
+        hyper::header::HeaderName::from_static("x-forwarded-for"),
+        HeaderValue::from_str(&client_ip)
+            .map_err(|e| anyhow!("invalid client IP for X-Forwarded-For: {e}"))?,
+    );
+
+    // Add X-Forwarded-Proto header based on TLS usage
+    let proto = if is_tls { "https" } else { "http" };
+    outbound.headers_mut().insert(
+        hyper::header::HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static(proto),
+    );
+
+    // Add X-Forwarded-Host header with original host
+    if let Some(host) = req_parts.headers.get(HOST) {
         outbound.headers_mut().insert(
-            HOST,
-            HeaderValue::from_str(authority.as_str())
-                .map_err(|e| anyhow!("invalid upstream authority: {e}"))?,
+            hyper::header::HeaderName::from_static("x-forwarded-host"),
+            host.clone(),
         );
     }
 
