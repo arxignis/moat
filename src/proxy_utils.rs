@@ -65,11 +65,8 @@ pub async fn forward_to_upstream_with_body(
         .version(req_parts.version)
         .uri(upstream_uri.clone());
 
-    // Copy all headers from the original request, including Host
     for (name, value) in req_parts.headers.iter() {
-        if name != HOST {
-            builder = builder.header(name, value.clone());
-        }
+        builder = builder.header(name, value.clone());
     }
 
     let mut outbound = builder
