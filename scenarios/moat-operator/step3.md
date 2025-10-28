@@ -8,7 +8,9 @@ moat:
   network:
     disableXdp: true
   arxignis:
-    apiKey: "killercoda-demo-key"
+    apiKey: "INSERT API KEY HERE"
+  redis:
+    url: ""
   contentScanning:
     scanExpression: 'http.request.method eq "POST" or http.request.method eq "PUT"'
 image:

@@ -46,26 +46,30 @@ kubectl -n moat-system set resources deploy/moat-operator \
   --limits=cpu=200m,memory=128Mi
 kubectl -n moat-system rollout status deployment/moat-operator
 kubectl -n moat-system get pods
-# optional: watch progress, then Ctrl+C once Running
-kubectl -n moat-system get pods -w
 ```
 
-2. Capture the current config hash, then edit the ConfigMap to trigger a reconcile.
+2. Change the configmap to another valid config.
 
 ```bash
+cd ~/workspace/moat/helm
+helm template moat . \
+  --namespace moat \
+  --show-only templates/configmap.yaml \
+  -f /tmp/moat-values.yaml \
+  | kubectl apply -f -
+
 kubectl -n moat describe deployment moat | grep moat.arxignis.com/config-hash
 
-kubectl -n moat get configmap moat -o jsonpath='{.data.config.yaml}' > /tmp/moat-config.yaml
-printf '\n# touched %s\n' "$(date --utc)" >> /tmp/moat-config.yaml
+kubectl -n moat get configmap moat -o jsonpath='{.data.config\.yaml}' > /tmp/moat-config.yaml
+if grep -q 'level: "info"' /tmp/moat-config.yaml; then
+  sed -i '0,/level: "info"/s//level: "debug"/' /tmp/moat-config.yaml
+else
+  sed -i '0,/level: "debug"/s//level: "info"/' /tmp/moat-config.yaml
+fi
+printf '\n# touched %s\n' "$(date --utc +'%Y-%m-%dT%H:%M:%SZ')" >> /tmp/moat-config.yaml
 kubectl -n moat create configmap moat \
   --from-file=config.yaml=/tmp/moat-config.yaml \
   -o yaml --dry-run=client | kubectl apply -f -
+kubectl -n moat get pods -o wide
 ```
 
-3. Verify the rollout and peek at the operator logs (run the log command in another terminal with `--follow`).
-
-```bash
-kubectl -n moat rollout status deployment/moat
-kubectl -n moat describe deployment moat | grep moat.arxignis.com/config-hash
-kubectl -n moat-system logs deployment/moat-operator --tail=20
-```

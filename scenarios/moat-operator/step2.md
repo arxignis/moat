@@ -11,3 +11,4 @@ kind create cluster --name moat || true
 kubectl config use-context kind-moat
 kind load docker-image moat-operator:local --name moat
 ```
+
