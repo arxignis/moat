@@ -1,4 +1,4 @@
-﻿isntall the tooling 
+﻿install the tooling 
 ```bash
 # Base packages
 apt-get update -qq
@@ -12,7 +12,7 @@ tar -C /usr/local -xzf /tmp/go.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin:/root/go/bin' >> ~/.bashrc
 export PATH=$PATH:/usr/local/go/bin:/root/go/bin
 
-# kind + Helm + kubectl (if not already present)
+# kind + Helm + kubectl 
 curl -sSL https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64 -o /usr/local/bin/kind
 chmod +x /usr/local/bin/kind
 curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null

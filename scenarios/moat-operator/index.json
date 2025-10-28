@@ -6,7 +6,7 @@
       "text": "intro.md"
     },
     "steps": [
-      { "title": "Check the Toolchain", "text": "step1.md" },
+      { "title": "Toolchain", "text": "step1.md" },
       { "title": "Build & Load the Operator", "text": "step2.md" },
       { "title": "Build Moat and Install the Chart", "text": "step3.md" },
       { "title": "Deploy Operator & Test Rollouts", "text": "step4.md" }
