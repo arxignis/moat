@@ -28,7 +28,7 @@ spec:
       serviceAccountName: moat-operator
       containers:
         - name: manager
-          image: ghcr.io/example/moat-operator:latest
+          image: moat-operator:local
           imagePullPolicy: IfNotPresent
           args:
             - "--leader-elect"
