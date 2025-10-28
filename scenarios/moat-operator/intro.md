@@ -1,0 +1,1 @@
+You'll bootstrap a kind cluster, install the Moat Helm chart, build the Go-based Kubernetes operator that watches its ConfigMap, and prove the operator forces pod restarts whenever the configuration changes.
