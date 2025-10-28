@@ -16,7 +16,7 @@
     }
   },
   "backend": {
-    "imageid": "ubuntu2204"
+    "imageid": "kubernetes"
   },
   "environment": {
     "uilayout": "terminal"
