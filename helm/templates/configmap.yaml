@@ -1,4 +1,4 @@
-apiVersion: v1
+﻿apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "moat.fullname" . }}
@@ -19,13 +19,13 @@ data:
       http_addr: "{{ .Values.moat.server.httpAddr }}"
 
       # Additional HTTP bind addresses (overrides http_addr if set)
-      http_bind: {{ toYaml .Values.moat.server.httpBind | nindent 6 }}
+      http_bind: {{ .Values.moat.server.httpBind | toJson }}
 
       # HTTPS reverse-proxy bind address
       tls_addr: "{{ .Values.moat.server.tlsAddr }}"
 
       # Additional HTTPS bind addresses (overrides tls_addr if set)
-      tls_bind: {{ toYaml .Values.moat.server.tlsBind | nindent 6 }}
+      tls_bind: {{ .Values.moat.server.tlsBind | toJson }}
 
       # Upstream origin URL (required)
       upstream: "{{ .Values.moat.server.upstream }}"
@@ -46,9 +46,9 @@ data:
         # Health check server bind address (separate from main proxy)
         port: "{{ .Values.moat.server.healthCheck.port }}"
         # Allowed HTTP methods for health checks
-        methods: {{ toYaml .Values.moat.server.healthCheck.methods | nindent 8 }}
+        methods: {{ .Values.moat.server.healthCheck.methods | toJson }}
         # Allowed CIDR blocks (empty means allow all IPs)
-        allowed_cidrs: {{ toYaml .Values.moat.server.healthCheck.allowedCidrs | nindent 8 }}
+        allowed_cidrs: {{ .Values.moat.server.healthCheck.allowedCidrs | toJson }}
 
     # TLS Configuration
     tls:
@@ -67,10 +67,10 @@ data:
     # ACME Configuration
     acme:
       # Domains for ACME certificate issuance and domain whitelist
-      domains: {{ toYaml .Values.moat.acme.domains | nindent 6 }}
+      domains: {{ .Values.moat.acme.domains | toJson }}
 
       # ACME contact addresses (mailto: optional)
-      contacts: {{ toYaml .Values.moat.acme.contacts | nindent 6 }}
+      contacts: {{ .Values.moat.acme.contacts | toJson }}
 
       # Use Let's Encrypt production directory instead of staging
       use_prod: {{ .Values.moat.acme.useProd }}
@@ -98,7 +98,7 @@ data:
       iface: "{{ .Values.moat.network.iface }}"
 
       # Additional network interfaces for XDP attach (overrides iface if set)
-      ifaces: {{ toYaml .Values.moat.network.ifaces | nindent 6 }}
+      ifaces: {{ .Values.moat.network.ifaces | toJson }}
 
       # Disable XDP packet filtering (run without BPF/XDP)
       disable_xdp: {{ .Values.moat.network.disableXdp }}
@@ -140,16 +140,16 @@ data:
       clamav_server: "{{ .Values.moat.contentScanning.clamavServer }}"
 
       # Maximum file size to scan in bytes (10MB)
-      max_file_size: {{ .Values.moat.contentScanning.maxFileSize }}
+      max_file_size: {{ int .Values.moat.contentScanning.maxFileSize }}
 
       # Content types to scan (empty means scan all)
-      scan_content_types: {{ toYaml .Values.moat.contentScanning.scanContentTypes | nindent 6 }}
+      scan_content_types: {{ .Values.moat.contentScanning.scanContentTypes | toJson }}
 
       # Skip scanning for specific file extensions
-      skip_extensions: {{ toYaml .Values.moat.contentScanning.skipExtensions | nindent 6 }}
+      skip_extensions: {{ .Values.moat.contentScanning.skipExtensions | toJson }}
 
       # Wirefilter expression to determine when to scan content
-      scan_expression: "{{ .Values.moat.contentScanning.scanExpression }}"
+      scan_expression: {{ .Values.moat.contentScanning.scanExpression | quote }}
 
     # Logging Configuration
     logging:
