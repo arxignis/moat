@@ -25,7 +25,8 @@ Moat is a high-performance reverse proxy and firewall built with Rust, featuring
 - **Dynamic access rules** with automatic updates from Arxignis API
 - **BPF statistics collection** for packet processing and dropped IP monitoring
 - **TCP fingerprinting** for behavioral analysis and threat detection
-- **TLS fingerprinting** with JA4/JA4L support for client identification
+- **TLS fingerprinting** with JA4 support for client identification
+- **JA4+ fingerprinting** with complete suite: JA4H (HTTP headers), JA4T (TCP options), JA4L (latency), JA4S (TLS server), and JA4X (X.509 certificates)
 - **Automatic TLS certificate management** with ACME/Let's Encrypt integration
 - **Threat intelligence integration** with Arxignis API for real-time protection
 - **CAPTCHA protection** with support for hCaptcha, reCAPTCHA, and Cloudflare Turnstile
@@ -485,7 +486,13 @@ Moat integrates with Arxignis API to provide real-time threat intelligence:
 - **Threat context** - Rich context about detected threats
 - **Caching** - Redis-backed caching for improved performance
 - **Dynamic access rules** - Automatic updates of access rules (allow/block lists) from Arxignis API
-- **JA4/JA4L fingerprinting** - TLS client fingerprinting with JA4, JA4 raw, and JA4L support
+- **JA4/JA4+ fingerprinting** - Complete JA4+ suite implementation:
+  - **JA4**: TLS client fingerprinting from ClientHello
+  - **JA4H**: HTTP header fingerprinting from request headers
+  - **JA4T**: TCP fingerprinting from SYN packet options
+  - **JA4L**: Latency fingerprinting from packet timing
+  - **JA4S**: TLS server fingerprinting from ServerHello
+  - **JA4X**: X.509 certificate fingerprinting
 
 ### Dynamic Access Rules
 
@@ -737,7 +744,13 @@ Comprehensive TLS support with multiple modes:
 - **Access Rules Engine** - Dynamic IP allow/block lists with periodic updates from Arxignis API
 - **BPF Statistics Collector** - Tracks packet processing, drops, and banned IP hits at kernel level
 - **TCP Fingerprint Collector** - Extracts and analyzes TCP SYN fingerprints for behavioral analysis
-- **TLS Fingerprint Engine** - JA4/JA4L TLS client fingerprinting for connection analysis
+- **Fingerprint Engine** - Complete JA4+ suite:
+  - **JA4** TLS fingerprinting from ClientHello
+  - **JA4H** HTTP header fingerprinting
+  - **JA4T** TCP options fingerprinting
+  - **JA4L** Latency measurement framework
+  - **JA4S** TLS server response fingerprinting
+  - **JA4X** X.509 certificate fingerprinting
 - **CAPTCHA Engine** - Validates CAPTCHA responses from multiple providers
 - **Content Scanner** - ClamAV integration for malware detection
 - **PROXY Protocol Handler** - Preserves client IP addresses through load balancers
@@ -784,7 +797,13 @@ Comprehensive TLS support with multiple modes:
 - Access rules are automatically updated from Arxignis API at regular intervals
 - BPF statistics track packet processing metrics and dropped IPs at kernel level
 - TCP fingerprinting collects SYN packet characteristics for behavioral analysis
-- TLS fingerprinting generates JA4 and JA4L fingerprints from ClientHello messages
+- Fingerprinting supports the complete JA4+ suite:
+  - JA4 generates fingerprints from TLS ClientHello messages
+  - JA4H generates fingerprints from HTTP request headers
+  - JA4T generates fingerprints from TCP SYN packet options
+  - JA4L measures packet latencies for network distance estimation
+  - JA4S generates fingerprints from TLS ServerHello responses
+  - JA4X generates fingerprints from X.509 certificates
 - CAPTCHA tokens are JWT-signed for security and can be cached for performance
 - Threat intelligence data is cached in Redis to minimize API calls
 - Multiple network interfaces can be configured for high availability setups

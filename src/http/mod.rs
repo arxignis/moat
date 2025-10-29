@@ -456,6 +456,7 @@ pub struct ProxyContext {
     pub tls_only: bool,
     pub proxy_protocol_enabled: bool,
     pub proxy_protocol_timeout_ms: u64,
+    pub tcp_fingerprint_collector: crate::tcp_fingerprint::TcpFingerprintCollector,
 }
 
 #[derive(Clone)]
@@ -1454,6 +1455,9 @@ pub async fn proxy_http_service(
 ) -> Result<Response<ProxyBody>, Infallible> {
     let peer_addr = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
+    // Lookup TCP fingerprint data for this connection
+    let tcp_fingerprint_data = ctx.tcp_fingerprint_collector.lookup_fingerprint(peer_addr.ip(), peer_addr.port());
+
     log::info!("Processing request from {}: {} {}", peer_addr, req.method(), req.uri());
 
     // Extract request details for logging before consuming the request
@@ -1498,6 +1502,7 @@ pub async fn proxy_http_service(
                 peer_addr,
                 dst_addr,
                 tls_fingerprint,
+                tcp_fingerprint_data.as_ref(),
                 ResponseData::for_blocked_request("tls_required", 426, None, None),
                 None,
                 None,
@@ -1559,6 +1564,7 @@ pub async fn proxy_http_service(
                                 peer_addr,
                                 dst_addr,
                                 tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                                 ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error, None, threat_data.as_ref()),
                                 None,
                                 threat_data.as_ref(),
@@ -1618,6 +1624,7 @@ pub async fn proxy_http_service(
                     peer_addr,
                     dst_addr,
                     tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                     response_data,
                     None,
                     threat_data.as_ref(),
@@ -1770,6 +1777,7 @@ pub async fn proxy_http_service(
                 peer_addr,
                 dst_addr,
                 tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                 ResponseData::for_blocked_request("captcha_challenge_required", 403, None, threat_data.as_ref()),
                 None,
                 threat_data.as_ref(),
@@ -1826,6 +1834,7 @@ pub async fn proxy_http_service(
                             peer_addr,
                             dst_addr,
                             tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                             ResponseData::for_blocked_request("request_blocked_by_filter", 403, Some(waf_result.clone()), threat_data.as_ref()),
                             Some(&waf_result),
                             threat_data.as_ref(),
@@ -1886,6 +1895,7 @@ pub async fn proxy_http_service(
                                 peer_addr,
                                 dst_addr,
                                 tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                                 response_data,
                                 Some(&waf_result),
                                 threat_data.as_ref(),
@@ -1957,6 +1967,7 @@ pub async fn proxy_http_service(
                             peer_addr,
                             dst_addr,
                             tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                             response_data,
                             None,
                             threat_data.as_ref(),
@@ -2036,6 +2047,7 @@ pub async fn proxy_http_service(
                                 peer_addr,
                                 dst_addr,
                                 tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                                 ResponseData::for_malware_blocked_request(scan_result.signature, scan_result.error, None, threat_data.as_ref()),
                                 None,
                                 threat_data.as_ref(),
@@ -2107,6 +2119,7 @@ pub async fn proxy_http_service(
                     peer_addr,
                     dst_addr,
                     tls_fingerprint,
+                                tcp_fingerprint_data.as_ref(),
                     response_data,
                     waf_result.as_ref(),
                     threat_data.as_ref(),
@@ -2698,11 +2711,12 @@ mod tests {
             peer_addr,
             dst_addr,
             None,
+            None,
             ResponseData::for_blocked_request("test_block_reason", 403, None, None),
             None,
-                                None,
-                                server_cert_info.as_ref(),
-                            )
+            None,
+            server_cert_info.as_ref(),
+        )
         .await;
 
         // Should succeed
@@ -2741,11 +2755,12 @@ mod tests {
             peer_addr,
             dst_addr,
             None,
+            None,
             ResponseData::for_blocked_request("test_block_reason", 403, None, None),
             None,
-                                None,
-                                server_cert_info.as_ref(),
-                            )
+            None,
+            server_cert_info.as_ref(),
+        )
         .await;
 
         // Should succeed

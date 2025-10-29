@@ -41,7 +41,13 @@ struct lpm_key_v6 {
 
 // TCP fingerprinting structures
 struct tcp_fingerprint_key {
-    __be32 src_ip;      // Source IP address
+    __be32 src_ip;      // Source IP address (IPv4)
+    __be16 src_port;    // Source port
+    __u8 fingerprint[14]; // TCP fingerprint string (null-terminated)
+};
+
+struct tcp_fingerprint_key_v6 {
+    __u8 src_ip[16];    // Source IP address (IPv6)
     __be16 src_port;    // Source port
     __u8 fingerprint[14]; // TCP fingerprint string (null-terminated)
 };
@@ -156,6 +162,13 @@ struct {
 	__type(key, struct tcp_fingerprint_key);
 	__type(value, struct tcp_fingerprint_data);
 } tcp_fingerprints SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, TCP_FINGERPRINT_MAX_ENTRIES);
+	__type(key, struct tcp_fingerprint_key_v6);
+	__type(value, struct tcp_fingerprint_data);
+} tcp_fingerprints_v6 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -308,7 +321,8 @@ static void increment_unique_fingerprints(void)
 static int parse_tcp_mss_wscale(struct tcphdr *tcp, void *data_end, __u16 *mss_out, __u8 *wscale_out)
 {
     __u8 *ptr = (__u8 *)tcp + sizeof(struct tcphdr);
-    __u8 *end = ptr + (tcp->doff * 4) - sizeof(struct tcphdr);
+    __u32 options_len = (tcp->doff * 4) - sizeof(struct tcphdr);
+    __u8 *end = ptr + options_len;
 
     // Ensure we don't exceed packet bounds
     if (end > (__u8 *)data_end) {
@@ -320,9 +334,9 @@ static int parse_tcp_mss_wscale(struct tcphdr *tcp, void *data_end, __u16 *mss_o
         return 0;
     }
 
-    // Parse options - limit to 10 iterations
+    // Parse options - limit to 20 iterations to handle NOPs
     #pragma unroll
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 20; i++) {
         if (ptr >= end || ptr >= (__u8 *)data_end) break;
         if (ptr + 1 > (__u8 *)data_end) break;
 
@@ -407,10 +421,23 @@ static void record_tcp_fingerprint(__be32 src_ip, __be16 src_port,
     // Check if fingerprint already exists
     struct tcp_fingerprint_data *existing = bpf_map_lookup_elem(&tcp_fingerprints, &key);
     if (existing) {
-        // Update existing entry
-        existing->last_seen = timestamp;
-        existing->packet_count++;
-        bpf_map_update_elem(&tcp_fingerprints, &key, existing, BPF_ANY);
+        // Update existing entry - must copy to local variable first
+        data.first_seen = existing->first_seen;
+        data.last_seen = timestamp;
+        data.packet_count = existing->packet_count + 1;
+        data.ttl = existing->ttl;
+        data.mss = existing->mss;
+        data.window_size = existing->window_size;
+        data.window_scale = existing->window_scale;
+        data.options_len = existing->options_len;
+
+        // Copy options array
+        #pragma unroll
+        for (int i = 0; i < TCP_FP_MAX_OPTION_LEN; i++) {
+            data.options[i] = existing->options[i];
+        }
+
+        bpf_map_update_elem(&tcp_fingerprints, &key, &data, BPF_ANY);
     } else {
         // Create new entry
         data.first_seen = timestamp;
@@ -505,12 +532,10 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
             if (iph->protocol == IPPROTO_TCP) {
                 struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
                 if (tcph) {
-                    // Perform TCP fingerprinting on all TCP packets (not just SYN)
-                    // This helps reduce noise by tracking full connection patterns
-                    if (tcph->syn || tcph->ack || tcph->fin || tcph->rst) {
-                        if (tcph->syn && !tcph->ack) {
-                            increment_tcp_syn_stats();
-                        }
+                    // Perform TCP fingerprinting ONLY on SYN packets (not SYN-ACK)
+                    // This ensures we capture the initial handshake with MSS/WSCALE
+                    if (tcph->syn && !tcph->ack) {
+                        increment_tcp_syn_stats();
                         record_tcp_fingerprint(iph->saddr, tcph->source, tcph, data_end, iph->ttl);
                     }
 
@@ -527,22 +552,13 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
             return XDP_PASS;
         }
 
-        // Perform TCP fingerprinting on all TCP packets
+        // Perform TCP fingerprinting ONLY on SYN packets
         if (iph->protocol == IPPROTO_TCP) {
-            // Debug: Count all TCP packets
-            __u32 *tcp_count = bpf_map_lookup_elem(&tcp_syn_stats, &zero);
-            if (tcp_count) {
-                __sync_fetch_and_add(tcp_count, 1);
-            }
-
             struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
             if (tcph) {
-                // Perform TCP fingerprinting on all TCP packets (not just SYN)
-                // This helps reduce noise by tracking full connection patterns
-                if (tcph->syn || tcph->ack || tcph->fin || tcph->rst) {
-                    if (tcph->syn && !tcph->ack) {
-                        increment_tcp_syn_stats();
-                    }
+                // Only fingerprint SYN packets (not SYN-ACK) to capture MSS/WSCALE
+                if (tcph->syn && !tcph->ack) {
+                    increment_tcp_syn_stats();
                     record_tcp_fingerprint(iph->saddr, tcph->source, tcph, data_end, iph->ttl);
                 }
             }
@@ -629,9 +645,9 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
         if (ip6h->nexthdr == IPPROTO_TCP) {
             struct tcphdr *tcph = parse_and_advance(&cursor, data_end, sizeof(*tcph));
             if (tcph) {
-                // Perform TCP fingerprinting on all TCP packets (not just SYN)
-                // This helps reduce noise by tracking full connection patterns
-                if (tcph->syn || tcph->ack || tcph->fin || tcph->rst) {
+                // Perform TCP fingerprinting ONLY on SYN packets (not SYN-ACK)
+                // This ensures we capture the initial handshake with MSS/WSCALE
+                if (tcph->syn && !tcph->ack) {
                     // Skip IPv6 localhost traffic to reduce noise
                     // Check for ::1 (IPv6 localhost)
                     __u32 localhost_v6[4] = {0, 0, 0, bpf_htonl(1)};
@@ -642,25 +658,38 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                     // Extract TTL from IPv6 hop limit
                     __u16 ttl = ip6h->hop_limit;
 
-                    // Create IPv6 fingerprint key
-                    struct tcp_fingerprint_key key = {0};
+                    // Create IPv6 fingerprint key with full 128-bit address
+                    struct tcp_fingerprint_key_v6 key = {0};
                     struct tcp_fingerprint_data data = {0};
                     __u64 timestamp = bpf_ktime_get_ns();
 
-                    // Use IPv6 address as source IP (store in IPv4 field for compatibility)
-                    __builtin_memcpy(&key.src_ip, &ip6h->saddr, 4); // Use first 4 bytes
+                    // Copy full IPv6 address (16 bytes)
+                    __builtin_memcpy(&key.src_ip, &ip6h->saddr, 16);
                     key.src_port = tcph->source;
 
                     // Generate fingerprint
                     generate_tcp_fingerprint(tcph, data_end, ttl, key.fingerprint);
 
-                    // Check if fingerprint already exists
-                    struct tcp_fingerprint_data *existing = bpf_map_lookup_elem(&tcp_fingerprints, &key);
+                    // Check if fingerprint already exists in IPv6 map
+                    struct tcp_fingerprint_data *existing = bpf_map_lookup_elem(&tcp_fingerprints_v6, &key);
                     if (existing) {
-                        // Update existing entry
-                        existing->last_seen = timestamp;
-                        existing->packet_count++;
-                        bpf_map_update_elem(&tcp_fingerprints, &key, existing, BPF_ANY);
+                        // Update existing entry - must copy to local variable first
+                        data.first_seen = existing->first_seen;
+                        data.last_seen = timestamp;
+                        data.packet_count = existing->packet_count + 1;
+                        data.ttl = existing->ttl;
+                        data.mss = existing->mss;
+                        data.window_size = existing->window_size;
+                        data.window_scale = existing->window_scale;
+                        data.options_len = existing->options_len;
+
+                        // Copy options array
+                        #pragma unroll
+                        for (int i = 0; i < TCP_FP_MAX_OPTION_LEN; i++) {
+                            data.options[i] = existing->options[i];
+                        }
+
+                        bpf_map_update_elem(&tcp_fingerprints_v6, &key, &data, BPF_ANY);
                     } else {
                         // Create new entry
                         data.first_seen = timestamp;
@@ -672,7 +701,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         // Extract MSS and window scale from options
                         parse_tcp_mss_wscale(tcph, data_end, &data.mss, &data.window_scale);
 
-                        bpf_map_update_elem(&tcp_fingerprints, &key, &data, BPF_ANY);
+                        bpf_map_update_elem(&tcp_fingerprints_v6, &key, &data, BPF_ANY);
                         increment_unique_fingerprints();
 
                         // Log new IPv6 TCP fingerprint

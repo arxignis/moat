@@ -240,6 +240,133 @@ impl TcpFingerprintCollector {
         self.enabled
     }
 
+    /// Lookup TCP fingerprint for a specific source IP and port
+    pub fn lookup_fingerprint(&self, src_ip: std::net::IpAddr, src_port: u16) -> Option<TcpFingerprintData> {
+        if !self.enabled || self.skels.is_empty() {
+            return None;
+        }
+
+        match src_ip {
+            std::net::IpAddr::V4(ip) => {
+                let octets = ip.octets();
+                let src_ip_be = u32::from_be_bytes(octets);
+
+                // Try to find fingerprint in any skeleton's IPv4 map
+                for skel in &self.skels {
+                    if let Ok(iter) = skel.maps.tcp_fingerprints.lookup_batch(1000, libbpf_rs::MapFlags::ANY, libbpf_rs::MapFlags::ANY) {
+                        for (key_bytes, value_bytes) in iter {
+                            if key_bytes.len() >= 6 && value_bytes.len() >= 32 {
+                                // Parse key structure: src_ip (4 bytes BE), src_port (2 bytes BE), fingerprint (14 bytes)
+                                // BPF stores IP as __be32 (big-endian), so read as big-endian
+                                let key_ip = u32::from_be_bytes([key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3]]);
+                                let key_port = u16::from_be_bytes([key_bytes[4], key_bytes[5]]);
+
+                                if key_ip == src_ip_be && key_port == src_port {
+                                    // Parse value structure
+                                    if value_bytes.len() >= 32 {
+                                        let first_seen = u64::from_ne_bytes([
+                                            value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3],
+                                            value_bytes[4], value_bytes[5], value_bytes[6], value_bytes[7]
+                                        ]);
+                                        let last_seen = u64::from_ne_bytes([
+                                            value_bytes[8], value_bytes[9], value_bytes[10], value_bytes[11],
+                                            value_bytes[12], value_bytes[13], value_bytes[14], value_bytes[15]
+                                        ]);
+                                        let packet_count = u32::from_ne_bytes([
+                                            value_bytes[16], value_bytes[17], value_bytes[18], value_bytes[19]
+                                        ]);
+                                        let ttl = u16::from_ne_bytes([value_bytes[20], value_bytes[21]]);
+                                        let mss = u16::from_ne_bytes([value_bytes[22], value_bytes[23]]);
+                                        let window_size = u16::from_ne_bytes([value_bytes[24], value_bytes[25]]);
+                                        let window_scale = value_bytes[26];
+                                        let options_len = value_bytes[27];
+
+                                        let options_size = options_len.min(40) as usize;
+                                        let mut options = vec![0u8; options_size];
+                                        if value_bytes.len() >= 28 + options_size {
+                                            options.copy_from_slice(&value_bytes[28..28 + options_size]);
+                                        }
+
+                                        return Some(TcpFingerprintData {
+                                            first_seen: DateTime::from_timestamp_nanos(first_seen as i64),
+                                            last_seen: DateTime::from_timestamp_nanos(last_seen as i64),
+                                            packet_count,
+                                            ttl,
+                                            mss,
+                                            window_size,
+                                            window_scale,
+                                            options_len,
+                                            options,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            std::net::IpAddr::V6(ip) => {
+                let octets = ip.octets();
+
+                // Try to find fingerprint in any skeleton's IPv6 map
+                for skel in &self.skels {
+                    if let Ok(iter) = skel.maps.tcp_fingerprints_v6.lookup_batch(1000, libbpf_rs::MapFlags::ANY, libbpf_rs::MapFlags::ANY) {
+                        for (key_bytes, value_bytes) in iter {
+                            if key_bytes.len() >= 18 && value_bytes.len() >= 32 {
+                                // Parse key structure: src_ip (16 bytes), src_port (2 bytes BE), fingerprint (14 bytes)
+                                let mut key_ip = [0u8; 16];
+                                key_ip.copy_from_slice(&key_bytes[0..16]);
+                                let key_port = u16::from_be_bytes([key_bytes[16], key_bytes[17]]);
+
+                                if key_ip == octets && key_port == src_port {
+                                    // Parse value structure (same as IPv4)
+                                    if value_bytes.len() >= 32 {
+                                        let first_seen = u64::from_ne_bytes([
+                                            value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3],
+                                            value_bytes[4], value_bytes[5], value_bytes[6], value_bytes[7]
+                                        ]);
+                                        let last_seen = u64::from_ne_bytes([
+                                            value_bytes[8], value_bytes[9], value_bytes[10], value_bytes[11],
+                                            value_bytes[12], value_bytes[13], value_bytes[14], value_bytes[15]
+                                        ]);
+                                        let packet_count = u32::from_ne_bytes([
+                                            value_bytes[16], value_bytes[17], value_bytes[18], value_bytes[19]
+                                        ]);
+                                        let ttl = u16::from_ne_bytes([value_bytes[20], value_bytes[21]]);
+                                        let mss = u16::from_ne_bytes([value_bytes[22], value_bytes[23]]);
+                                        let window_size = u16::from_ne_bytes([value_bytes[24], value_bytes[25]]);
+                                        let window_scale = value_bytes[26];
+                                        let options_len = value_bytes[27];
+
+                                        let options_size = options_len.min(40) as usize;
+                                        let mut options = vec![0u8; options_size];
+                                        if value_bytes.len() >= 28 + options_size {
+                                            options.copy_from_slice(&value_bytes[28..28 + options_size]);
+                                        }
+
+                                        return Some(TcpFingerprintData {
+                                            first_seen: DateTime::from_timestamp_nanos(first_seen as i64),
+                                            last_seen: DateTime::from_timestamp_nanos(last_seen as i64),
+                                            packet_count,
+                                            ttl,
+                                            mss,
+                                            window_size,
+                                            window_scale,
+                                            options_len,
+                                            options,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Collect TCP fingerprint statistics from all BPF skeletons
     pub fn collect_fingerprint_stats(&self) -> Result<Vec<TcpFingerprintStats>, Box<dyn std::error::Error>> {
         if !self.enabled {
@@ -404,14 +531,14 @@ impl TcpFingerprintCollector {
 
     /// Collect TCP fingerprints from BPF map
     fn collect_tcp_fingerprints(&self, skel: &FilterSkel, fingerprints: &mut Vec<TcpFingerprintEntry>) -> Result<(), Box<dyn std::error::Error>> {
-        log::debug!("Collecting TCP fingerprints from BPF map");
+        log::debug!("Collecting TCP fingerprints from BPF map (IPv4)");
 
         match skel.maps.tcp_fingerprints.lookup_batch(1000, libbpf_rs::MapFlags::ANY, libbpf_rs::MapFlags::ANY) {
             Ok(batch_iter) => {
                 let mut count = 0;
                 let mut skipped_count = 0;
                 for (key_bytes, value_bytes) in batch_iter {
-                    log::debug!("Processing fingerprint entry: key_len={}, value_len={}", key_bytes.len(), value_bytes.len());
+                    log::debug!("Processing IPv4 fingerprint entry: key_len={}, value_len={}", key_bytes.len(), value_bytes.len());
 
                     if key_bytes.len() >= 20 && value_bytes.len() >= 72 { // Key: 4+2+14, Value: 8+8+4+2+2+2+1+1+4(padding)+40
                         let src_ip = Ipv4Addr::from([key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3]]);
@@ -475,10 +602,95 @@ impl TcpFingerprintCollector {
                         skipped_count += 1;
                     }
                 }
-                log::debug!("Found {} TCP fingerprints, skipped {} entries", count, skipped_count);
+                log::debug!("Found {} IPv4 TCP fingerprints, skipped {} entries", count, skipped_count);
             }
             Err(e) => {
-                log::warn!("Failed to read TCP fingerprints: {}", e);
+                log::warn!("Failed to read IPv4 TCP fingerprints: {}", e);
+            }
+        }
+
+        // Collect IPv6 fingerprints
+        log::debug!("Collecting TCP fingerprints from BPF map (IPv6)");
+
+        match skel.maps.tcp_fingerprints_v6.lookup_batch(1000, libbpf_rs::MapFlags::ANY, libbpf_rs::MapFlags::ANY) {
+            Ok(batch_iter) => {
+                let mut count = 0;
+                let mut skipped_count = 0;
+                for (key_bytes, value_bytes) in batch_iter {
+                    log::debug!("Processing IPv6 fingerprint entry: key_len={}, value_len={}", key_bytes.len(), value_bytes.len());
+
+                    if key_bytes.len() >= 32 && value_bytes.len() >= 72 { // Key: 16+2+14, Value: same as IPv4
+                        // Parse IPv6 address (16 bytes)
+                        let src_ip: std::net::Ipv6Addr = std::net::Ipv6Addr::from([
+                            key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3],
+                            key_bytes[4], key_bytes[5], key_bytes[6], key_bytes[7],
+                            key_bytes[8], key_bytes[9], key_bytes[10], key_bytes[11],
+                            key_bytes[12], key_bytes[13], key_bytes[14], key_bytes[15]
+                        ]);
+                        let src_port = u16::from_le_bytes([key_bytes[16], key_bytes[17]]);
+                        let fingerprint = String::from_utf8_lossy(&key_bytes[18..32]).trim_end_matches('\0').to_string();
+
+                        // Parse fingerprint data (same structure as IPv4)
+                        let _first_seen = u64::from_le_bytes([
+                            value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3],
+                            value_bytes[4], value_bytes[5], value_bytes[6], value_bytes[7],
+                        ]);
+                        let _last_seen = u64::from_le_bytes([
+                            value_bytes[8], value_bytes[9], value_bytes[10], value_bytes[11],
+                            value_bytes[12], value_bytes[13], value_bytes[14], value_bytes[15],
+                        ]);
+                        let packet_count = u32::from_le_bytes([
+                            value_bytes[16], value_bytes[17], value_bytes[18], value_bytes[19],
+                        ]);
+                        let ttl = u16::from_le_bytes([value_bytes[20], value_bytes[21]]);
+                        let mss = u16::from_le_bytes([value_bytes[22], value_bytes[23]]);
+                        let window_size = u16::from_le_bytes([value_bytes[24], value_bytes[25]]);
+                        let window_scale = value_bytes[26];
+                        let options_len = value_bytes[27];
+
+                        // Only process entries with packet_count > 0 and above threshold
+                        if packet_count > 0 && packet_count >= self.config.min_packet_count {
+                            let options = value_bytes[32..32 + options_len as usize].to_vec();
+
+                            let entry = TcpFingerprintEntry {
+                                key: TcpFingerprintKey {
+                                    src_ip: src_ip.to_string(),
+                                    src_port,
+                                    fingerprint: fingerprint.clone(),
+                                },
+                                data: TcpFingerprintData {
+                                    first_seen: Utc::now(), // Use current time as fallback
+                                    last_seen: Utc::now(), // Use current time as fallback
+                                    packet_count,
+                                    ttl,
+                                    mss,
+                                    window_size,
+                                    window_scale,
+                                    options_len,
+                                    options,
+                                },
+                            };
+
+                            // Log new IPv6 TCP fingerprint at debug level
+                            log::debug!("TCP Fingerprint (IPv6): {}:{} - TTL:{} MSS:{} Window:{} Scale:{} Packets:{} Fingerprint:{}",
+                                      src_ip, src_port, ttl, mss, window_size, window_scale, packet_count, fingerprint);
+
+                            fingerprints.push(entry);
+                            count += 1;
+                        } else {
+                            log::debug!("Skipping IPv6 fingerprint entry with packet_count={} (threshold={}): {}:{}",
+                                      packet_count, self.config.min_packet_count, src_ip, src_port);
+                            skipped_count += 1;
+                        }
+                    } else {
+                        log::debug!("Skipping IPv6 fingerprint entry with invalid size: key_len={}, value_len={}", key_bytes.len(), value_bytes.len());
+                        skipped_count += 1;
+                    }
+                }
+                log::debug!("Found {} IPv6 TCP fingerprints, skipped {} entries", count, skipped_count);
+            }
+            Err(e) => {
+                log::warn!("Failed to read IPv6 TCP fingerprints: {}", e);
             }
         }
 
