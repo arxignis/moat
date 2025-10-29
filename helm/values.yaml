@@ -1,4 +1,4 @@
-# Default values for moat
+﻿# Default values for moat
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
@@ -18,6 +18,12 @@ imagePullSecrets: []
 # This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
+
+# Command-line arguments passed to the moat binary.
+# By default we point to the rendered ConfigMap at /etc/moat/config.yaml.
+args:
+  - "--config"
+  - "/etc/moat/config.yaml"
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
