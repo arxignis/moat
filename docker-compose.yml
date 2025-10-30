@@ -9,19 +9,14 @@ services:
       - clamav
     container_name: moat
     privileged: true
+    network_mode: host
     cap_add:
           - SYS_ADMIN
           - NET_ADMIN
           - BPF
           - SYS_RESOURCE
-    ports:
-      - "127.0.0.1:8080:8080"
-      - "80:80"
-      - "443:443"
     volumes:
       - ./config.yaml:/app/config.yaml
-    networks:
-      - moat-network
     restart: unless-stopped
     command: ["--config", "/app/config.yaml"]
 
@@ -96,7 +91,6 @@ services:
 
 networks:
   moat-network:
-    driver: bridge
 
 volumes:
   redis-data:
