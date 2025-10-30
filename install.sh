@@ -15,7 +15,9 @@ curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/o
 mkdir -p /etc/systemd/system/clamav-daemon.socket.d
 curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/others/systemd/clamd/override.conf -o /etc/systemd/system/clamav-daemon.socket.d/override.conf
 systemctl daemon-reload
+systemctl enable clamav-daemon
 systemctl restart clamav-daemon
+systemctl status clamav-daemon
 
 echo "ClamAV setup complete."
 sleep 1
