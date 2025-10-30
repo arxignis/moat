@@ -21,22 +21,15 @@ systemctl daemon-reload
 echo "Creating directories..."
 mkdir -p /var/log/moat /var/run/moat /var/lib/moat /etc/moat
 
-# Prompt for API key
-echo ""
-echo "Please enter your Arxignis API key:"
-read -r API_KEY
-
 # Create config file
 echo "Creating config file..."
 curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/main/config_example.yaml -o /etc/moat/config.yaml
-sed -i "s/api_key: \"\"/api_key: \"${API_KEY}\"/" /etc/moat/config.yaml
 chmod 644 /etc/moat/config.yaml
 
 # Enable and start service
 echo "Enabling and starting service..."
 systemctl enable moat
-systemctl start moat
 
-# Check status
-echo "Checking status..."
-systemctl status moat
+echo "Before starting the service, you need to add your API key to the config file /etc/moat/config.yaml."
+echo "You can get your API key from https://dash.arxignis.com/settings/api-keys."
+echo "Then run 'systemctl start moat' to start the service."
