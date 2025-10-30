@@ -11,7 +11,8 @@ apt-get install -yqq curl sed clamav-daemon redis-server
 # Setup ClamAV
 
 echo "Setting up ClamAV..."
-curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/others/clamd/clamd.conf -o /etc/clamd.d/scan.conf
+curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/others/clamd/clamd.conf -o /etc/clamav/clamd.conf
+mkdir -p /etc/systemd/system/clamav-daemon.socket.d
 curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/others/systemd/clamd/override.conf -o /etc/systemd/system/clamav-daemon.socket.d/override.conf
 systemctl daemon-reload
 systemctl restart clamav-daemon
