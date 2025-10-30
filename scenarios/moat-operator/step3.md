@@ -1,4 +1,4 @@
-﻿Lay down sane defaults for the chart, install it, and make sure the pods settle.
+Create a config for the chart, install it, and make sure the pods run.
 
 ```bash
 cat <<'EOF' >/tmp/moat-values.yaml
