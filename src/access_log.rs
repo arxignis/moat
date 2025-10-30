@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use crate::http::tls_fingerprint::Fingerprint as TlsFingerprint;
+use crate::ja4_plus::{Ja4hFingerprint, Ja4tFingerprint};
 use crate::proxy_utils::ProxyBody;
 use crate::event_queue::{send_event, UnifiedEvent};
+use crate::tcp_fingerprint::TcpFingerprintData;
 
 /// Configuration for sending access logs to arxignis server
 #[derive(Debug, Clone)]
@@ -87,6 +88,7 @@ pub struct HttpDetails {
     pub query: String,
     pub query_hash: Option<String>,
     pub headers: HashMap<String, String>,
+    pub ja4h: Option<String>,
     pub user_agent: Option<String>,
     pub content_type: Option<String>,
     pub content_length: Option<u64>,
@@ -110,10 +112,8 @@ pub struct TlsDetails {
     pub alpn: Option<String>,
     pub sni: Option<String>,
     pub ja4: Option<String>,
-    pub ja4one: Option<String>,
-    pub ja4l: Option<String>,
+    pub ja4_unsorted: Option<String>,
     pub ja4t: Option<String>,
-    pub ja4h: Option<String>,
     pub server_cert: Option<ServerCertDetails>,
 }
 
@@ -160,7 +160,8 @@ impl HttpAccessLog {
         req_body_bytes: &bytes::Bytes,
         peer_addr: SocketAddr,
         dst_addr: SocketAddr,
-        tls_fingerprint: Option<&TlsFingerprint>,
+        tls_fingerprint: Option<&crate::http::tls_fingerprint::Fingerprint>,
+        tcp_fingerprint_data: Option<&TcpFingerprintData>,
         response_data: ResponseData,
         waf_result: Option<&crate::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
@@ -214,6 +215,14 @@ impl HttpAccessLog {
             }
         }
 
+        // Generate JA4H fingerprint
+        let ja4h_fp = Ja4hFingerprint::from_http_request(
+            req_parts.method.as_str(),
+            &format!("{:?}", req_parts.version),
+            &req_parts.headers
+        );
+        let ja4h = Some(ja4h_fp.fingerprint);
+
         // Get log sender configuration for body processing
         let log_config = {
             let config_store = get_log_sender_config();
@@ -240,6 +249,18 @@ impl HttpAccessLog {
             format!("{:x}", Sha256::digest(req_body_bytes))
         };
 
+        // Generate JA4T from TCP fingerprint data if available
+        let ja4t = tcp_fingerprint_data.map(|tcp_data| {
+            let ja4t_fp = Ja4tFingerprint::from_tcp_data(
+                tcp_data.window_size,
+                tcp_data.ttl,
+                tcp_data.mss,
+                tcp_data.window_scale,
+                &tcp_data.options,
+            );
+            ja4t_fp.fingerprint
+        });
+
         // Process TLS details
         let tls_details = if let Some(fp) = tls_fingerprint {
             // Determine cipher based on TLS version
@@ -251,9 +272,6 @@ impl HttpAccessLog {
                 _ => "TLS_AES_256_GCM_SHA384", // Default to TLS 1.3 cipher
             };
 
-            // Calculate JA4L (simplified version)
-            let ja4l = calculate_ja4l(&fp.tls_version, fp.alpn.as_deref());
-
             // Extract server certificate details if available
             let server_cert = extract_server_cert_details(&fp, server_cert_info);
 
@@ -263,10 +281,8 @@ impl HttpAccessLog {
                 alpn: fp.alpn.clone(),
                 sni: fp.sni.clone(),
                 ja4: Some(fp.ja4.clone()),
-                ja4one: Some(fp.ja4_unsorted.clone()),
-                ja4l: Some(ja4l),
-                ja4t: Some(fp.ja4_unsorted.clone()),
-                ja4h: Some(fp.ja4_unsorted.clone()),
+                ja4_unsorted: Some(fp.ja4_unsorted.clone()),
+                ja4t: ja4t.clone(),
                 server_cert,
             })
         } else if scheme == "https" {
@@ -277,10 +293,8 @@ impl HttpAccessLog {
                 alpn: None,
                 sni: None,
                 ja4: Some("t13d".to_string()),
-                ja4one: Some("t13d".to_string()),
-                ja4l: Some("t13d".to_string()),
-                ja4t: Some("t13d".to_string()),
-                ja4h: Some("t13d".to_string()),
+                ja4_unsorted: Some("t13d".to_string()),
+                ja4t: ja4t.clone(),
                 server_cert: None,
             })
         } else {
@@ -297,6 +311,7 @@ impl HttpAccessLog {
             query: query.clone(),
             query_hash: if query.is_empty() { None } else { Some(format!("{:x}", Sha256::digest(query.as_bytes()))) },
             headers,
+            ja4h,
             user_agent,
             content_type,
             content_length: Some(req_body_bytes.len() as u64),
@@ -563,21 +578,6 @@ fn extract_server_cert_details(_fp: &crate::http::tls_fingerprint::Fingerprint, 
     })
 }
 
-/// Calculate JA4L fingerprint based on TLS version and ALPN
-fn calculate_ja4l(tls_version: &str, alpn: Option<&str>) -> String {
-    // JA4L format: TLS_version_ALPN_length
-    let version_code = match tls_version {
-        "TLSv1.3" | "13" => "13",
-        "TLSv1.2" | "12" => "12",
-        "TLSv1.1" | "11" => "11",
-        "TLSv1.0" | "10" => "10",
-        _ => "00",
-    };
-
-    let alpn_length = alpn.map_or(0, |a| a.len());
-
-    format!("{}_{}_{}", version_code, alpn_length, alpn_length)
-}
 
 #[cfg(test)]
 mod tests {
@@ -622,6 +622,7 @@ mod tests {
                 query: "param=value".to_string(),
                 query_hash: Some("abc123".to_string()),
                 headers: HashMap::new(),
+                ja4h: Some("g11n_000000000000_000000000000".to_string()),
                 user_agent: Some(format!("TestAgent/{}", env!("CARGO_PKG_VERSION"))),
                 content_type: None,
                 content_length: None,

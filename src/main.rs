@@ -43,6 +43,7 @@ pub mod bpf {
 
 pub mod bpf_stats;
 pub mod tcp_fingerprint;
+pub mod ja4_plus;
 pub mod event_queue;
 
 use tokio::signal;
@@ -55,7 +56,7 @@ use crate::tcp_fingerprint::TcpFingerprintConfig;
 use crate::cli::{Args, Config};
 use crate::domain_filter::DomainFilter;
 use crate::http::{
-    ProxyContext, SharedTlsState, TlsMode, install_ring_crypto_provider, load_custom_server_config,
+    SharedTlsState, TlsMode, install_ring_crypto_provider, load_custom_server_config,
     run_acme_http01_proxy, run_custom_tls_proxy, run_http_proxy,
 };
 use crate::http::health_checks::start_health_check_server;
@@ -184,7 +185,8 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
                         }
                     };
                     if let Err(e) = bpf_utils::bpf_attach_to_xdp(&mut skel, ifindex) {
-                        log::error!("failed to attach XDP to '{}': {e}", iface);
+                        log::error!("Failed to attach XDP to '{}': {}", iface, e);
+                        log::info!("Hint: If IPv6 is not available, you can either enable it or set 'disable_xdp: true' in config.yaml");
                         continue;
                     }
                     log::info!("BPF sucessfully attached to xdp on {}", iface);
@@ -452,13 +454,14 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
             );
         }
 
-        let proxy_ctx = Arc::new(ProxyContext {
+        let proxy_ctx = Arc::new(http::ProxyContext {
             client,
             upstream: upstream_uri.clone(),
             domain_filter,
             tls_only: config.tls.only,
             proxy_protocol_enabled: config.server.proxy_protocol.enabled,
             proxy_protocol_timeout_ms: config.server.proxy_protocol.timeout_ms,
+            tcp_fingerprint_collector: state.tcp_fingerprint_collector.clone(),
         });
 
         match tls_mode {
