@@ -31,6 +31,10 @@ fn main() {
             vmlinux_include.as_os_str(),
             OsStr::new("-I"),
             bpf_include.as_os_str(),
+            OsStr::new("-O2"),              // Enable level 2 optimizations
+            OsStr::new("-g"),               // Keep debug info for verifier
+            OsStr::new("-Wall"),            // Enable all warnings
+            OsStr::new("-Wextra"),          // Extra warnings
         ])
         .build_and_generate(skel_path.to_str().expect("Invalid UTF-8 in path"))
         .expect("Failed to generate skeleton");
