@@ -453,8 +453,8 @@ static void record_tcp_fingerprint(__be32 src_ip, __be16 src_port,
         increment_unique_fingerprints();
 
         // Log new TCP fingerprint
-        bpf_printk("TCP_FP: New fingerprint from %pI4:%d - TTL:%d MSS:%d WS:%d Window:%d",
-                   &src_ip, bpf_ntohs(src_port), ttl, data.mss, data.window_scale, data.window_size);
+        //bpf_printk("TCP_FP: New fingerprint from %pI4:%d - TTL:%d MSS:%d WS:%d Window:%d",
+        //           &src_ip, bpf_ntohs(src_port), ttl, data.mss, data.window_scale, data.window_size);
     }
 }
 
@@ -498,7 +498,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
             increment_ipv4_banned_stats();
             increment_total_packets_dropped();
             increment_dropped_ipv4_address(iph->saddr);
-            bpf_printk("XDP: BLOCKED incoming permanently banned IPv4 %pI4", &iph->saddr);
+            //bpf_printk("XDP: BLOCKED incoming permanently banned IPv4 %pI4", &iph->saddr);
             return XDP_DROP;
         }
 
@@ -516,7 +516,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 bpf_map_delete_elem(&recently_banned_ips, &key);
                 increment_total_packets_dropped();
                 increment_dropped_ipv4_address(iph->saddr);
-                bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
+                //bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                 return XDP_DROP;
             }
             if (iph->protocol == IPPROTO_ICMP) {
@@ -525,7 +525,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 bpf_map_delete_elem(&recently_banned_ips, &key);
                 increment_total_packets_dropped();
                 increment_dropped_ipv4_address(iph->saddr);
-                bpf_printk("XDP: BLOCKED incoming ICMP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
+                //bpf_printk("XDP: BLOCKED incoming ICMP from recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                 return XDP_DROP;
             }
             // For TCP, only promote to banned on FIN/RST
@@ -545,7 +545,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         bpf_map_delete_elem(&recently_banned_ips, &key);
                         increment_total_packets_dropped();
                         increment_dropped_ipv4_address(iph->saddr);
-                        bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
+                        //bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv4 %pI4, promoted to permanent ban", &iph->saddr);
                     }
                 }
             }
@@ -594,7 +594,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
             increment_ipv6_banned_stats();
             increment_total_packets_dropped();
             increment_dropped_ipv6_address(ip6h->saddr);
-            bpf_printk("XDP: BLOCKED incoming permanently banned IPv6");
+            //bpf_printk("XDP: BLOCKED incoming permanently banned IPv6");
             return XDP_DROP;
         }
 
@@ -612,7 +612,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
                 increment_total_packets_dropped();
                 increment_dropped_ipv6_address(ip6h->saddr);
-                bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv6, promoted to permanent ban");
+                //bpf_printk("XDP: BLOCKED incoming UDP from recently banned IPv6, promoted to permanent ban");
                 return XDP_DROP;
             }
             if (ip6h->nexthdr == 58) { // 58 = IPPROTO_ICMPV6
@@ -621,7 +621,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                 bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
                 increment_total_packets_dropped();
                 increment_dropped_ipv6_address(ip6h->saddr);
-                bpf_printk("XDP: BLOCKED incoming ICMPv6 from recently banned IPv6, promoted to permanent ban");
+                //bpf_printk("XDP: BLOCKED incoming ICMPv6 from recently banned IPv6, promoted to permanent ban");
                 return XDP_DROP;
             }
             // For TCP, only promote to banned on FIN/RST
@@ -634,7 +634,7 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         bpf_map_delete_elem(&recently_banned_ips_v6, &key6);
                         increment_total_packets_dropped();
                         increment_dropped_ipv6_address(ip6h->saddr);
-                        bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv6, promoted to permanent ban");
+                        //bpf_printk("XDP: TCP FIN/RST from incoming recently banned IPv6, promoted to permanent ban");
                     }
                 }
             }
@@ -705,8 +705,8 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
                         increment_unique_fingerprints();
 
                         // Log new IPv6 TCP fingerprint
-                        bpf_printk("TCP_FP: New IPv6 fingerprint from %pI6:%d - TTL:%d MSS:%d WS:%d Window:%d",
-                                   &ip6h->saddr, bpf_ntohs(tcph->source), ttl, data.mss, data.window_scale, data.window_size);
+                        //bpf_printk("TCP_FP: New IPv6 fingerprint from %pI6:%d - TTL:%d MSS:%d WS:%d Window:%d",
+                        //           &ip6h->saddr, bpf_ntohs(tcph->source), ttl, data.mss, data.window_scale, data.window_size);
                     }
                 }
             }
