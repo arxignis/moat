@@ -579,11 +579,6 @@ int arxignis_xdp_filter(struct xdp_md *ctx)
             }
         }
 
-        // Skip blocking for IPv6 localhost (::1)
-        if (__builtin_memcmp(&ip6h->saddr, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16) == 0) {
-            return XDP_PASS;
-        }
-
         // Check banned/recently banned maps by source IPv6
         struct lpm_key_v6 key6 = {
             .prefixlen = 128,
