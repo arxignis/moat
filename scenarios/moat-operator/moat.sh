@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu pipefail
 
 # ===== settings =====
-CLUSTER_NAME="moat"
-MOAT_NS="moat"
-OP_NS="moat-system"
+CLUSTER_NAME="arxignis"
+MOAT_NS="arxignis"
+OP_NS="arxignis-system"
 
 # hardcoded resource names (created by the umbrella chart)
 DP_DEPLOY="moat-stack"     # dataplane Deployment

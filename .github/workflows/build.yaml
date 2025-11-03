@@ -1,4 +1,4 @@
-name: Continuous integration
+name: Moat Build
 on:
   pull_request:
       branches:
