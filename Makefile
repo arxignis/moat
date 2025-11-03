@@ -11,9 +11,10 @@ bump-version:
 		exit 1; \
 	fi
 	@echo "Bumping version to $(VERSION)..."
+	@sed -i.bak 's/^VERSION=.*$$/VERSION=$(VERSION)/' install.sh && rm install.sh.bak
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml && rm Cargo.toml.bak
 	@cargo update -p moat
-	@git add Cargo.toml Cargo.lock
+	@git add Cargo.toml Cargo.lock install.sh
 	@git commit -m "chore: bump version to $(VERSION)"
 	@git tag v$(VERSION)
 	@git push origin tag v$(VERSION)

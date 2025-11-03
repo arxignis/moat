@@ -15,7 +15,7 @@
 [![Substack](https://img.shields.io/badge/Substack-FF6719?logo=substack&logoColor=fff)](https://arxignis.substack.com/)
 
 ## What is moat ancient story?
-You can read [here](./STORY.md).
+You can read [here](./docs/STORY.md).
 
 ## Overview
 
@@ -25,7 +25,8 @@ Moat is a high-performance reverse proxy and firewall built with Rust, featuring
 - **Dynamic access rules** with automatic updates from Arxignis API
 - **BPF statistics collection** for packet processing and dropped IP monitoring
 - **TCP fingerprinting** for behavioral analysis and threat detection
-- **TLS fingerprinting** with JA4/JA4L support for client identification
+- **TLS fingerprinting** with JA4 support for client identification
+- **JA4+ fingerprinting** with complete suite: JA4H (HTTP headers), JA4T (TCP options), JA4L (latency), JA4S (TLS server), and JA4X (X.509 certificates)
 - **Automatic TLS certificate management** with ACME/Let's Encrypt integration
 - **Threat intelligence integration** with Arxignis API for real-time protection
 - **CAPTCHA protection** with support for hCaptcha, reCAPTCHA, and Cloudflare Turnstile
@@ -50,164 +51,39 @@ Configuration from higher priority sources overrides lower priority sources. For
 
 ## Quick Start
 
-### Docker Build
+> 🚧 **Important:** This application only runs on Linux.
+
+## Requirements
+
+### System Requirements
+
+- **Linux kernel** 4.18+ (for XDP support)
+- **BPF support** - Required for packet filtering
+- **Network capabilities** - SYS_ADMIN, BPF, NET_ADMIN for Docker deployments
+- **Redis** - For caching and certificate store
+- **ClamAV** - For content scanning (optional, when content scanning is enabled)
+
+### Dependencies
+
+- **libbpf** - For eBPF program loading
+- **Redis** - Caching backend
+- **ClamAV** - Antivirus engine for content scanning
+
+### Ubuntu install
 ```bash
-docker build -t moat .
+curl -fSL https://github.com/arxignis/moat/blob/main/install.sh | sh
 ```
+✅ Tested with Ubuntu 24.04
 
-### Docker Run
-```bash
-docker run --cap-add=SYS_ADMIN --cap-add=BPF \
---cap-add=NET_ADMIN moat --iface eth0 \
---arxignis-api-key="your-key" --upstream "http://127.0.0.1:8081"
-```
-
-### Docker with Health Checks and Statistics
-```bash
-# Run with health check configuration and statistics collection via environment variables
-docker run --cap-add=SYS_ADMIN --cap-add=BPF --cap-add=NET_ADMIN \
--e AX_SERVER_HEALTH_CHECK_ENABLED=true \
--e AX_SERVER_HEALTH_CHECK_PORT=0.0.0.0:8080 \
--e AX_SERVER_HEALTH_CHECK_ENDPOINT=/health \
--e AX_BPF_STATS_ENABLED=true \
--e AX_TCP_FINGERPRINT_ENABLED=true \
--p 8080:8080 \
-moat --iface eth0 --arxignis-api-key="your-key" --upstream "http://127.0.0.1:8081"
-```
-
-### Docker Compose Example
-```yaml
-services:
-  moat:
-    build: .
-    cap_add:
-      - SYS_ADMIN
-      - BPF
-      - NET_ADMIN
-    ports:
-      - "80:80"
-      - "443:443"
-      - "127.0.0.1:8080:8080"  # Health check port
-    environment:
-      - AX_SERVER_HEALTH_CHECK_ENABLED=true
-      - AX_SERVER_HEALTH_CHECK_PORT=0.0.0.0:8080
-      - AX_SERVER_HEALTH_CHECK_ENDPOINT=/health
-      - AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS=127.0.0.0/8,::1/128
-    command: ["--iface", "eth0", "--arxignis-api-key", "your-key", "--upstream", "http://backend:8081"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-```
-
-### Kubernetes Deployment Example
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: moat
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: moat
-  template:
-    metadata:
-      labels:
-        app: moat
-    spec:
-      containers:
-      - name: moat
-        image: moat:latest
-        ports:
-        - containerPort: 80
-          name: http
-        - containerPort: 443
-          name: https
-        - containerPort: 8080
-          name: health
-        env:
-        - name: AX_SERVER_HEALTH_CHECK_ENABLED
-          value: "true"
-        - name: AX_SERVER_HEALTH_CHECK_PORT
-          value: "0.0.0.0:8080"
-        - name: AX_SERVER_HEALTH_CHECK_ENDPOINT
-          value: "/health"
-        - name: AX_ARXIGNIS_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: moat-secrets
-              key: arxignis-api-key
-        args:
-        - "--iface"
-        - "eth0"
-        - "--upstream"
-        - "http://backend-service:8081"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        securityContext:
-          capabilities:
-            add:
-            - SYS_ADMIN
-            - BPF
-            - NET_ADMIN
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: moat-service
-spec:
-  selector:
-    app: moat
-  ports:
-  - name: http
-    port: 80
-    targetPort: 80
-  - name: https
-    port: 443
-    targetPort: 443
-  - name: health
-    port: 8080
-    targetPort: 8080
-  type: LoadBalancer
-```
+## Configuration
+You have 3 options can configure moat.
+- config file
+- environment variables
+- cli parameters
 
 ### Configuration File
 
-Moat supports configuration via YAML files. Copy `config_example.yaml` to `config.yaml` and customize:
-
-```bash
-cp config_example.yaml config.yaml
-```
-
-The configuration file supports all features including:
-- Server bind addresses and upstream configuration
-- PROXY protocol support for load balancer integration
-- Health check endpoint configuration
-- TLS modes (disabled, custom, ACME)
-- ACME certificate management with Let's Encrypt
-- Redis caching configuration
-- Network interface and XDP settings
-- Arxignis API integration
-- Access log sending configuration with response body options
-- BPF statistics collection and logging
-- TCP fingerprinting with configurable thresholds
-- CAPTCHA protection settings
-- Content scanning with ClamAV integration
-- Domain filtering rules
-- Logging configuration
+[Moat supports configuration via YAML files.](./config_example.yaml)
 
 ### Environment Variables
 
@@ -218,260 +94,19 @@ All configuration options can be overridden using environment variables with the
 export AX_SERVER_UPSTREAM="http://localhost:8080"
 export AX_SERVER_HTTP_ADDR="0.0.0.0:80"
 export AX_SERVER_TLS_ADDR="0.0.0.0:443"
-
-# TLS configuration
-export AX_TLS_MODE="acme"
-export AX_TLS_ONLY="false"
-
-# ACME configuration
-export AX_ACME_DOMAINS="example.com,www.example.com"
-export AX_ACME_CONTACTS="admin@example.com"
-export AX_ACME_USE_PROD="true"
-
-# Redis configuration
-export AX_REDIS_URL="redis://127.0.0.1/0"
-export AX_REDIS_PREFIX="ax:moat"
-
-# Network configuration
-export AX_NETWORK_IFACE="eth0"
-export AX_NETWORK_DISABLE_XDP="false"
-
-# Arxignis configuration
-export AX_ARXIGNIS_API_KEY="your-api-key"
-export AX_ARXIGNIS_BASE_URL="https://api.arxignis.com/v1"
-
-# CAPTCHA configuration
-export AX_CAPTCHA_SITE_KEY="your-site-key"
-export AX_CAPTCHA_SECRET_KEY="your-secret-key"
-export AX_CAPTCHA_JWT_SECRET="your-jwt-secret"
-export AX_CAPTCHA_PROVIDER="turnstile"
-
-# Domain filtering
-export AX_DOMAINS_WHITELIST="trusted.com,secure.example.com"
-
-# Content scanning
-export AX_CONTENT_SCANNING_ENABLED="true"
-export AX_CLAMAV_SERVER="localhost:3310"
-export AX_CONTENT_MAX_FILE_SIZE="10485760"
-export AX_CONTENT_SCAN_CONTENT_TYPES="text/html,application/x-www-form-urlencoded,multipart/form-data"
-export AX_CONTENT_SKIP_EXTENSIONS=".jpg,.png,.gif"
-export AX_CONTENT_SCAN_EXPRESSION="http.request.method eq \"POST\" or http.request.method eq \"PUT\""
-
-# PROXY protocol
-export AX_PROXY_PROTOCOL_ENABLED="true"
-export AX_PROXY_PROTOCOL_TIMEOUT="1000"
-
-# Daemon mode
-export AX_DAEMON_ENABLED="false"
-export AX_DAEMON_PID_FILE="/var/run/moat.pid"
-export AX_DAEMON_WORKING_DIRECTORY="/"
-export AX_DAEMON_STDOUT="/var/log/moat.out"
-export AX_DAEMON_STDERR="/var/log/moat.err"
-export AX_DAEMON_USER="nobody"
-export AX_DAEMON_GROUP="daemon"
-export AX_DAEMON_CHOWN_PID_FILE="true"
-
-# Logging
-export AX_LOGGING_LEVEL="info"
-
-# BPF Statistics configuration
-export AX_BPF_STATS_ENABLED="true"
-export AX_BPF_STATS_LOG_INTERVAL="60"
-export AX_BPF_STATS_ENABLE_DROPPED_IP_EVENTS="true"
-export AX_BPF_STATS_DROPPED_IP_EVENTS_INTERVAL="30"
-
-# TCP Fingerprinting configuration
-export AX_TCP_FINGERPRINT_ENABLED="true"
-export AX_TCP_FINGERPRINT_LOG_INTERVAL="60"
-export AX_TCP_FINGERPRINT_ENABLE_FINGERPRINT_EVENTS="true"
-export AX_TCP_FINGERPRINT_EVENTS_INTERVAL="30"
-export AX_TCP_FINGERPRINT_MIN_PACKET_COUNT="3"
-export AX_TCP_FINGERPRINT_MIN_CONNECTION_DURATION="1"
-
-# Arxignis log sending configuration
-export AX_ARXIGNIS_LOG_SENDING_ENABLED="true"
-export AX_ARXIGNIS_INCLUDE_RESPONSE_BODY="true"
-export AX_ARXIGNIS_MAX_BODY_SIZE="1048576"
 ```
-
+[You can find more here.](./docs/ENVIRONMNET_VARS.md)
 ## Command Line Options
 
 ### Basic Usage
 
 ```bash
-moat [OPTIONS]
+moat --help
 ```
 
 ### Configuration Options
 
 - `--config <PATH>`, `-c <PATH>` - Path to configuration file (YAML format)
-
-### Required Options
-
-#### Arxignis Integration
-- `--arxignis-api-key <KEY>` - API key for Arxignis service
-
-### Network Configuration
-
-#### Interface Configuration
-- `--iface <INTERFACE>`, `-i <INTERFACE>` - Network interface to attach XDP program to (default: `eth0`)
-- `--ifaces <INTERFACES>` - Multiple network interfaces for XDP attach (comma-separated)
-- `--disable-xdp` - Disable XDP packet filtering (run without BPF/XDP)
-
-#### Server Addresses
-- `--control-addr <ADDRESS>` - HTTP control-plane bind address (default: `0.0.0.0:8080`)
-- `--http-addr <ADDRESS>` - HTTP server bind address for ACME HTTP-01 challenges and regular HTTP traffic (default: `0.0.0.0:80`)
-- `--http-bind <ADDRESSES>` - Additional HTTP bind addresses (comma-separated)
-- `--tls-addr <ADDRESS>` - HTTPS reverse-proxy bind address (default: `0.0.0.0:443`)
-- `--tls-bind <ADDRESSES>` - Additional HTTPS bind addresses (comma-separated)
-
-**Note:** Health check configuration is available via YAML configuration file and environment variables only. See [Health Check Endpoints](#health-check-endpoints) section for details.
-
-### TLS Configuration
-
-#### TLS Mode
-- `--tls-mode <MODE>` - TLS operating mode (default: `disabled`)
-  - `disabled` - No TLS, HTTP only
-  - `custom` - Use custom certificates
-  - `acme` - Automatic certificate management with Let's Encrypt
-- `--tls-only` - Reject non-SSL requests (except ACME challenges) when TLS mode is disabled
-
-#### Upstream Configuration
-- `--upstream <URL>` - Upstream origin URL (always required)
-  - Must be absolute URI (e.g., `http://127.0.0.1:8081`)
-  - Used for forwarding requests in all TLS modes
-
-#### Custom TLS Certificates
-- `--tls-cert-path <PATH>` - Path to custom certificate (PEM) when using custom TLS mode
-- `--tls-key-path <PATH>` - Path to custom private key (PEM) when using custom TLS mode
-
-### ACME Configuration (Let's Encrypt)
-
-#### Domain Management
-- `--acme-domains <DOMAINS>` - Domains for ACME certificate issuance (comma separated or repeated)
-- `--acme-contacts <CONTACTS>` - ACME contact addresses (mailto: optional, comma separated or repeated)
-
-#### ACME Settings
-- `--acme-use-prod` - Use Let's Encrypt production directory instead of staging
-- `--acme-directory <URL>` - Override ACME directory URL (useful for Pebble or other test CAs)
-- `--acme-accept-tos` - Explicitly accept the ACME Terms of Service (default: `false`)
-- `--acme-ca-root <PATH>` - Custom CA bundle for the ACME directory (PEM file)
-
-### Redis Configuration
-
-- `--redis-url <URL>` - Redis connection URL for ACME cache storage (default: `redis://127.0.0.1/0`)
-- `--redis-prefix <PREFIX>` - Namespace prefix for Redis ACME cache entries (default: `ax:moat`)
-
-### Domain Filtering
-
-#### Whitelist Configuration
-- `--domain-whitelist <DOMAINS>` - Domain whitelist (exact matches, comma separated or repeated)
-  - If specified, only requests to these domains will be allowed
-
-### Arxignis Configuration
-
-- `--arxignis-base-url <URL>` - Base URL for Arxignis API (default: `https://api.arxignis.com/v1`)
-
-### CAPTCHA Configuration
-
-- `--captcha-site-key <KEY>` - CAPTCHA site key for security verification
-- `--captcha-secret-key <KEY>` - CAPTCHA secret key for security verification
-- `--captcha-jwt-secret <SECRET>` - JWT secret key for CAPTCHA token signing
-- `--captcha-provider <PROVIDER>` - CAPTCHA provider: `hcaptcha`, `recaptcha`, `turnstile` (default: `hcaptcha`)
-- `--captcha-token-ttl <SECONDS>` - CAPTCHA token TTL in seconds (default: `7200`)
-- `--captcha-cache-ttl <SECONDS>` - CAPTCHA validation cache TTL in seconds (default: `300`)
-
-### PROXY Protocol Configuration
-
-- `--proxy-protocol-enabled` - Enable PROXY protocol support for TCP connections
-- `--proxy-protocol-timeout <MILLISECONDS>` - PROXY protocol timeout in milliseconds (default: `1000`)
-
-### Daemon Mode Configuration
-
-- `--daemon`, `-d` - Run as daemon in background
-- `--daemon-pid-file <PATH>` - PID file path for daemon mode (default: `/var/run/moat.pid`)
-- `--daemon-working-dir <PATH>` - Working directory for daemon mode (default: `/`)
-- `--daemon-stdout <PATH>` - Stdout log file for daemon mode (default: `/var/log/moat.out`)
-- `--daemon-stderr <PATH>` - Stderr log file for daemon mode (default: `/var/log/moat.err`)
-- `--daemon-user <USER>` - User to run daemon as (optional, e.g., `nobody`)
-- `--daemon-group <GROUP>` - Group to run daemon as (optional, e.g., `daemon`)
-
-### Logging Configuration
-
-- `--log-level <LEVEL>` - Log level: `error`, `warn`, `info`, `debug`, `trace` (default: `info`)
-
-### Usage Examples
-
-#### Basic HTTP Proxy
-```bash
-moat --iface eth0 --arxignis-api-key "your-key" --upstream "http://127.0.0.1:8081"
-```
-
-#### Custom TLS Proxy
-```bash
-moat --iface eth0 --tls-mode custom --tls-cert-path /path/to/cert.pem --tls-key-path /path/to/key.pem --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### ACME TLS Proxy
-```bash
-moat --iface eth0 --tls-mode acme --acme-domains "example.com,www.example.com" --acme-contacts "admin@example.com" --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### With Domain Filtering
-```bash
-moat --iface eth0 --domain-whitelist "trusted.com,secure.example.com" --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### With CAPTCHA Protection
-```bash
-moat --iface eth0 --captcha-site-key "your-site-key" --captcha-secret-key "your-secret-key" --captcha-jwt-secret "your-jwt-secret" --captcha-provider "turnstile" --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### TLS-Only Mode (HTTP with TLS enforcement)
-```bash
-moat --iface eth0 --tls-only --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### Multiple Network Interfaces
-```bash
-moat --ifaces "eth0,eth1" --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### Disable XDP (Software-only Mode)
-```bash
-moat --disable-xdp --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### With Content Scanning
-```bash
-moat --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key" --config config.yaml
-```
-
-#### With PROXY Protocol Support
-```bash
-moat --iface eth0 --proxy-protocol-enabled --proxy-protocol-timeout 2000 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### Running as Daemon
-```bash
-# Run as daemon with default settings
-moat --daemon --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-
-# Run as daemon with custom settings
-moat --daemon \
-  --daemon-pid-file /var/run/moat.pid \
-  --daemon-working-dir / \
-  --daemon-stdout /var/log/moat.out \
-  --daemon-stderr /var/log/moat.err \
-  --daemon-user nobody \
-  --daemon-group daemon \
-  --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-#### Using Configuration File
-```bash
-moat --config /path/to/config.yaml
-```
 
 ## Features
 
@@ -485,7 +120,13 @@ Moat integrates with Arxignis API to provide real-time threat intelligence:
 - **Threat context** - Rich context about detected threats
 - **Caching** - Redis-backed caching for improved performance
 - **Dynamic access rules** - Automatic updates of access rules (allow/block lists) from Arxignis API
-- **JA4/JA4L fingerprinting** - TLS client fingerprinting with JA4, JA4 raw, and JA4L support
+- **JA4/JA4+ fingerprinting** - Complete JA4+ suite implementation:
+  - **JA4**: TLS client fingerprinting from ClientHello
+  - **JA4H**: HTTP header fingerprinting from request headers
+  - **JA4T**: TCP fingerprinting from SYN packet options
+  - **JA4L**: Latency fingerprinting from packet timing
+  - **JA4S**: TLS server fingerprinting from ServerHello
+  - **JA4X**: X.509 certificate fingerprinting
 
 ### Dynamic Access Rules
 
@@ -545,62 +186,11 @@ Moat provides comprehensive content scanning capabilities:
 
 ### PROXY Protocol Support
 
-Moat supports PROXY protocol for preserving client information:
+Moat supports [PROXY protocol](./docs/PROXY_PROTOCOL.md) for preserving client information:
 
 - **TCP PROXY protocol** - Preserves original client IP addresses through load balancers
 - **Configurable timeout** - Customizable timeout for PROXY protocol parsing
 - **Load balancer integration** - Works with HAProxy, AWS ALB, and other load balancers
-
-### Daemon Mode
-
-Moat supports running as a daemon (background service) with privilege dropping capabilities:
-
-#### Features
-- **Background execution** - Runs as a background daemon process
-- **PID file management** - Creates and manages PID files for process control
-- **Privilege dropping** - Can drop privileges to a specified user and group for security
-- **Output redirection** - Redirects stdout and stderr to log files
-- **Working directory** - Configurable working directory for the daemon
-- **Signal handling** - Proper signal handling for graceful shutdown
-
-#### Configuration
-
-**YAML Configuration:**
-```yaml
-daemon:
-  enabled: false                        # Enable daemon mode
-  pid_file: "/var/run/moat.pid"       # PID file path
-  working_directory: "/"               # Working directory
-  stdout: "/var/log/moat.out"         # Application logs (info, debug, warn, error)
-  stderr: "/var/log/moat.err"         # Panic messages and system errors
-  user: "nobody"                       # User to run as (optional)
-  group: "daemon"                      # Group to run as (optional)
-  chown_pid_file: true                # Change PID file ownership
-```
-
-**Command Line:**
-```bash
-moat --daemon \
-  --daemon-pid-file /var/run/moat.pid \
-  --daemon-working-dir / \
-  --daemon-stdout /var/log/moat.out \
-  --daemon-stderr /var/log/moat.err \
-  --daemon-user nobody \
-  --daemon-group daemon \
-  --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
-```
-
-**Environment Variables:**
-```bash
-export AX_DAEMON_ENABLED="true"
-export AX_DAEMON_PID_FILE="/var/run/moat.pid"
-export AX_DAEMON_WORKING_DIRECTORY="/"
-export AX_DAEMON_STDOUT="/var/log/moat.out"
-export AX_DAEMON_STDERR="/var/log/moat.err"
-export AX_DAEMON_USER="nobody"
-export AX_DAEMON_GROUP="daemon"
-export AX_DAEMON_CHOWN_PID_FILE="true"
-```
 
 ### Health Check Endpoints
 
@@ -737,7 +327,13 @@ Comprehensive TLS support with multiple modes:
 - **Access Rules Engine** - Dynamic IP allow/block lists with periodic updates from Arxignis API
 - **BPF Statistics Collector** - Tracks packet processing, drops, and banned IP hits at kernel level
 - **TCP Fingerprint Collector** - Extracts and analyzes TCP SYN fingerprints for behavioral analysis
-- **TLS Fingerprint Engine** - JA4/JA4L TLS client fingerprinting for connection analysis
+- **Fingerprint Engine** - Complete JA4+ suite:
+  - **JA4** TLS fingerprinting from ClientHello
+  - **JA4H** HTTP header fingerprinting
+  - **JA4T** TCP options fingerprinting
+  - **JA4L** Latency measurement framework
+  - **JA4S** TLS server response fingerprinting
+  - **JA4X** X.509 certificate fingerprinting
 - **CAPTCHA Engine** - Validates CAPTCHA responses from multiple providers
 - **Content Scanner** - ClamAV integration for malware detection
 - **PROXY Protocol Handler** - Preserves client IP addresses through load balancers
@@ -751,24 +347,6 @@ Comprehensive TLS support with multiple modes:
 - **Memory efficient** - Minimal memory footprint with efficient caching
 - **Scalable** - Supports multiple network interfaces and concurrent connections
 
-## Requirements
-
-### System Requirements
-
-- **Linux kernel** 4.18+ (for XDP support)
-- **BPF support** - Required for packet filtering
-- **Network capabilities** - SYS_ADMIN, BPF, NET_ADMIN for Docker deployments
-- **Redis** - For caching and certificate store
-- **ClamAV** - For content scanning (optional, when content scanning is enabled)
-
-### Dependencies
-
-- **libbpf** - For eBPF program loading
-- **Tokio** - Async runtime
-- **Hyper** - HTTP server implementation
-- **Rustls** - TLS implementation
-- **Redis** - Caching backend
-- **ClamAV** - Antivirus engine for content scanning
 
 ## Notes
 
@@ -784,7 +362,13 @@ Comprehensive TLS support with multiple modes:
 - Access rules are automatically updated from Arxignis API at regular intervals
 - BPF statistics track packet processing metrics and dropped IPs at kernel level
 - TCP fingerprinting collects SYN packet characteristics for behavioral analysis
-- TLS fingerprinting generates JA4 and JA4L fingerprints from ClientHello messages
+- Fingerprinting supports the complete JA4+ suite:
+  - JA4 generates fingerprints from TLS ClientHello messages
+  - JA4H generates fingerprints from HTTP request headers
+  - JA4T generates fingerprints from TCP SYN packet options
+  - JA4L measures packet latencies for network distance estimation
+  - JA4S generates fingerprints from TLS ServerHello responses
+  - JA4X generates fingerprints from X.509 certificates
 - CAPTCHA tokens are JWT-signed for security and can be cached for performance
 - Threat intelligence data is cached in Redis to minimize API calls
 - Multiple network interfaces can be configured for high availability setups

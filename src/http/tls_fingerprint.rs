@@ -17,7 +17,6 @@ pub struct Fingerprint {
     pub ja4_raw: String,
     pub ja4_unsorted: String,
     pub ja4_raw_unsorted: String,
-    pub ja4l: String,
     pub tls_version: String,
     pub cipher_suite: Option<String>,
     pub sni: Option<String>,
@@ -38,7 +37,6 @@ pub fn fingerprint_client_hello(data: &[u8]) -> Option<Fingerprint> {
                 ja4_raw: sorted.raw.value().to_string(),
                 ja4_unsorted: unsorted.full.value().to_string(),
                 ja4_raw_unsorted: unsorted.raw.value().to_string(),
-                ja4l: calculate_ja4l(data.len()),
                 tls_version: signature.version.to_string(),
                 cipher_suite: signature.preferred_cipher_suite.map(cipher_suite_to_string),
                 sni: signature.sni.clone(),
@@ -309,19 +307,6 @@ fn hash12(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     let hex = format!("{:x}", digest);
     hex[..12].to_string()
-}
-
-/// Calculate JA4L (latency-like fingerprint) based on packet size.
-fn calculate_ja4l(packet_size: usize) -> String {
-    let estimated_client_rtt = if packet_size > 1500 {
-        50
-    } else if packet_size > 1000 {
-        30
-    } else {
-        10
-    };
-    let estimated_server_rtt = estimated_client_rtt + 5;
-    format!("{}_{}_{}", estimated_client_rtt, estimated_server_rtt, packet_size)
 }
 
 fn cipher_suite_to_string(cipher_suite: u16) -> String {
