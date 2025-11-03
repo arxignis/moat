@@ -1,67 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- settings---
+# ===== settings =====
 CLUSTER_NAME="moat"
-WORKSPACE_DIR="/root/workspace"
-REPO_URL="https://github.com/arxignis/moat.git"
-REPO_BRANCH="killercoda"
-
 MOAT_NS="moat"
 OP_NS="moat-system"
-CHART_STACK_DIR="$WORKSPACE_DIR/moat/helm/moat-controller"
 
-# resources created by the umbrella chart
-DP_DEPLOY="moat-stack"     # Moat dataplane Deployment
-CM_NAME="moat-stack"       # Moat ConfigMap holding config.yaml
-OP_DEPLOY="moat-operator"  # Operator Deployment
+# hardcoded resource names (created by the umbrella chart)
+DP_DEPLOY="moat-stack"     # dataplane Deployment
+CM_NAME="moat-stack"       # ConfigMap holding config.yaml
+OP_DEPLOY="moat-operator"  # operator Deployment
 
-# --- prompt for API key ---
+# public Helm repo + chart version to install
+HELM_REPO_NAME="arxignis"
+HELM_REPO_URL="https://arxignis.github.io/helm-charts"
+CHART="${HELM_REPO_NAME}/moat-stack"
+CHART_VER="0.1.2"
+
+# ===== prompt for API key =====
 read -rs -p "Enter ArxIgnis API key: " MOAT_API_KEY; echo
 [ -z "${MOAT_API_KEY:-}" ] && echo "API key is required." >&2 && exit 1
 
 as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
 
-echo "[deps] Installing base tools (kind/helm/kubectl/jq)..."
+echo "[deps] Installing base tools (kind/helm/kubectl/jq/curl/git/tar)..."
+export DEBIAN_FRONTEND=noninteractive
 as_root apt-get update -qq
 as_root apt-get install -yqq ca-certificates curl git jq tar
 
+# kind
 if ! command -v kind >/dev/null 2>&1; then
+  echo "[deps] Installing kind..."
   as_root curl -sSL "https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64" -o /usr/local/bin/kind
   as_root chmod +x /usr/local/bin/kind
 fi
+
+# helm
 if ! command -v helm >/dev/null 2>&1; then
+  echo "[deps] Installing Helm..."
   as_root bash -c 'curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null'
 fi
+
+# kubectl
 if ! command -v kubectl >/dev/null 2>&1; then
+  echo "[deps] Installing kubectl..."
   KVER="$(curl -Ls https://dl.k8s.io/release/stable.txt)"
   as_root curl -sSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl
   as_root chmod +x /usr/local/bin/kubectl
 fi
 
-echo "[git] Cloning arxignis/moat @ ${REPO_BRANCH}..."
-mkdir -p "$WORKSPACE_DIR" && cd "$WORKSPACE_DIR"
-if [ -d moat ]; then
-  cd moat && git fetch origin "$REPO_BRANCH" && git checkout "$REPO_BRANCH" && git pull --ff-only origin "$REPO_BRANCH"
-else
-  git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" moat && cd moat
-fi
-git config --global --add safe.directory "$WORKSPACE_DIR/moat"
-
+# ===== cluster =====
 echo "[kind] Ensuring cluster '${CLUSTER_NAME}'..."
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   kind create cluster --name "$CLUSTER_NAME"
 fi
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 
-# --- install umbrella chart ---
-[ -f "$CHART_STACK_DIR/Chart.yaml" ] || { echo "[err] Missing chart at: $CHART_STACK_DIR" >&2; exit 1; }
+# ===== helm repo + install =====
+echo "[helm] Adding repo '${HELM_REPO_NAME}' and updating index..."
+helm repo add "${HELM_REPO_NAME}" "${HELM_REPO_URL}" --force-update >/dev/null
+helm repo update >/dev/null
 
-echo "[helm] Building chart dependencies..."
-helm dependency build "$CHART_STACK_DIR" >/dev/null
-
-echo "[helm] Installing/Upgrading release 'moat-stack'..."
-helm upgrade --install moat-stack "$CHART_STACK_DIR" \
+echo "[helm] Installing/Upgrading ${CHART} (version ${CHART_VER})..."
+helm upgrade --install moat-stack "$CHART" \
+  --version "$CHART_VER" \
   -n "$MOAT_NS" --create-namespace \
   --set global.namespaces.moat="$MOAT_NS" \
   --set global.namespaces.operator="$OP_NS" \
@@ -76,13 +78,14 @@ helm upgrade --install moat-stack "$CHART_STACK_DIR" \
   --set operator.image.repository="ghcr.io/arxignis/moat-operator" \
   --set operator.image.tag="latest"
 
+# ===== wait for rollouts =====
 echo "[wait] Waiting for dataplane Deployment/${DP_DEPLOY}..."
 kubectl -n "$MOAT_NS" rollout status "deploy/${DP_DEPLOY}"
 
 echo "[wait] Waiting for operator Deployment/${OP_DEPLOY}..."
 kubectl -n "$OP_NS" rollout status "deploy/${OP_DEPLOY}"
 
-# --- helpers (hardcoded names, no discovery) ---
+# ===== helpers =====
 echo "[helpers] Installing helper commands..."
 
 # stream dataplane logs
@@ -109,10 +112,10 @@ NS="moat"
 CM="moat-stack"
 TMP="$(mktemp)"
 
-# extract config.yaml from the known key name (contains a dot)
+# extract config.yaml from the known key name
 DATA="$(kubectl -n "$NS" get cm "$CM" -o json | jq -r '.data["config.yaml"] // empty')"
 if [ -z "$DATA" ]; then
-  echo "[error] Key 'config.yaml' missing in ConfigMap '$CM' in ns '$NS'." >&2
+  echo "[error] Key 'config.yaml' missing in ConfigMap '$CM' (ns '$NS')." >&2
   exit 1
 fi
 printf "%s" "$DATA" > "$TMP"
@@ -137,12 +140,12 @@ as_root chmod +x /usr/local/bin/moat-toggle-config
 echo
 echo "[moat] ✅ Install complete."
 
-cat <<EONEXT
+cat <<'EONEXT'
 
 To WATCH a restart (use two terminals):
 
   Terminal A)
-    kubectl -n ${MOAT_NS} get pods -w
+    kubectl -n moat get pods -w
 
   Terminal B)
     moat-toggle-config    # flips logging level info↔debug and should trigger a rollout
