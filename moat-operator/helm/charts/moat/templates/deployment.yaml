@@ -1,0 +1,233 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "moat.fullname" . }}
+  labels:
+    {{- include "moat.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "moat.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "moat.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "moat.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.args }}
+          args:
+            {{- range .Values.args }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          env:
+            {{- if .Values.env.server.httpAddr }}
+            - name: AX_SERVER_HTTP_ADDR
+              value: "{{ .Values.env.server.httpAddr }}"
+            {{- end }}
+            {{- if .Values.env.server.tlsAddr }}
+            - name: AX_SERVER_TLS_ADDR
+              value: "{{ .Values.env.server.tlsAddr }}"
+            {{- end }}
+            {{- if .Values.env.server.upstream }}
+            - name: AX_SERVER_UPSTREAM
+              value: "{{ .Values.env.server.upstream }}"
+            {{- end }}
+            {{- if .Values.env.server.httpBind }}
+            - name: AX_SERVER_HTTP_BIND
+              value: "{{ join "," .Values.env.server.httpBind }}"
+            {{- end }}
+            {{- if .Values.env.server.tlsBind }}
+            - name: AX_SERVER_TLS_BIND
+              value: "{{ join "," .Values.env.server.tlsBind }}"
+            {{- end }}
+            {{- if .Values.env.server.healthCheckEnabled }}
+            - name: AX_SERVER_HEALTH_CHECK_ENABLED
+              value: "{{ .Values.env.server.healthCheckEnabled }}"
+            {{- end }}
+            {{- if .Values.env.server.healthCheckEndpoint }}
+            - name: AX_SERVER_HEALTH_CHECK_ENDPOINT
+              value: "{{ .Values.env.server.healthCheckEndpoint }}"
+            {{- end }}
+            {{- if .Values.env.server.healthCheckPort }}
+            - name: AX_SERVER_HEALTH_CHECK_PORT
+              value: "{{ .Values.env.server.healthCheckPort }}"
+            {{- end }}
+            {{- if .Values.env.server.healthCheckMethods }}
+            - name: AX_SERVER_HEALTH_CHECK_METHODS
+              value: "{{ join "," .Values.env.server.healthCheckMethods }}"
+            {{- end }}
+            {{- if .Values.env.server.healthCheckAllowedCidrs }}
+            - name: AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS
+              value: "{{ join "," .Values.env.server.healthCheckAllowedCidrs }}"
+            {{- end }}
+            {{- if .Values.env.tls.mode }}
+            - name: AX_TLS_MODE
+              value: "{{ .Values.env.tls.mode }}"
+            {{- end }}
+            {{- if .Values.env.tls.only }}
+            - name: AX_TLS_ONLY
+              value: "{{ .Values.env.tls.only }}"
+            {{- end }}
+            {{- if .Values.env.tls.certPath }}
+            - name: AX_TLS_CERT_PATH
+              value: "{{ .Values.env.tls.certPath }}"
+            {{- end }}
+            {{- if .Values.env.tls.keyPath }}
+            - name: AX_TLS_KEY_PATH
+              value: "{{ .Values.env.tls.keyPath }}"
+            {{- end }}
+            {{- if .Values.env.acme.domains }}
+            - name: AX_ACME_DOMAINS
+              value: "{{ join "," .Values.env.acme.domains }}"
+            {{- end }}
+            {{- if .Values.env.acme.contacts }}
+            - name: AX_ACME_CONTACTS
+              value: "{{ join "," .Values.env.acme.contacts }}"
+            {{- end }}
+            {{- if .Values.env.acme.useProd }}
+            - name: AX_ACME_USE_PROD
+              value: "{{ .Values.env.acme.useProd }}"
+            {{- end }}
+            {{- if .Values.env.acme.directory }}
+            - name: AX_ACME_DIRECTORY
+              value: "{{ .Values.env.acme.directory }}"
+            {{- end }}
+            {{- if .Values.env.acme.acceptTos }}
+            - name: AX_ACME_ACCEPT_TOS
+              value: "{{ .Values.env.acme.acceptTos }}"
+            {{- end }}
+            {{- if .Values.env.acme.caRoot }}
+            - name: AX_ACME_CA_ROOT
+              value: "{{ .Values.env.acme.caRoot }}"
+            {{- end }}
+            {{- if .Values.env.redis.url }}
+            - name: AX_REDIS_URL
+              value: "{{ .Values.env.redis.url }}"
+            {{- end }}
+            {{- if .Values.env.redis.prefix }}
+            - name: AX_REDIS_PREFIX
+              value: "{{ .Values.env.redis.prefix }}"
+            {{- end }}
+            {{- if .Values.env.network.iface }}
+            - name: AX_NETWORK_IFACE
+              value: "{{ .Values.env.network.iface }}"
+            {{- end }}
+            {{- if .Values.env.network.ifaces }}
+            - name: AX_NETWORK_IFACES
+              value: "{{ join "," .Values.env.network.ifaces }}"
+            {{- end }}
+            {{- if .Values.env.network.disableXdp }}
+            - name: AX_NETWORK_DISABLE_XDP
+              value: "{{ .Values.env.network.disableXdp }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.apiKey }}
+            - name: AX_ARXIGNIS_API_KEY
+              value: "{{ .Values.env.arxignis.apiKey }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.baseUrl }}
+            - name: AX_ARXIGNIS_BASE_URL
+              value: "{{ .Values.env.arxignis.baseUrl }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.captchaSiteKey }}
+            - name: AX_CAPTCHA_SITE_KEY
+              value: "{{ .Values.env.arxignis.captchaSiteKey }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.captchaSecretKey }}
+            - name: AX_CAPTCHA_SECRET_KEY
+              value: "{{ .Values.env.arxignis.captchaSecretKey }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.captchaJwtSecret }}
+            - name: AX_CAPTCHA_JWT_SECRET
+              value: "{{ .Values.env.arxignis.captchaJwtSecret }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.captchaProvider }}
+            - name: AX_CAPTCHA_PROVIDER
+              value: "{{ .Values.env.arxignis.captchaProvider }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.captchaTokenTtl }}
+            - name: AX_CAPTCHA_TOKEN_TTL
+              value: "{{ .Values.env.arxignis.captchaTokenTtl }}"
+            {{- end }}
+            {{- if .Values.env.arxignis.captchaCacheTtl }}
+            - name: AX_CAPTCHA_CACHE_TTL
+              value: "{{ .Values.env.arxignis.captchaCacheTtl }}"
+            {{- end }}
+            {{- if .Values.env.logging.level }}
+            - name: AX_LOGGING_LEVEL
+              value: "{{ .Values.env.logging.level }}"
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/moat/config.yaml
+              subPath: config.yaml
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "moat.fullname" . }}
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

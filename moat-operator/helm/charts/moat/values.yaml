@@ -1,0 +1,363 @@
+﻿# Default values for moat
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# This will set the replicaset count more information can be found here: https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/
+replicaCount: 1
+
+# This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
+image:
+  repository: moat
+  # This sets the pull policy for images.
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+# This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+imagePullSecrets: []
+# This is to override the chart name.
+nameOverride: ""
+fullnameOverride: ""
+
+# Command-line arguments passed to the moat binary.
+# By default we point to the rendered ConfigMap at /etc/moat/config.yaml.
+args:
+  - "--config"
+  - "/etc/moat/config.yaml"
+
+# This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials?
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# This is for setting Kubernetes Annotations to a Pod.
+# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
+podAnnotations: {}
+# This is for setting Kubernetes Labels to a Pod.
+# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
+podLabels: {}
+
+# Pod security context for BPF/XDP access
+podSecurityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  runAsNonRoot: false
+  fsGroup: 0
+
+# Container security context
+securityContext:
+  privileged: true
+  capabilities:
+    add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - BPF
+      - SYS_RESOURCE
+    drop:
+      - ALL
+
+# This is for setting up a service more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/
+service:
+  # This sets the service type more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
+  type: ClusterIP
+  # HTTP port for ACME challenges and regular HTTP traffic
+  httpPort: 80
+  # HTTPS port for TLS traffic
+  httpsPort: 443
+  # Health check port
+  healthPort: 8080
+
+# Moat Configuration
+moat:
+  # Server Configuration
+  server:
+    # HTTP server bind address (for ACME HTTP-01 challenges and regular HTTP traffic)
+    httpAddr: "0.0.0.0:80"
+    # Additional HTTP bind addresses (overrides httpAddr if set)
+    httpBind: []
+    # HTTPS reverse-proxy bind address
+    tlsAddr: "0.0.0.0:443"
+    # Additional HTTPS bind addresses (overrides tlsAddr if set)
+    tlsBind: []
+    # Upstream origin URL (required)
+    upstream: "http://localhost:8080"
+    # PROXY protocol configuration
+    proxyProtocol:
+      # Enable PROXY protocol support for TCP connections
+      enabled: false
+      # PROXY protocol timeout in milliseconds
+      timeoutMs: 1000
+    # Health check endpoint configuration
+    healthCheck:
+      # Enable or disable health check server
+      enabled: true
+      # Health check endpoint path
+      endpoint: "/health"
+      # Health check server bind address (separate from main proxy)
+      port: "0.0.0.0:8080"
+      # Allowed HTTP methods for health checks
+      methods: ["GET", "HEAD"]
+      # Allowed CIDR blocks (empty means allow all IPs)
+      allowedCidrs: []
+
+  # TLS Configuration
+  tls:
+    # TLS operating mode: disabled, acme, custom
+    mode: "disabled"
+    # Require TLS for application traffic (HTTP used only for ACME)
+    only: false
+    # Path to custom certificate (PEM) when using custom TLS mode
+    certPath: null
+    # Path to custom private key (PEM) when using custom TLS mode
+    keyPath: null
+
+  # ACME Configuration
+  acme:
+    # Domains for ACME certificate issuance and domain whitelist
+    domains: []
+    # ACME contact addresses (mailto: optional)
+    contacts: []
+    # Use Let's Encrypt production directory instead of staging
+    useProd: false
+    # Override ACME directory URL (useful for Pebble or other test CAs)
+    directory: null
+    # Explicitly accept the ACME Terms of Service
+    acceptTos: false
+    # Custom CA bundle for the ACME directory (PEM file)
+    caRoot: null
+
+  # Redis Configuration
+  redis:
+    # Redis connection URL for ACME cache storage
+    url: "redis://127.0.0.1/0"
+    # Namespace prefix for Redis ACME cache entries
+    prefix: "ax:moat"
+
+  # Network Configuration
+  network:
+    # The network interface to attach the XDP program to
+    iface: "eth0"
+    # Additional network interfaces for XDP attach (overrides iface if set)
+    ifaces: []
+    # Disable XDP packet filtering (run without BPF/XDP)
+    disableXdp: false
+
+  # Arxignis Configuration
+  arxignis:
+    # API key for Arxignis service
+    apiKey: ""
+    # Base URL for Arxignis API
+    baseUrl: "https://api.arxignis.com/v1"
+    # Captcha Configuration
+    captcha:
+      # Captcha site key for security verification
+      siteKey: null
+      # Captcha secret key for security verification
+      secretKey: null
+      # JWT secret key for captcha token signing
+      jwtSecret: null
+      # Captcha provider: hcaptcha, recaptcha, turnstile
+      provider: "hcaptcha"
+      # Captcha token TTL in seconds
+      tokenTtl: 7200
+      # Captcha validation cache TTL in seconds
+      cacheTtl: 300
+
+  # Content Scanning Configuration
+  contentScanning:
+    # Enable or disable content scanning
+    enabled: false
+    # ClamAV server address
+    clamavServer: "localhost:3310"
+    # Maximum file size to scan in bytes (10MB)
+    maxFileSize: 10485760
+    # Content types to scan (empty means scan all)
+    scanContentTypes:
+      - "text/html"
+      - "application/x-www-form-urlencoded"
+      - "multipart/form-data"
+      - "application/json"
+      - "text/plain"
+    # Skip scanning for specific file extensions
+    skipExtensions: []
+    # Wirefilter expression to determine when to scan content
+    scanExpression: "http.request.method eq \"POST\" or http.request.method eq \"PUT\""
+
+  # Logging Configuration
+  logging:
+    # Log level: error, warn, info, debug, trace
+    level: "info"
+
+# Environment variable overrides (these will override config.yaml values)
+# All configuration options can be overridden using environment variables with the AX_ prefix
+env:
+  # Server environment variables
+  server:
+    httpAddr: null
+    tlsAddr: null
+    upstream: null
+    httpBind: null
+    tlsBind: null
+    healthCheckEnabled: null
+    healthCheckEndpoint: null
+    healthCheckPort: null
+    healthCheckMethods: null
+    healthCheckAllowedCidrs: null
+  # TLS environment variables
+  tls:
+    mode: null
+    only: null
+    certPath: null
+    keyPath: null
+  # ACME environment variables
+  acme:
+    domains: null
+    contacts: null
+    useProd: null
+    directory: null
+    acceptTos: null
+    caRoot: null
+  # Redis environment variables
+  redis:
+    url: null
+    prefix: null
+  # Network environment variables
+  network:
+    iface: null
+    ifaces: null
+    disableXdp: null
+  # Arxignis environment variables
+  arxignis:
+    apiKey: null
+    baseUrl: null
+    captchaSiteKey: null
+    captchaSecretKey: null
+    captchaJwtSecret: null
+    captchaProvider: null
+    captchaTokenTtl: null
+    captchaCacheTtl: null
+  # Logging environment variables
+  logging:
+    level: null
+
+# This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+
+# -- Expose the service via gateway-api HTTPRoute
+# Requires Gateway API resources and suitable controller installed within the cluster
+# (see: https://gateway-api.sigs.k8s.io/guides/)
+httpRoute:
+  # HTTPRoute enabled.
+  enabled: false
+  # HTTPRoute annotations.
+  annotations: {}
+  # Which Gateways this Route is attached to.
+  parentRefs:
+  - name: gateway
+    sectionName: http
+    # namespace: default
+  # Hostnames matching HTTP header.
+  hostnames:
+  - chart-example.local
+  # List of rules and filters applied.
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /headers
+  #   filters:
+  #   - type: RequestHeaderModifier
+  #     requestHeaderModifier:
+  #       set:
+  #       - name: My-Overwrite-Header
+  #         value: this-is-the-only-value
+  #       remove:
+  #       - User-Agent
+  # - matches:
+  #   - path:
+  #       type: PathPrefix
+  #       value: /echo
+  #     headers:
+  #     - name: version
+  #       value: v2
+
+resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+# This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# Additional volumes on the output Deployment definition.
+volumes: []
+# - name: foo
+#   secret:
+#     secretName: mysecret
+#     optional: false
+
+# Additional volumeMounts on the output Deployment definition.
+volumeMounts: []
+# - name: foo
+#   mountPath: "/etc/foo"
+#   readOnly: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Valkey Configuration
+valkey:
+  enabled: true
+
+clamav:
+  enabled: true

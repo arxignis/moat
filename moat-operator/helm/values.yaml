@@ -1,0 +1,44 @@
+global:
+  namespaces:
+    moat: moat
+    operator: moat-system
+
+moat:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/arxignis/moat
+    tag: latest
+    pullPolicy: IfNotPresent
+  moat:
+    server:
+      upstream: "http://example.com"
+    network:
+      disableXdp: true
+    arxignis:
+      apiKey: ""
+    redis:
+      url: ""
+    contentScanning:
+      scanExpression: 'http.request.method eq "POST" or http.request.method eq "PUT"'
+
+operator:
+  enabled: true
+  createNamespace: true
+  image:
+    repository: ghcr.io/arxignis/moat-operator
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  leaderElect: true
+  serviceAccount:
+    create: true
+    name: ""
+  rbac:
+    create: true
+  resources:
+    requests:
+      cpu: 5m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

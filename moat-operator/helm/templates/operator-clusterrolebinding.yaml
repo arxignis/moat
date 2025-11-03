@@ -1,0 +1,14 @@
+{{- if and .Values.operator.enabled .Values.operator.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: moat-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: moat-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ default "moat-operator" .Values.operator.serviceAccount.name }}
+    namespace: {{ .Values.global.namespaces.operator }}
+{{- end }}

@@ -1,0 +1,12 @@
+dependencies:
+- name: moat
+  repository: file://charts/moat
+  version: 0.1.0
+- name: valkey
+  repository: https://valkey.io/valkey-helm/
+  version: 0.7.7
+- name: clamav
+  repository: oci://registry.gitlab.com/xrow-public/helm-clamav/charts
+  version: 1.6.82
+digest: sha256:208ecba4dae57494ba76eb0e139fbf6f6742f77182aae2db48716c8980c9da7b
+generated: "2025-11-03T20:22:13.898099+01:00"
