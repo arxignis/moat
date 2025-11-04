@@ -581,10 +581,10 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
             }
             TlsMode::Disabled => {
                 // HTTP proxy for disabled TLS mode (multiple bind support)
-                let http_addrs: Vec<_> = if !args.http_bind.is_empty() {
-                    args.http_bind.clone()
+                let http_addrs: Vec<_> = if !config.server.http_bind.is_empty() {
+                    config.server.http_bind.iter().map(|addr| addr.parse::<SocketAddr>().unwrap()).collect()
                 } else {
-                    vec![args.http_addr]
+                    vec![config.server.http_addr.parse::<SocketAddr>().unwrap()]
                 };
 
                 if http_addrs.len() > 1 { log::info!("Starting {} HTTP listeners", http_addrs.len()); }
