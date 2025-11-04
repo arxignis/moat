@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -eu pipefail
+set -eu
+[ -n "${BASH_VERSION:-}" ] && set -o pipefail
 
 # ===== settings =====
 CLUSTER_NAME="arxignis"
@@ -13,12 +14,21 @@ OP_DEPLOY="moat-operator"  # operator Deployment
 
 # public Helm repo + chart version to install
 HELM_REPO_NAME="arxignis"
-HELM_REPO_URL="https://arxignis.github.io/helm-charts"
+HELM_REPO_URL="https://moat.arxignis.com/helm-charts"
 CHART="${HELM_REPO_NAME}/moat-stack"
 CHART_VER="0.1.2"
 
 # ===== prompt for API key =====
-read -rs -p "Enter ArxIgnis API key: " MOAT_API_KEY; echo
+if [ -n "${BASH_VERSION:-}" ]; then
+  read -rs -p "Enter ArxIgnis API key: " MOAT_API_KEY; echo
+else
+  # POSIX-compatible fallback for sh
+  printf "Enter ArxIgnis API key: "
+  stty -echo
+  read MOAT_API_KEY
+  stty echo
+  echo
+fi
 [ -z "${MOAT_API_KEY:-}" ] && echo "API key is required." >&2 && exit 1
 
 as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
@@ -145,10 +155,10 @@ cat <<'EONEXT'
 To WATCH a restart (use two terminals):
 
   Terminal A)
-    kubectl -n moat get pods -w
+    kubectl -n "${MOAT_NS}" get pods -w
 
   Terminal B)
-    moat-toggle-config    # flips logging level info↔debug and should trigger a rollout
+    moat-toggle-config    # flips logging level info<->debug and should trigger a rollout
 
 Handy shortcuts:
   moat-logs              # stream dataplane logs
