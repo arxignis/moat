@@ -75,6 +75,19 @@ curl -fSL https://github.com/arxignis/moat/blob/main/install.sh | sh
 ```
 ✅ Tested with Ubuntu 24.04
 
+### Kubernetes install
+```bash
+helm repo add arxignis https://helm.arxignis.com
+helm install moat-stack
+```
+
+[More details here.](./docs/OPERATOR_README.md)
+
+### Killercoda playground
+```bash
+curl -sSL https://raw.githubusercontent.com/arxignis/moat/main/scenarios/moat-operator/moat.sh | bash -s -- --api-key <YOUR_API_KEY>
+```
+
 ## Configuration
 You have 3 options can configure moat.
 - config file

@@ -3,7 +3,7 @@
 ## Add the Helm repo
 
 ```sh
-helm repo add arxignis https://arxignis.github.io/helm-charts
+helm repo add arxignis https://helm.arxignis.com
 helm repo update
 helm search repo arxignis
 # arxignis/moat
