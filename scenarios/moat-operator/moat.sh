@@ -205,7 +205,7 @@ as_root chmod +x /usr/local/bin/moat-toggle-config
 echo
 echo "[moat] ✅ Install complete."
 
-cat <<'EONEXT'
+cat <<EONEXT
 
 To WATCH a restart (use two terminals):
 
