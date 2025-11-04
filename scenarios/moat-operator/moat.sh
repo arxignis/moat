@@ -3,9 +3,9 @@ set -eu
 [ -n "${BASH_VERSION:-}" ] && set -o pipefail
 
 # ===== settings =====
-CLUSTER_NAME="arxignis"
-MOAT_NS="arxignis"
-OP_NS="arxignis-system"
+CLUSTER_NAME="ax"
+MOAT_NS="ax"
+OP_NS="ax-system"
 
 # hardcoded resource names (created by the umbrella chart)
 DP_DEPLOY="moat-stack"     # dataplane Deployment
@@ -14,20 +14,36 @@ OP_DEPLOY="moat-operator"  # operator Deployment
 
 # public Helm repo + chart version to install
 HELM_REPO_NAME="arxignis"
-HELM_REPO_URL="https://moat.arxignis.com/helm-charts"
+HELM_REPO_URL="https://helm.arxignis.com"
 CHART="${HELM_REPO_NAME}/moat-stack"
 CHART_VER="0.1.2"
 
 # ===== prompt for API key =====
-if [ -n "${BASH_VERSION:-}" ]; then
-  read -rs -p "Enter ArxIgnis API key: " MOAT_API_KEY; echo
-else
-  # POSIX-compatible fallback for sh
-  printf "Enter ArxIgnis API key: "
-  stty -echo
-  read MOAT_API_KEY
-  stty echo
-  echo
+if [ -z "${MOAT_API_KEY:-}" ]; then
+  if [ -n "${BASH_VERSION:-}" ]; then
+    if [ -t 0 ]; then
+      # Bash with terminal: use silent read
+      read -rs -p "Enter ArxIgnis API key: " MOAT_API_KEY; echo
+    else
+      # Bash without terminal (piped): read without hiding
+      printf "Enter ArxIgnis API key: "
+      read MOAT_API_KEY
+      echo
+    fi
+  else
+    # POSIX-compatible fallback for sh
+    printf "Enter ArxIgnis API key: "
+    if [ -t 0 ]; then
+      # Terminal available: hide input
+      stty -echo 2>/dev/null || true
+      read MOAT_API_KEY
+      stty echo 2>/dev/null || true
+    else
+      # No terminal (piped): read without hiding
+      read MOAT_API_KEY
+    fi
+    echo
+  fi
 fi
 [ -z "${MOAT_API_KEY:-}" ] && echo "API key is required." >&2 && exit 1
 
