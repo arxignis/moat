@@ -23,6 +23,9 @@
 
 # Server Configuration
 server:
+  # Disable HTTP server and run as standalone agent with access rules only
+  disable_http_server: false
+
   # HTTP server bind address (for ACME HTTP-01 challenges and regular HTTP traffic)
   http_addr: "0.0.0.0:80"
 
