@@ -18,21 +18,60 @@ HELM_REPO_URL="https://helm.arxignis.com"
 CHART="${HELM_REPO_NAME}/moat-stack"
 CHART_VER="0.1.2"
 
+# ===== parse CLI arguments =====
+show_help() {
+  cat <<EOF
+Usage: $0 [OPTIONS]
+
+Options:
+  -k, --api-key KEY    ArxIgnis API key (or use MOAT_API_KEY env var)
+  -h, --help           Show this help message
+
+Examples:
+  $0 --api-key your-api-key-here
+  MOAT_API_KEY=your-key $0
+  curl -sSL https://raw.githubusercontent.com/arxignis/moat/main/scenarios/moat-operator/moat.sh | bash -s -- --api-key your-key
+EOF
+  exit 0
+}
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -k|--api-key)
+      if [ -z "${2:-}" ]; then
+        echo "Error: --api-key requires a value" >&2
+        exit 1
+      fi
+      MOAT_API_KEY="$2"
+      shift 2
+      ;;
+    -h|--help)
+      show_help
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Use --help for usage information" >&2
+      exit 1
+      ;;
+  esac
+done
+
 # ===== prompt for API key =====
 if [ -z "${MOAT_API_KEY:-}" ]; then
   if [ -n "${BASH_VERSION:-}" ]; then
     if [ -t 0 ]; then
       # Bash with terminal: use silent read
-      read -rs -p "Enter ArxIgnis API key: " MOAT_API_KEY; echo
+      read -rs -p "Enter Arxignis API key: " MOAT_API_KEY; echo
     else
       # Bash without terminal (piped): read without hiding
-      printf "Enter ArxIgnis API key: "
+      printf "Enter Arxignis API key: "
       read MOAT_API_KEY
       echo
     fi
   else
     # POSIX-compatible fallback for sh
-    printf "Enter ArxIgnis API key: "
+    printf "Enter Arxignis API key: "
     if [ -t 0 ]; then
       # Terminal available: hide input
       stty -echo 2>/dev/null || true
