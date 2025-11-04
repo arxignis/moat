@@ -71,7 +71,7 @@ Configuration from higher priority sources overrides lower priority sources. For
 
 ### Ubuntu install
 ```bash
-curl -fSL https://github.com/arxignis/moat/blob/main/install.sh | sh
+curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/main/install.sh | sh
 ```
 ✅ Tested with Ubuntu 24.04
 
