@@ -39,6 +39,70 @@ Moat is a high-performance reverse proxy and firewall built with Rust, featuring
 - **Unified event queue** with batched processing for logs, statistics, and events
 - **Flexible configuration** via YAML files, command line arguments, or environment variables
 
+## Modes
+
+Moat can run in two modes:
+
+### Reverse Proxy Mode (Default)
+
+Moat runs as a full-featured reverse proxy with HTTP/HTTPS support, forwarding requests to upstream servers while applying access rules and threat intelligence at the kernel level.
+
+**Features:**
+- HTTP/HTTPS reverse proxy
+- TLS certificate management (ACME or custom)
+- Request forwarding to upstream servers
+- Access rules enforcement
+- Threat intelligence integration
+- Content scanning and CAPTCHA protection
+
+**Configuration:**
+```yaml
+server:
+  disable_http_server: false  # Default: HTTP server enabled
+  http_addr: "0.0.0.0:80"
+  tls_addr: "0.0.0.0:443"
+  upstream: "http://localhost:8080"
+```
+
+**CLI:**
+```bash
+moat --upstream http://localhost:8080 --arxignis-api-key "your-key"
+```
+
+### Standalone Agent Mode
+
+Moat runs as a standalone agent focused on access rules enforcement without HTTP/HTTPS proxy functionality. This mode is ideal for network-level protection where you don't need request proxying.
+
+**Features:**
+- XDP-based packet filtering at kernel level
+- Dynamic access rules with automatic updates from Arxignis API
+- BPF statistics collection
+- TCP fingerprinting
+- No HTTP/HTTPS proxy servers (no upstream required)
+- Health check server still available (if enabled)
+
+**Configuration:**
+```yaml
+server:
+  disable_http_server: true  # Disable HTTP server, run as standalone agent
+```
+
+**CLI:**
+```bash
+moat --disable-http-server --arxignis-api-key "your-key"
+```
+
+**Environment Variable:**
+```bash
+export AX_SERVER_DISABLE_HTTP_SERVER=true
+```
+
+**Use Cases:**
+- Network-level firewall protection without proxying
+- Access rules enforcement at the edge
+- Kernel-level IP blocking without HTTP overhead
+- Integration with existing reverse proxies or load balancers
+
 ## Configuration Methods
 
 Moat supports three configuration methods with the following priority (highest to lowest):
