@@ -28,6 +28,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    #[serde(default = "default_disable_http_server")]
+    pub disable_http_server: bool,
     pub http_addr: String,
     pub http_bind: Vec<String>,
     pub tls_addr: String,
@@ -36,6 +38,8 @@ pub struct ServerConfig {
     pub proxy_protocol: ProxyProtocolConfig,
     pub health_check: HealthCheckConfig,
 }
+
+fn default_disable_http_server() -> bool { false }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyProtocolConfig {
@@ -175,6 +179,7 @@ impl Config {
     pub fn default() -> Self {
         Self {
             server: ServerConfig {
+                disable_http_server: false,
                 http_addr: "0.0.0.0:80".to_string(),
                 http_bind: vec![],
                 tls_addr: "0.0.0.0:443".to_string(),
@@ -255,6 +260,9 @@ impl Config {
 
     pub fn merge_with_args(&mut self, args: &Args) {
         // Override config values with command line arguments if provided
+        if args.disable_http_server {
+            self.server.disable_http_server = true;
+        }
         if !args.http_bind.is_empty() {
             self.server.http_bind = args.http_bind.iter().map(|addr| addr.to_string()).collect();
         }
@@ -336,7 +344,8 @@ impl Config {
 
     pub fn validate_required_fields(&mut self, args: &Args) -> Result<()> {
         // Check if upstream is provided either via CLI args or config file
-        if args.upstream.is_none() && self.server.upstream.is_empty() {
+        // Skip this check if HTTP server is disabled (standalone agent mode)
+        if !self.server.disable_http_server && args.upstream.is_none() && self.server.upstream.is_empty() {
             return Err(anyhow::anyhow!("Upstream URL is required. Provide it via --upstream argument or in config file"));
         }
 
@@ -553,6 +562,10 @@ pub struct Args {
     /// Path to configuration file (YAML format)
     #[arg(long, short = 'c')]
     pub config: Option<PathBuf>,
+
+    /// Disable HTTP server and run as standalone agent with access rules only
+    #[arg(long, default_value_t = false)]
+    pub disable_http_server: bool,
 
     /// HTTP server bind address (for ACME HTTP-01 challenges and regular HTTP traffic).
     #[arg(long, default_value = "0.0.0.0:80")]

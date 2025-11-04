@@ -357,7 +357,8 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
                    config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());
     }
 
-    let upstream_uri = {
+    // Only parse upstream URI if HTTP server is enabled
+    let upstream_uri = if !config.server.disable_http_server {
         let parsed = config.server.upstream
             .parse::<Uri>()
             .context("failed to parse upstream URI from config")?;
@@ -366,7 +367,9 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
                 "upstream URI must be absolute (e.g. http://127.0.0.1:8081)",
             ));
         }
-        parsed
+        Some(parsed)
+    } else {
+        None
     };
 
 
@@ -435,37 +438,42 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
     };
 
     let tls_handle = {
-        let mut builder = Client::builder(TokioExecutor::new());
-        builder.timer(TokioTimer::new());
-        builder.pool_timer(TokioTimer::new());
-        let client: Client<_, Full<Bytes>> = builder.build_http();
+        if config.server.disable_http_server {
+            log::info!("HTTP server disabled - running as standalone agent with access rules only");
+            None
+        } else {
+            let upstream_uri = upstream_uri.unwrap(); // Safe because we checked disable_http_server above
+            let mut builder = Client::builder(TokioExecutor::new());
+            builder.timer(TokioTimer::new());
+            builder.pool_timer(TokioTimer::new());
+            let client: Client<_, Full<Bytes>> = builder.build_http();
 
-        // Create domain filter from CLI arguments
-        // Use expanded domains as the whitelist (serves dual purpose)
-        let domain_filter = DomainFilter::new(
-            expanded_domains.clone(),
-            vec![],
-        );
-
-        if domain_filter.is_enabled() {
-            log::info!(
-                "Domain filtering enabled: {} whitelist entries",
-                expanded_domains.len()
+            // Create domain filter from CLI arguments
+            // Use expanded domains as the whitelist (serves dual purpose)
+            let domain_filter = DomainFilter::new(
+                expanded_domains.clone(),
+                vec![],
             );
-        }
 
-        let proxy_ctx = Arc::new(http::ProxyContext {
-            client,
-            upstream: upstream_uri.clone(),
-            domain_filter,
-            tls_only: config.tls.only,
-            proxy_protocol_enabled: config.server.proxy_protocol.enabled,
-            proxy_protocol_timeout_ms: config.server.proxy_protocol.timeout_ms,
-            tcp_fingerprint_collector: state.tcp_fingerprint_collector.clone(),
-        });
+            if domain_filter.is_enabled() {
+                log::info!(
+                    "Domain filtering enabled: {} whitelist entries",
+                    expanded_domains.len()
+                );
+            }
 
-        match tls_mode {
-            TlsMode::Custom => {
+            let proxy_ctx = Arc::new(http::ProxyContext {
+                client,
+                upstream: upstream_uri,
+                domain_filter,
+                tls_only: config.tls.only,
+                proxy_protocol_enabled: config.server.proxy_protocol.enabled,
+                proxy_protocol_timeout_ms: config.server.proxy_protocol.timeout_ms,
+                tcp_fingerprint_collector: state.tcp_fingerprint_collector.clone(),
+            });
+
+            match tls_mode {
+                TlsMode::Custom => {
                 let cert_path_str = config.tls.cert_path.as_ref().unwrap().clone();
                 let key_path_str = config.tls.key_path.as_ref().unwrap().clone();
                 let cert_path = std::path::Path::new(&cert_path_str);
@@ -617,6 +625,7 @@ async fn async_main(args: Args, config: Config) -> Result<()> {
                         let _ = t.await;
                     }
                 }))
+            }
             }
         }
     };
