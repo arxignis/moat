@@ -70,6 +70,25 @@ impl HttpFilter {
         // Register functions used in Cloudflare-style expressions
         builder.add_function("any", wirefilter::AnyFunction::default()).unwrap();
         builder.add_function("all", wirefilter::AllFunction::default()).unwrap();
+        
+        builder.add_function("cidr", wirefilter::CIDRFunction::default()).unwrap();
+        builder.add_function("concat", wirefilter::ConcatFunction::default()).unwrap();
+        builder.add_function("decode_base64", wirefilter::DecodeBase64Function::default()).unwrap();
+        builder.add_function("ends_with", wirefilter::EndsWithFunction::default()).unwrap();
+        builder.add_function("json_lookup_integer", wirefilter::JsonLookupIntegerFunction::default()).unwrap();
+        builder.add_function("json_lookup_string", wirefilter::JsonLookupStringFunction::default()).unwrap();
+        builder.add_function("len", wirefilter::LenFunction::default()).unwrap();
+        builder.add_function("lower", wirefilter::LowerFunction::default()).unwrap();
+        builder.add_function("remove_bytes", wirefilter::RemoveBytesFunction::default()).unwrap();
+        builder.add_function("remove_query_args", wirefilter::RemoveQueryArgsFunction::default()).unwrap();
+        builder.add_function("starts_with", wirefilter::StartsWithFunction::default()).unwrap();
+        builder.add_function("substring", wirefilter::SubstringFunction::default()).unwrap();
+        builder.add_function("to_string", wirefilter::ToStringFunction::default()).unwrap();
+        builder.add_function("upper", wirefilter::UpperFunction::default()).unwrap();
+        builder.add_function("url_decode", wirefilter::UrlDecodeFunction::default()).unwrap();
+        builder.add_function("uuid4", wirefilter::UUID4Function::default()).unwrap();
+        builder.add_function("wildcard_replace", wirefilter::WildcardReplaceFunction::default()).unwrap();
+        
 
         builder.build()
     }
