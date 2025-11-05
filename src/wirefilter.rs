@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock, OnceLock};
+use std::borrow::Cow;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -7,6 +8,7 @@ use wirefilter::{ExecutionContext, Scheme, TypedArray, TypedMap};
 use crate::config::{Config, fetch_config};
 use crate::threat;
 use anyhow::anyhow;
+use regex::{Captures, Regex};
 
 /// WAF action types
 #[derive(Debug, Clone, PartialEq)]
@@ -74,13 +76,89 @@ impl HttpFilter {
         builder.build()
     }
 
+    /// Normalize Cloudflare-style helper functions to regex-based equivalents
+    fn normalize_expression(expr: &str) -> Cow<'_, str> {
+        // Lazy regexes for matching various function patterns
+        static RE_STARTS_WITH_LOWER: OnceLock<Regex> = OnceLock::new();
+        static RE_ENDS_WITH_LOWER: OnceLock<Regex> = OnceLock::new();
+        static RE_LOWER_CONTAINS: OnceLock<Regex> = OnceLock::new();
+        static RE_STARTS_WITH: OnceLock<Regex> = OnceLock::new();
+        static RE_ENDS_WITH: OnceLock<Regex> = OnceLock::new();
+
+        let re_starts_with_lower = RE_STARTS_WITH_LOWER.get_or_init(|| {
+            Regex::new(r#"(?i)\bstarts_with\s*\(\s*lower\s*\(\s*(?P<field>[^,]+?)\s*\)\s*,\s*"(?P<needle>[^"]*)"\s*\)"#).unwrap()
+        });
+        let re_ends_with_lower = RE_ENDS_WITH_LOWER.get_or_init(|| {
+            Regex::new(r#"(?i)\bends_with\s*\(\s*lower\s*\(\s*(?P<field>[^,]+?)\s*\)\s*,\s*"(?P<needle>[^"]*)"\s*\)"#).unwrap()
+        });
+        let re_lower_contains = RE_LOWER_CONTAINS.get_or_init(|| {
+            Regex::new(r#"(?i)\blower\s*\(\s*(?P<field>[^)]+?)\s*\)\s*contains\s*"(?P<needle>[^"]*)""#).unwrap()
+        });
+        let re_starts_with = RE_STARTS_WITH.get_or_init(|| {
+            Regex::new(r#"(?i)\bstarts_with\s*\(\s*(?P<field>[^,]+?)\s*,\s*"(?P<needle>[^"]*)"\s*\)"#).unwrap()
+        });
+        let re_ends_with = RE_ENDS_WITH.get_or_init(|| {
+            Regex::new(r#"(?i)\bends_with\s*\(\s*(?P<field>[^,]+?)\s*,\s*"(?P<needle>[^"]*)"\s*\)"#).unwrap()
+        });
+
+        // Work on a String as we'll do multiple passes
+        let mut s = expr.to_string();
+
+        // Process specific → general, so we preserve case-insensitive intent when lower() was used
+        s = re_starts_with_lower
+            .replace_all(&s, |caps: &Captures| {
+                let field = caps["field"].trim();
+                let needle = regex::escape(&caps["needle"]);
+                format!(r#"{field} matches "(?i)^{needle}""#)
+            })
+            .into_owned();
+
+        s = re_ends_with_lower
+            .replace_all(&s, |caps: &Captures| {
+                let field = caps["field"].trim();
+                let needle = regex::escape(&caps["needle"]);
+                format!(r#"{field} matches "(?i){needle}$""#)
+            })
+            .into_owned();
+
+        s = re_lower_contains
+            .replace_all(&s, |caps: &Captures| {
+                let field = caps["field"].trim();
+                let needle = regex::escape(&caps["needle"]);
+                format!(r#"{field} matches "(?i){needle}""#)
+            })
+            .into_owned();
+
+        // Case-sensitive variants
+        s = re_starts_with
+            .replace_all(&s, |caps: &Captures| {
+                let field = caps["field"].trim();
+                let needle = regex::escape(&caps["needle"]);
+                format!(r#"{field} matches "^{needle}""#)
+            })
+            .into_owned();
+
+        s = re_ends_with
+            .replace_all(&s, |caps: &Captures| {
+                let field = caps["field"].trim();
+                let needle = regex::escape(&caps["needle"]);
+                format!(r#"{field} matches "{needle}$""#)
+            })
+            .into_owned();
+
+        Cow::Owned(s)
+    }
+
     /// Create a new HTTP filter with the given filter expression (static version)
     pub fn new(filter_expr: &'static str) -> Result<Self> {
         // Create the scheme with HTTP request fields
         let scheme = Arc::new(Self::create_scheme());
 
+        // Normalize the expression before parsing
+        let normalized = Self::normalize_expression(filter_expr);
+
         // Parse the filter expression
-        let ast = scheme.parse(filter_expr)?;
+        let ast = scheme.parse(&normalized)?;
 
         // Compile the filter
         let filter = ast.compile();
@@ -119,20 +197,23 @@ impl HttpFilter {
                 continue;
             }
 
+            // Normalize the expression before parsing
+            let normalized = Self::normalize_expression(&rule.expression);
+
             // Try to parse the expression to validate it
-            if let Err(error) = scheme.parse(&rule.expression) {
+            if let Err(error) = scheme.parse(&normalized) {
                 log::warn!("Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
             // Compile the rule
-            let expression = Box::leak(rule.expression.clone().into_boxed_str());
+            let expression = Box::leak(normalized.into_owned().into_boxed_str());
             let ast = scheme.parse(expression)?;
             let filter = ast.compile();
             let action = WafAction::from_str(&rule.action);
 
             compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone()));
-            rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, rule.expression));
+            rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, expression));
         }
 
         if compiled_rules.is_empty() {
@@ -165,20 +246,23 @@ impl HttpFilter {
                 continue;
             }
 
+            // Normalize the expression before parsing
+            let normalized = Self::normalize_expression(&rule.expression);
+
             // Try to parse the expression to validate it
-            if let Err(error) = self.scheme.parse(&rule.expression) {
+            if let Err(error) = self.scheme.parse(&normalized) {
                 log::warn!("Invalid WAF rule expression for rule '{}': {}: {}", rule.name, rule.expression, error);
                 continue;
             }
 
             // Compile the rule
-            let expression = Box::leak(rule.expression.clone().into_boxed_str());
+            let expression = Box::leak(normalized.into_owned().into_boxed_str());
             let ast = self.scheme.parse(expression)?;
             let filter = ast.compile();
             let action = WafAction::from_str(&rule.action);
 
             compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone()));
-            rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, rule.expression));
+            rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, expression));
         }
 
         // Compute hash and skip update if unchanged
