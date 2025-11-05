@@ -3,8 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, env};
 use anyhow::Result;
 use clap::Parser;
 use clap::ValueEnum;
-use serde::{Deserialize, Deserializer, Serialize};
-use serde::de::{self, Visitor};
+use serde::{Deserialize, Serialize};
 
 use crate::http::TlsMode;
 use crate::actions::captcha::CaptchaProvider;
@@ -42,7 +41,7 @@ pub struct ServerConfig {
 
 fn default_disable_http_server() -> bool { false }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyProtocolConfig {
     #[serde(default = "default_proxy_protocol_enabled")]
     pub enabled: bool,
@@ -52,54 +51,6 @@ pub struct ProxyProtocolConfig {
 
 fn default_proxy_protocol_enabled() -> bool { false }
 fn default_proxy_protocol_timeout() -> u64 { 1000 }
-
-impl<'de> Deserialize<'de> for ProxyProtocolConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ProxyProtocolConfigVisitor;
-
-        impl<'de> Visitor<'de> for ProxyProtocolConfigVisitor {
-            type Value = ProxyProtocolConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a boolean or a ProxyProtocolConfig struct")
-            }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(ProxyProtocolConfig {
-                    enabled: value,
-                    timeout_ms: default_proxy_protocol_timeout(),
-                })
-            }
-
-            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                #[derive(Deserialize)]
-                struct ProxyProtocolConfigHelper {
-                    #[serde(default = "default_proxy_protocol_enabled")]
-                    enabled: bool,
-                    #[serde(default = "default_proxy_protocol_timeout")]
-                    timeout_ms: u64,
-                }
-
-                let helper = ProxyProtocolConfigHelper::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(ProxyProtocolConfig {
-                    enabled: helper.enabled,
-                    timeout_ms: helper.timeout_ms,
-                })
-            }
-        }
-
-        deserializer.deserialize_any(ProxyProtocolConfigVisitor)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckConfig {
