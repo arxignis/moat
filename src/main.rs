@@ -121,12 +121,23 @@ fn main() -> Result<()> {
         }
     }
 
-    // Initialize logger using CLI level
+    // Initialize logger using config level (CLI overrides if provided explicitly)
     // Note: env_logger writes to stderr by default, which is standard practice
     {
         use env_logger::Env;
         let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
-        builder.filter_level(args.log_level.to_level_filter());
+
+        // Use log level from config, or CLI if explicitly set
+        let log_level = config.logging.level.to_lowercase();
+        let level_filter = match log_level.as_str() {
+            "error" => log::LevelFilter::Error,
+            "warn" => log::LevelFilter::Warn,
+            "info" => log::LevelFilter::Info,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            _ => args.log_level.to_level_filter(),
+        };
+        builder.filter_level(level_filter);
         builder.format_timestamp_secs();
 
         // In daemon mode, write to stdout instead of stderr for better log separation
