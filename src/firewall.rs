@@ -2,7 +2,7 @@ use std::{error::Error, net::{Ipv4Addr, Ipv6Addr}};
 
 use libbpf_rs::{MapCore, MapFlags};
 
-use crate::{bpf::FilterSkel, utils};
+use crate::utils::bpf_utils;
 
 pub trait Firewall {
     fn ban_ip_with_notice(&mut self, ip: Ipv4Addr, prefixlen: u32) -> Result<(), Box<dyn Error>>;
@@ -18,18 +18,18 @@ pub trait Firewall {
 }
 
 pub struct MOATFirewall<'a> {
-    skel: &'a FilterSkel<'a>,
+    skel: &'a crate::bpf::FilterSkel<'a>,
 }
 
 impl<'a> MOATFirewall<'a> {
-    pub fn new(skel: &'a FilterSkel<'a>) -> Self {
+    pub fn new(skel: &'a crate::bpf::FilterSkel<'a>) -> Self {
         Self { skel }
     }
 }
 
 impl<'a> Firewall for MOATFirewall<'a> {
     fn ban_ip_with_notice(&mut self, ip: Ipv4Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
+        let ip_bytes = &bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
         let flag = 1_u8;
 
         self.skel
@@ -41,7 +41,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     }
 
     fn ban_ip(&mut self, ip: Ipv4Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
+        let ip_bytes = &bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
         let flag = 1_u8;
 
         self.skel
@@ -53,7 +53,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     }
 
     fn check_if_notice(&mut self, ip: Ipv4Addr) -> Result<bool, Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, 32);
+        let ip_bytes = &bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, 32);
 
         if let Some(val) = self
             .skel
@@ -72,7 +72,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     }
 
     fn unban_ip(&mut self, ip: Ipv4Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
+        let ip_bytes = &bpf_utils::convert_ip_into_bpf_map_key_bytes(ip, prefixlen);
 
         self.skel.maps.banned_ips.delete(ip_bytes)?;
 
@@ -81,7 +81,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
 
     // IPv6 implementations
     fn ban_ipv6_with_notice(&mut self, ip: Ipv6Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, prefixlen);
+        let ip_bytes = &bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, prefixlen);
         let flag = 1_u8;
 
         self.skel
@@ -93,7 +93,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     }
 
     fn ban_ipv6(&mut self, ip: Ipv6Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, prefixlen);
+        let ip_bytes = &bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, prefixlen);
         let flag = 1_u8;
 
         self.skel
@@ -105,7 +105,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     }
 
     fn check_if_notice_ipv6(&mut self, ip: Ipv6Addr) -> Result<bool, Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, 128);
+        let ip_bytes = &bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, 128);
 
         if let Some(val) = self
             .skel
@@ -124,7 +124,7 @@ impl<'a> Firewall for MOATFirewall<'a> {
     }
 
     fn unban_ipv6(&mut self, ip: Ipv6Addr, prefixlen: u32) -> Result<(), Box<dyn Error>> {
-        let ip_bytes = &utils::bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, prefixlen);
+        let ip_bytes = &bpf_utils::convert_ipv6_into_bpf_map_key_bytes(ip, prefixlen);
 
         self.skel.maps.banned_ips_v6.delete(ip_bytes)?;
 

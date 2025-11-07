@@ -4,15 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use hyper::Response;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use crate::ja4_plus::{Ja4hFingerprint, Ja4tFingerprint};
-use crate::proxy_utils::ProxyBody;
+// use crate::utils::tls_fingerprint::Ja4hFingerprint;
+use crate::ja4_plus::Ja4tFingerprint;
 use crate::event_queue::{send_event, UnifiedEvent};
 use crate::tcp_fingerprint::TcpFingerprintData;
 
@@ -160,12 +160,11 @@ impl HttpAccessLog {
         req_body_bytes: &bytes::Bytes,
         peer_addr: SocketAddr,
         dst_addr: SocketAddr,
-        tls_fingerprint: Option<&crate::http::tls_fingerprint::Fingerprint>,
+        tls_fingerprint: Option<&crate::ja4_plus::Ja4hFingerprint>,
         tcp_fingerprint_data: Option<&TcpFingerprintData>,
         response_data: ResponseData,
         waf_result: Option<&crate::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
-        server_cert_info: Option<&crate::http::ServerCertInfo>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
         let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
@@ -216,12 +215,12 @@ impl HttpAccessLog {
         }
 
         // Generate JA4H fingerprint
-        let ja4h_fp = Ja4hFingerprint::from_http_request(
-            req_parts.method.as_str(),
-            &format!("{:?}", req_parts.version),
-            &req_parts.headers
-        );
-        let ja4h = Some(ja4h_fp.fingerprint);
+        // let ja4h_fp = Ja4hFingerprint::from_http_request(
+        //     req_parts.method.as_str(),
+        //     &format!("{:?}", req_parts.version),
+        //     &req_parts.headers
+        // );
+        // let ja4h = Some(ja4h_fp.fingerprint);
 
         // Get log sender configuration for body processing
         let log_config = {
@@ -263,25 +262,38 @@ impl HttpAccessLog {
 
         // Process TLS details
         let tls_details = if let Some(fp) = tls_fingerprint {
-            // Determine cipher based on TLS version
-            let cipher = match fp.tls_version.as_str() {
-                "TLSv1.3" | "13" => "TLS_AES_256_GCM_SHA384", // Most common TLS 1.3 cipher
-                "TLSv1.2" | "12" => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", // Most common TLS 1.2 cipher
-                "TLSv1.1" | "11" => "TLS_RSA_WITH_AES_256_CBC_SHA",
-                "TLSv1.0" | "10" => "TLS_RSA_WITH_AES_256_CBC_SHA",
-                _ => "TLS_AES_256_GCM_SHA384", // Default to TLS 1.3 cipher
+            // Map HTTP version to approximate TLS version for HTTPS
+            let tls_version = if scheme == "https" {
+                match fp.version.as_str() {
+                    "2.0" | "2" => "TLS 1.2".to_string(), // HTTP/2 typically uses TLS 1.2+
+                    "3.0" | "3" => "TLS 1.3".to_string(), // HTTP/3 uses TLS 1.3
+                    _ => "TLS 1.2".to_string(), // Default for HTTPS
+                }
+            } else {
+                "".to_string() // No TLS for HTTP
             };
 
-            // Extract server certificate details if available
-            let server_cert = extract_server_cert_details(&fp, server_cert_info);
+            // Determine cipher based on inferred TLS version
+            let cipher = if scheme == "https" {
+                match fp.version.as_str() {
+                    "3.0" | "3" => "TLS_AES_256_GCM_SHA384", // HTTP/3 uses TLS 1.3
+                    "2.0" | "2" => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", // HTTP/2 typically uses TLS 1.2
+                    _ => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", // Default TLS 1.2 cipher
+                }
+            } else {
+                "" // No cipher for HTTP
+            };
+
+            // Server certificate details not available
+            let server_cert = None;
 
             Some(TlsDetails {
-                version: fp.tls_version.clone(),
+                version: tls_version,
                 cipher: cipher.to_string(),
-                alpn: fp.alpn.clone(),
-                sni: fp.sni.clone(),
-                ja4: Some(fp.ja4.clone()),
-                ja4_unsorted: Some(fp.ja4_unsorted.clone()),
+                alpn: None, // Not available in Ja4hFingerprint
+                sni: None, // Not available in Ja4hFingerprint
+                ja4: Some(fp.fingerprint.clone()), // Use HTTP fingerprint
+                ja4_unsorted: None, // Not available in Ja4hFingerprint
                 ja4t: ja4t.clone(),
                 server_cert,
             })
@@ -311,7 +323,7 @@ impl HttpAccessLog {
             query: query.clone(),
             query_hash: if query.is_empty() { None } else { Some(format!("{:x}", Sha256::digest(query.as_bytes()))) },
             headers,
-            ja4h,
+            ja4h: None, // JA4H fingerprint generation is commented out
             user_agent,
             content_type,
             content_length: Some(req_body_bytes.len() as u64),
@@ -455,7 +467,7 @@ pub struct ResponseData {
 
 impl ResponseData {
     /// Create response data for a regular response
-    pub async fn from_response(response: Response<ProxyBody>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn from_response(response: Response<Full<bytes::Bytes>>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (response_parts, response_body) = response.into_parts();
         let response_body_bytes = response_body.collect().await?.to_bytes();
         let response_body_str = String::from_utf8_lossy(&response_body_bytes).to_string();
@@ -558,33 +570,31 @@ impl ResponseData {
 
 
 /// Extract server certificate details from server certificate info
-fn extract_server_cert_details(_fp: &crate::http::tls_fingerprint::Fingerprint, server_cert_info: Option<&crate::http::ServerCertInfo>) -> Option<ServerCertDetails> {
-    server_cert_info.map(|cert_info| {
-        // Parse the date strings from ServerCertInfo
-        let not_before = chrono::DateTime::parse_from_rfc3339(&cert_info.not_before)
-            .unwrap_or_else(|_| Utc::now().into())
-            .with_timezone(&Utc);
-        let not_after = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after)
-            .unwrap_or_else(|_| Utc::now().into())
-            .with_timezone(&Utc);
+// fn extract_server_cert_details(_fp: &crate::utils::tls_fingerprint::Fingerprint, server_cert_info: Option<&crate::http::ServerCertInfo>) -> Option<ServerCertDetails> {
+//     server_cert_info.map(|cert_info| {
+//         // Parse the date strings from ServerCertInfo
+//         let not_before = chrono::DateTime::parse_from_rfc3339(&cert_info.not_before)
+//             .unwrap_or_else(|_| Utc::now().into())
+//             .with_timezone(&Utc);
+//         let not_after = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after)
+//             .unwrap_or_else(|_| Utc::now().into())
+//             .with_timezone(&Utc);
 
-        ServerCertDetails {
-            issuer: cert_info.issuer.clone(),
-            subject: cert_info.subject.clone(),
-            not_before,
-            not_after,
-            fingerprint_sha256: cert_info.fingerprint_sha256.clone(),
-        }
-    })
-}
+//         ServerCertDetails {
+//             issuer: cert_info.issuer.clone(),
+//             subject: cert_info.subject.clone(),
+//             not_before,
+//             not_after,
+//             fingerprint_sha256: cert_info.fingerprint_sha256.clone(),
+//         }
+//     })
+// }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hyper::Request;
-    use http_body_util::Full;
-    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_access_log_creation() {
@@ -593,14 +603,14 @@ mod tests {
             .method("GET")
             .uri("https://example.com/test?param=value")
             .header("User-Agent", format!("TestAgent/{}", env!("CARGO_PKG_VERSION")))
-            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .body(Full::new(bytes::Bytes::new()))
             .unwrap();
 
         // Create a simple response
         let _response = Response::builder()
             .status(200)
             .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from("{\"ok\":true}")))
+            .body(Full::new(bytes::Bytes::from("{\"ok\":true}")))
             .unwrap();
 
         let _peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();

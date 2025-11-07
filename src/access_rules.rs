@@ -11,8 +11,7 @@ use crate::config;
 use crate::config::{fetch_config, global_config};
 use crate::wirefilter::update_http_filter_from_config_value;
 use crate::firewall::{Firewall, MOATFirewall};
-use crate::utils::http_utils::parse_ip_or_cidr;
-use crate::utils::http_utils::is_ip_in_cidr;
+use crate::utils::http_utils::{parse_ip_or_cidr, is_ip_in_cidr};
 
 // Store previous rules state for comparison
 type PreviousRules = Arc<Mutex<HashSet<(Ipv4Addr, u32)>>>;

@@ -75,26 +75,6 @@ tls:
   # Path to custom private key (PEM) when using custom TLS mode
   key_path: null
 
-# ACME Configuration
-acme:
-  # Domains for ACME certificate issuance and domain whitelist
-  domains: []
-
-  # ACME contact addresses (mailto: optional)
-  contacts: []
-
-  # Use Let's Encrypt production directory instead of staging
-  use_prod: false
-
-  # Override ACME directory URL (useful for Pebble or other test CAs)
-  directory: null
-
-  # Explicitly accept the ACME Terms of Service
-  accept_tos: false
-
-  # Custom CA bundle for the ACME directory (PEM file)
-  ca_root: null
-
 # Redis Configuration
 redis:
   # Redis connection URL for ACME cache storage

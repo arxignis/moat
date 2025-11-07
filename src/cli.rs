@@ -6,18 +6,31 @@ use clap::ValueEnum;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde::de::{self, Visitor};
 
-use crate::http::TlsMode;
 use crate::actions::captcha::CaptchaProvider;
+
+/// TLS operating mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    /// TLS is disabled
+    Disabled,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
     pub tls: TlsConfig,
-    pub acme: AcmeConfig,
+    #[serde(default)]
     pub redis: RedisConfig,
+    #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
     pub arxignis: ArxignisConfig,
+    #[serde(default)]
     pub content_scanning: ContentScanningCliConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
     pub bpf_stats: BpfStatsConfig,
@@ -27,16 +40,23 @@ pub struct Config {
     pub daemon: DaemonConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerConfig {
     #[serde(default = "default_disable_http_server")]
     pub disable_http_server: bool,
+    #[serde(default)]
     pub http_addr: String,
+    #[serde(default)]
     pub http_bind: Vec<String>,
+    #[serde(default)]
     pub tls_addr: String,
+    #[serde(default)]
     pub tls_bind: Vec<String>,
+    #[serde(default)]
     pub upstream: String,
+    #[serde(default)]
     pub proxy_protocol: ProxyProtocolConfig,
+    #[serde(default)]
     pub health_check: HealthCheckConfig,
 }
 
@@ -53,55 +73,7 @@ pub struct ProxyProtocolConfig {
 fn default_proxy_protocol_enabled() -> bool { false }
 fn default_proxy_protocol_timeout() -> u64 { 1000 }
 
-impl<'de> Deserialize<'de> for ProxyProtocolConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ProxyProtocolConfigVisitor;
-
-        impl<'de> Visitor<'de> for ProxyProtocolConfigVisitor {
-            type Value = ProxyProtocolConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a boolean or a ProxyProtocolConfig struct")
-            }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(ProxyProtocolConfig {
-                    enabled: value,
-                    timeout_ms: default_proxy_protocol_timeout(),
-                })
-            }
-
-            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                #[derive(Deserialize)]
-                struct ProxyProtocolConfigHelper {
-                    #[serde(default = "default_proxy_protocol_enabled")]
-                    enabled: bool,
-                    #[serde(default = "default_proxy_protocol_timeout")]
-                    timeout_ms: u64,
-                }
-
-                let helper = ProxyProtocolConfigHelper::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(ProxyProtocolConfig {
-                    enabled: helper.enabled,
-                    timeout_ms: helper.timeout_ms,
-                })
-            }
-        }
-
-        deserializer.deserialize_any(ProxyProtocolConfigVisitor)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthCheckConfig {
     #[serde(default = "default_health_check_enabled")]
     pub enabled: bool,
@@ -121,39 +93,39 @@ fn default_health_check_port() -> String { "0.0.0.0:8080".to_string() }
 fn default_health_check_methods() -> Vec<String> { vec!["GET".to_string(), "HEAD".to_string()] }
 fn default_health_check_allowed_cidrs() -> Vec<String> { vec![] }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TlsConfig {
+    #[serde(default)]
     pub mode: String,
+    #[serde(default)]
     pub only: bool,
+    #[serde(default)]
     pub cert_path: Option<String>,
+    #[serde(default)]
     pub key_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcmeConfig {
-    pub domains: Vec<String>,
-    pub contacts: Vec<String>,
-    pub use_prod: bool,
-    pub directory: Option<String>,
-    pub accept_tos: bool,
-    pub ca_root: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RedisConfig {
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NetworkConfig {
+    #[serde(default)]
     pub iface: String,
+    #[serde(default)]
     pub ifaces: Vec<String>,
+    #[serde(default)]
     pub disable_xdp: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArxignisConfig {
+    #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -163,6 +135,7 @@ pub struct ArxignisConfig {
     pub include_response_body: bool,
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
+    #[serde(default)]
     pub captcha: CaptchaConfig,
 }
 
@@ -182,7 +155,7 @@ fn default_max_body_size() -> usize {
     1024 * 1024 // 1MB
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContentScanningCliConfig {
     #[serde(default = "default_scanning_enabled")]
     pub enabled: bool,
@@ -203,18 +176,25 @@ fn default_clamav_server() -> String { "localhost:3310".to_string() }
 fn default_max_file_size() -> usize { 10 * 1024 * 1024 }
 fn default_scan_expression() -> String { "http.request.method eq \"POST\" or http.request.method eq \"PUT\"".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LoggingConfig {
+    #[serde(default)]
     pub level: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CaptchaConfig {
+    #[serde(default)]
     pub site_key: Option<String>,
+    #[serde(default)]
     pub secret_key: Option<String>,
+    #[serde(default)]
     pub jwt_secret: Option<String>,
+    #[serde(default)]
     pub provider: String,
+    #[serde(default)]
     pub token_ttl: u64,
+    #[serde(default)]
     pub cache_ttl: u64,
 }
 
@@ -251,14 +231,6 @@ impl Config {
                 only: false,
                 cert_path: None,
                 key_path: None,
-            },
-            acme: AcmeConfig {
-                domains: vec![],
-                contacts: vec![],
-                use_prod: false,
-                directory: None,
-                accept_tos: false,
-                ca_root: None,
             },
             redis: RedisConfig {
                 url: "redis://127.0.0.1/0".to_string(),
@@ -317,9 +289,6 @@ impl Config {
         }
         if !args.tls_bind.is_empty() {
             self.server.tls_bind = args.tls_bind.iter().map(|addr| addr.to_string()).collect();
-        }
-        if !args.acme_domains.is_empty() {
-            self.acme.domains = args.acme_domains.clone();
         }
         if !args.ifaces.is_empty() {
             self.network.ifaces = args.ifaces.clone();
@@ -392,15 +361,19 @@ impl Config {
     }
 
     pub fn validate_required_fields(&mut self, args: &Args) -> Result<()> {
+        // Check if server section is configured (has http_addr or upstream)
+        let server_configured = !self.server.http_addr.is_empty() || !self.server.upstream.is_empty();
+
         // Check if upstream is provided either via CLI args or config file
-        // Skip this check if HTTP server is disabled (standalone agent mode)
-        if !self.server.disable_http_server && args.upstream.is_none() && self.server.upstream.is_empty() {
+        // Skip this check if HTTP server is disabled or server section is not configured
+        if server_configured && !self.server.disable_http_server && args.upstream.is_none() && self.server.upstream.is_empty() {
             return Err(anyhow::anyhow!("Upstream URL is required. Provide it via --upstream argument or in config file"));
         }
 
-        // Check if arxignis API key is provided either via CLI args or config file
+        // Check if arxignis API key is provided - only warn if not provided
+        // (to support old config format that doesn't have this field)
         if args.arxignis_api_key.is_none() && self.arxignis.api_key.is_empty() {
-            return Err(anyhow::anyhow!("Arxignis API key is required. Provide it via --arxignis-api-key argument or in config file"));
+            log::warn!("Arxignis API key not provided. Some features may not work.");
         }
 
         Ok(())
@@ -464,26 +437,6 @@ impl Config {
         }
         if let Ok(val) = env::var("AX_TLS_KEY_PATH") {
             self.tls.key_path = Some(val);
-        }
-
-        // ACME configuration overrides
-        if let Ok(val) = env::var("AX_ACME_DOMAINS") {
-            self.acme.domains = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_ACME_CONTACTS") {
-            self.acme.contacts = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_ACME_USE_PROD") {
-            self.acme.use_prod = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_ACME_DIRECTORY") {
-            self.acme.directory = Some(val);
-        }
-        if let Ok(val) = env::var("AX_ACME_ACCEPT_TOS") {
-            self.acme.accept_tos = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_ACME_CA_ROOT") {
-            self.acme.ca_root = Some(val);
         }
 
         // Redis configuration overrides
@@ -616,7 +569,7 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub disable_http_server: bool,
 
-    /// HTTP server bind address (for ACME HTTP-01 challenges and regular HTTP traffic).
+    /// HTTP server bind address.
     #[arg(long, default_value = "0.0.0.0:80")]
     pub http_addr: SocketAddr,
 
@@ -636,7 +589,7 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = TlsMode::Disabled)]
     pub tls_mode: TlsMode,
 
-    /// Require TLS for application traffic (HTTP used only for ACME).
+    /// Require TLS for application traffic.
     /// If enabled, plain HTTP requests (except ACME) will be rejected with 426.
     #[arg(long, default_value_t = false)]
     pub tls_only: bool,
