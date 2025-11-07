@@ -1592,51 +1592,9 @@ pub async fn proxy_http_service(
         // Forward directly to upstream without threat intelligence or WAF checks
         match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone(), peer_addr, tls_fingerprint.is_some()).await {
             Ok(response) => {
-                // Capture response body for logging
+                // *** STREAMING FIX: do not buffer the upstream body ***
                 let (response_parts, response_body) = response.into_parts();
-                let response_body_bytes = match response_body.collect().await {
-                    Ok(collected) => collected.to_bytes(),
-                    Err(e) => {
-                        log::warn!("Failed to read response body: {}", e);
-                        bytes::Bytes::new()
-                    }
-                };
-
-                // Log successful requests with access rules bypass flag
-                let dst_addr = parse_upstream_addr(&ctx.upstream);
-                let temp_response = Response::from_parts(response_parts.clone(), Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
-                let mut response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|e| {
-                    log::warn!("Failed to process response for logging: {}", e);
-                    ResponseData::for_blocked_request("logging_error", 500, None, None)
-                });
-
-                // Add access rules bypass information to the response data
-                if let Some(response_json) = response_data.response_json.as_object_mut() {
-                    response_json.insert("access_rules_bypass".to_string(), serde_json::Value::Bool(true));
-                }
-
-                // Fetch threat intelligence data for trusted IP requests
-                let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-
-                if let Err(e) = HttpAccessLog::create_from_parts(
-                    &req_parts,
-                    &req_body_bytes,
-                    peer_addr,
-                    dst_addr,
-                    tls_fingerprint,
-                                tcp_fingerprint_data.as_ref(),
-                    response_data,
-                    None,
-                    threat_data.as_ref(),
-                    server_cert_info.as_ref(),
-                )
-                .await
-                {
-                    log::warn!("Failed to log access request: {}", e);
-                }
-
-                // Reconstruct response
-                let response = Response::from_parts(response_parts, Full::new(response_body_bytes).map_err(|never| match never {}).boxed());
+                let response = Response::from_parts(response_parts, response_body);
                 return Ok(response);
             }
             Err(err) => {
@@ -1777,7 +1735,7 @@ pub async fn proxy_http_service(
                 peer_addr,
                 dst_addr,
                 tls_fingerprint,
-                                tcp_fingerprint_data.as_ref(),
+                tcp_fingerprint_data.as_ref(),
                 ResponseData::for_blocked_request("captcha_challenge_required", 403, None, threat_data.as_ref()),
                 None,
                 threat_data.as_ref(),
@@ -2078,61 +2036,9 @@ pub async fn proxy_http_service(
 
     match forward_to_upstream_with_body(&req_parts, req_body_bytes.clone(), ctx.clone(), peer_addr, tls_fingerprint.is_some()).await {
         Ok(response) => {
-            // Capture response body for logging
+            // *** STREAMING FIX: do not buffer the upstream body ***
             let (response_parts, response_body) = response.into_parts();
-            let response_body_bytes = match response_body.collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(e) => {
-                    log::warn!("Failed to read response body: {}", e);
-                    bytes::Bytes::new()
-                }
-            };
-
-            // Log successful requests before reconstructing response
-            let dst_addr = parse_upstream_addr(&ctx.upstream);
-            let temp_response = Response::from_parts(response_parts.clone(), Full::new(response_body_bytes.clone()).map_err(|never| match never {}).boxed());
-            let response_data = ResponseData::from_response(temp_response).await.unwrap_or_else(|e| {
-                log::warn!("Failed to process response for logging: {}", e);
-                ResponseData::for_blocked_request("logging_error", 500, None, None)
-            });
-
-            // Fetch threat intelligence data for successful requests
-            let threat_data = threat::get_threat_intel(&peer_addr.ip().to_string()).await.ok().flatten();
-
-            // Check if this request was challenged by WAF (indicated by presence of captcha token)
-            let was_challenged = req_parts.headers.get("x-captcha-token").is_some() ||
-                                req_parts.headers.get("cookie")
-                                    .and_then(|h| h.to_str().ok())
-                                    .map_or(false, |s| s.contains("captcha_token="));
-
-            // Skip logging if this request was already logged due to WAF challenge
-            if was_challenged {
-                log::debug!("Skipping duplicate access log for challenged request from {}", peer_addr.ip());
-            } else {
-                // If the request was challenged, we need to determine which WAF rule triggered it
-                // For now, we'll create a generic WAF result for challenged requests
-                let waf_result = None; // No WAF result for non-challenged requests
-
-                if let Err(e) = HttpAccessLog::create_from_parts(
-                    &req_parts,
-                    &req_body_bytes,
-                    peer_addr,
-                    dst_addr,
-                    tls_fingerprint,
-                                tcp_fingerprint_data.as_ref(),
-                    response_data,
-                    waf_result.as_ref(),
-                    threat_data.as_ref(),
-                    server_cert_info.as_ref(),
-                )
-                .await
-                {
-                    log::warn!("Failed to log access request: {}", e);
-                }
-            }
-
-            // Reconstruct response
-            let response = Response::from_parts(response_parts, Full::new(response_body_bytes).map_err(|never| match never {}).boxed());
+            let response = Response::from_parts(response_parts, response_body);
             Ok(response)
         }
         Err(err) => {
