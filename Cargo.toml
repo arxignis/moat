@@ -77,18 +77,18 @@ rand = "0.9"
 regex = "1.0"
 daemonize = "0.5.0"
 
-pingora = { path = "../pingora/pingora", features = ["lb", "openssl"] }
-pingora-core = { path = "../pingora/pingora-core" }
-pingora-proxy = { path = "../pingora/pingora-proxy" }
-pingora-limits = { path = "../pingora/pingora-limits" }
-pingora-http = { path = "../pingora/pingora-http" }
+#pingora = { path = "../pingora/pingora", features = ["lb", "openssl"] }
+#pingora-core = { path = "../pingora/pingora-core" }
+#pingora-proxy = { path = "../pingora/pingora-proxy" }
+#pingora-limits = { path = "../pingora/pingora-limits" }
+#pingora-http = { path = "../pingora/pingora-http" }
 
 
-#pingora = { git = "https://github.com/arxignis/pingora" , rev = "71f3888275cc8f5768b9f81772ab7bad1d8709ba", features = ["lb", "openssl"] }
-#pingora-core = { git = "https://github.com/arxignis/pingora" , rev = "71f3888275cc8f5768b9f81772ab7bad1d8709ba" }
-#pingora-proxy = { git = "https://github.com/arxignis/pingora" , rev = "71f3888275cc8f5768b9f81772ab7bad1d8709ba" }
-#pingora-limits = { git = "https://github.com/arxignis/pingora" , rev = "71f3888275cc8f5768b9f81772ab7bad1d8709ba" }
-#pingora-http = { git = "https://github.com/arxignis/pingora" , rev = "71f3888275cc8f5768b9f81772ab7bad1d8709ba" }
+pingora = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca", features = ["lb", "openssl"] }
+pingora-core = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-proxy = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-limits = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-http = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
 mimalloc = { version = "0.1.48", default-features = false }
 dashmap = "7.0.0-rc2"
 ctrlc = "3.5.0"
