@@ -9,7 +9,7 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 use crate::bpf;
 use crate::config;
 use crate::config::{fetch_config, global_config};
-use crate::wirefilter::update_http_filter_from_config_value;
+use crate::waf::wirefilter::update_http_filter_from_config_value;
 use crate::firewall::{Firewall, MOATFirewall};
 use crate::utils::http_utils::{parse_ip_or_cidr, is_ip_in_cidr};
 

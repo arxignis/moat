@@ -3,10 +3,9 @@ use std::{net::SocketAddr, path::PathBuf, env};
 use anyhow::Result;
 use clap::Parser;
 use clap::ValueEnum;
-use serde::{Deserialize, Deserializer, Serialize};
-use serde::de::{self, Visitor};
+use serde::{Deserialize, Serialize};
 
-use crate::actions::captcha::CaptchaProvider;
+use crate::waf::actions::captcha::CaptchaProvider;
 
 /// TLS operating mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -62,7 +61,7 @@ pub struct ServerConfig {
 
 fn default_disable_http_server() -> bool { false }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxyProtocolConfig {
     #[serde(default = "default_proxy_protocol_enabled")]
     pub enabled: bool,

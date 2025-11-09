@@ -1,6 +1,8 @@
 use crate::utils::metrics::*;
 use crate::utils::structs::{AppConfig, Extraparams, Headers, InnerMap, UpstreamsDashMap, UpstreamsIdMap};
 use crate::http_proxy::gethosts::GetHost;
+use crate::waf::wirefilter::{evaluate_waf_for_pingora_request, WafAction};
+use crate::waf::actions::captcha::{validate_captcha_token, apply_captcha_challenge_with_token, generate_captcha_token};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -73,6 +75,166 @@ impl ProxyHttp for LB {
                     );
                 }
             }
+        }
+
+        // Evaluate WAF rules
+        if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
+            let socket_addr = std::net::SocketAddr::new(peer_addr.ip(), peer_addr.port());
+            match evaluate_waf_for_pingora_request(session.req_header(), b"", socket_addr).await {
+                Ok(Some(waf_result)) => {
+                    debug!("WAF rule matched: rule={}, id={}, action={:?}", waf_result.rule_name, waf_result.rule_id, waf_result.action);
+                    match waf_result.action {
+                        WafAction::Block => {
+                            info!("WAF blocked request: rule={}, id={}, uri={}", waf_result.rule_name, waf_result.rule_id, session.req_header().uri);
+                            let mut header = ResponseHeader::build(403, None).unwrap();
+                            header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
+                            header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
+                            session.set_keepalive(None);
+                            session.write_response_header(Box::new(header), true).await?;
+                            return Ok(true);
+                        }
+                        WafAction::Challenge => {
+                            info!("WAF challenge required: rule={}, id={}, uri={}", waf_result.rule_name, waf_result.rule_id, session.req_header().uri);
+
+                            // Check for captcha token in cookies or headers
+                            let mut captcha_token: Option<String> = None;
+
+                            // Check cookies for captcha_token
+                            if let Some(cookies) = session.req_header().headers.get("cookie") {
+                                if let Ok(cookie_str) = cookies.to_str() {
+                                    for cookie in cookie_str.split(';') {
+                                        let trimmed = cookie.trim();
+                                        if let Some(value) = trimmed.strip_prefix("captcha_token=") {
+                                            captcha_token = Some(value.to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Check X-Captcha-Token header if not found in cookies
+                            if captcha_token.is_none() {
+                                if let Some(token_header) = session.req_header().headers.get("x-captcha-token") {
+                                    if let Ok(token_str) = token_header.to_str() {
+                                        captcha_token = Some(token_str.to_string());
+                                    }
+                                }
+                            }
+
+                            // Validate token if present
+                            let token_valid = if let Some(token) = &captcha_token {
+                                let user_agent = session.req_header().headers
+                                    .get("user-agent")
+                                    .and_then(|h| h.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_string();
+
+                                match validate_captcha_token(token, &peer_addr.ip().to_string(), &user_agent).await {
+                                    Ok(valid) => {
+                                        if valid {
+                                            debug!("Captcha token validated successfully");
+                                        } else {
+                                            debug!("Captcha token validation failed");
+                                        }
+                                        valid
+                                    }
+                                    Err(e) => {
+                                        error!("Captcha token validation error: {}", e);
+                                        false
+                                    }
+                                }
+                            } else {
+                                false
+                            };
+
+                            if !token_valid {
+                                // Generate a new token (don't reuse invalid token)
+                                let jwt_token = {
+                                    let user_agent = session.req_header().headers
+                                        .get("user-agent")
+                                        .and_then(|h| h.to_str().ok())
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    match generate_captcha_token(
+                                        peer_addr.ip().to_string(),
+                                        user_agent,
+                                        None, // JA4 fingerprint not available here
+                                    ).await {
+                                        Ok(token) => token.token,
+                                        Err(e) => {
+                                            error!("Failed to generate captcha token: {}", e);
+                                            // Fallback to challenge without token
+                                            match apply_captcha_challenge_with_token("") {
+                                                Ok(html) => {
+                                                    let mut header = ResponseHeader::build(403, None).unwrap();
+                                                    header.insert_header("Content-Type", "text/html; charset=utf-8").ok();
+                                                    session.set_keepalive(None);
+                                                    session.write_response_header(Box::new(header), false).await?;
+                                                    session.write_response_body(Some(Bytes::from(html)), true).await?;
+                                                    return Ok(true);
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to apply captcha challenge: {}", e);
+                                                    // Block the request if captcha fails
+                                                    let mut header = ResponseHeader::build(403, None).unwrap();
+                                                    header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
+                                                    header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
+                                                    session.set_keepalive(None);
+                                                    session.write_response_header(Box::new(header), true).await?;
+                                                    return Ok(true);
+                                                }
+                                            }
+                                        }
+                                    }
+                                };
+
+                                // Return captcha challenge page
+                                match apply_captcha_challenge_with_token(&jwt_token) {
+                                    Ok(html) => {
+                                        let mut header = ResponseHeader::build(403, None).unwrap();
+                                        header.insert_header("Content-Type", "text/html; charset=utf-8").ok();
+                                        header.insert_header("Set-Cookie", format!("captcha_token={}; Path=/; HttpOnly; SameSite=Lax", jwt_token)).ok();
+                                        header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
+                                        header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
+                                        session.set_keepalive(None);
+                                        session.write_response_header(Box::new(header), false).await?;
+                                        session.write_response_body(Some(Bytes::from(html)), true).await?;
+                                        return Ok(true);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to apply captcha challenge: {}", e);
+                                        // Block the request if captcha fails
+                                        let mut header = ResponseHeader::build(403, None).unwrap();
+                                        header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
+                                        header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
+                                        session.set_keepalive(None);
+                                        session.write_response_header(Box::new(header), true).await?;
+                                        return Ok(true);
+                                    }
+                                }
+                            } else {
+                                // Token is valid, allow request to continue
+                                debug!("Captcha token validated, allowing request");
+                            }
+                        }
+                        WafAction::Allow => {
+                            debug!("WAF allowed request: rule={}, id={}", waf_result.rule_name, waf_result.rule_id);
+                            // Allow the request to continue
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // No WAF rules matched, allow request to continue
+                    debug!("WAF: No rules matched for uri={}", session.req_header().uri);
+                }
+                Err(e) => {
+                    error!("WAF evaluation error: {}", e);
+                    // On error, allow request to continue (fail open)
+                }
+            }
+        } else {
+            debug!("WAF: No peer address available for request");
         }
 
         let hostname = return_header_host(&session);
@@ -256,7 +418,7 @@ impl ProxyHttp for LB {
 
         // Log TLS fingerprint if available
         if let Some(ref fingerprint) = ctx.tls_fingerprint {
-            info!(
+            debug!(
                 "Request completed - JA4: {}, JA4_Raw: {}, TLS_Version: {}, Cipher: {:?}, SNI: {:?}, ALPN: {:?}, Response: {}",
                 fingerprint.ja4,
                 fingerprint.ja4_raw,

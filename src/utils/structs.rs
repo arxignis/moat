@@ -100,9 +100,8 @@ pub struct Configuration {
 pub struct AppConfig {
     pub hc_interval: u16,
     pub hc_method: String,
-    pub upstreams_conf: String,
-    pub log_level: String,
     pub master_key: String,
+    pub upstreams_conf: String,
     pub config_address: String,
     pub proxy_address_http: String,
     pub config_api_enabled: bool,

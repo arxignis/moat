@@ -14,7 +14,7 @@ use std::sync::RwLock;
 // use crate::utils::tls_fingerprint::Ja4hFingerprint;
 use crate::ja4_plus::Ja4tFingerprint;
 use crate::event_queue::{send_event, UnifiedEvent};
-use crate::tcp_fingerprint::TcpFingerprintData;
+use crate::utils::tcp_fingerprint::TcpFingerprintData;
 
 /// Configuration for sending access logs to arxignis server
 #[derive(Debug, Clone)]
@@ -163,7 +163,7 @@ impl HttpAccessLog {
         tls_fingerprint: Option<&crate::ja4_plus::Ja4hFingerprint>,
         tcp_fingerprint_data: Option<&TcpFingerprintData>,
         response_data: ResponseData,
-        waf_result: Option<&crate::wirefilter::WafResult>,
+        waf_result: Option<&crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
@@ -391,7 +391,7 @@ impl HttpAccessLog {
 
     /// Create remediation details from WAF result and threat intelligence data
     fn create_remediation_details(
-        waf_result: Option<&crate::wirefilter::WafResult>,
+        waf_result: Option<&crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Option<RemediationDetails> {
         // If neither WAF result nor threat data is available, return None
@@ -461,7 +461,7 @@ impl HttpAccessLog {
 pub struct ResponseData {
     pub response_json: serde_json::Value,
     pub blocking_info: Option<serde_json::Value>,
-    pub waf_result: Option<crate::wirefilter::WafResult>,
+    pub waf_result: Option<crate::waf::wirefilter::WafResult>,
     pub threat_data: Option<crate::threat::ThreatResponse>,
 }
 
@@ -497,7 +497,7 @@ impl ResponseData {
     pub fn for_blocked_request(
         block_reason: &str,
         status_code: u16,
-        waf_result: Option<crate::wirefilter::WafResult>,
+        waf_result: Option<crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Self {
         let status_text = match status_code {
@@ -533,7 +533,7 @@ impl ResponseData {
     pub fn for_malware_blocked_request(
         signature: Option<String>,
         scan_error: Option<String>,
-        waf_result: Option<crate::wirefilter::WafResult>,
+        waf_result: Option<crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Self {
         let response_json = serde_json::json!({

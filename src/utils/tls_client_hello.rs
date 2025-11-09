@@ -32,7 +32,7 @@ pub fn generate_fingerprint_from_client_hello(
         .map(|inet| format!("{}:{}", inet.ip(), inet.port()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    info!("Generating fingerprint from ClientHello: Peer: {}, SNI={:?}, ALPN={:?}, raw_len={}",
+    debug!("Generating fingerprint from ClientHello: Peer: {}, SNI={:?}, ALPN={:?}, raw_len={}",
            peer_addr_str, hello.sni, hello.alpn, hello.raw.len());
 
     // Generate JA4 fingerprint from raw ClientHello bytes
@@ -52,7 +52,7 @@ pub fn generate_fingerprint_from_client_hello(
         }
 
         // Log fingerprint details at info level
-        info!(
+        debug!(
             "TLS Fingerprint extracted - Peer: {}, JA4: {}, JA4_Raw: {}, JA4_Unsorted: {}, JA4_Raw_Unsorted: {}, TLS_Version: {}, Cipher: {:?}, SNI: {:?}, ALPN: {:?}",
             peer_addr_str,
             fingerprint_arc.ja4,

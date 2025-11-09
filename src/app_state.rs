@@ -1,7 +1,7 @@
 use crate::{bpf};
 use std::sync::Arc;
 use crate::bpf_stats::BpfStatsCollector;
-use crate::tcp_fingerprint::TcpFingerprintCollector;
+use crate::utils::tcp_fingerprint::TcpFingerprintCollector;
 
 #[derive(Clone)]
 pub struct AppState {

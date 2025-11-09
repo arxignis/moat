@@ -152,9 +152,13 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
     }
 }
 pub fn parce_main_config(path: &str) -> AppConfig {
+    parce_main_config_with_log_level(path, None)
+}
+
+pub fn parce_main_config_with_log_level(path: &str, log_level: Option<&str>) -> AppConfig {
     let data = fs::read_to_string(path).unwrap();
     let mut cfo: AppConfig = serde_yaml::from_str(&*data).expect("Failed to parse main config file");
-    log_builder(&cfo);
+    log_builder(log_level);
     cfo.hc_method = cfo.hc_method.to_uppercase();
     if let Some((ip, port_str)) = cfo.config_address.split_once(':') {
         if let Ok(port) = port_str.parse::<u16>() {
@@ -199,8 +203,12 @@ fn parce_tls_grades(what: Option<String>) -> Option<String> {
     }
 }
 
-fn log_builder(conf: &AppConfig) {
-    let log_level = conf.log_level.clone();
+fn log_builder(log_level: Option<&str>) {
+    // Use provided log level, or fall back to RUST_LOG env var, or default to "info"
+    let log_level = log_level
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("RUST_LOG").ok())
+        .unwrap_or_else(|| "info".to_string());
     unsafe {
         match log_level.as_str() {
             "info" => env::set_var("RUST_LOG", "info"),

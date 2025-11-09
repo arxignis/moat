@@ -16,14 +16,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod access_log;
 pub mod access_rules;
-pub mod actions;
 pub mod config;
 pub mod app_state;
 pub mod cli;
 pub mod content_scanning;
 pub mod firewall;
 pub mod http_client;
-pub mod wirefilter;
+pub mod waf;
 pub mod threat;
 pub mod redis;
 pub mod proxy_protocol;
@@ -35,7 +34,6 @@ pub mod bpf {
 }
 
 pub mod bpf_stats;
-pub mod tcp_fingerprint;
 pub mod event_queue;
 pub mod ja4_plus;
 pub mod utils;
@@ -46,18 +44,18 @@ use tokio::sync::watch;
 
 use crate::app_state::AppState;
 use crate::bpf_stats::BpfStatsCollector;
-use crate::tcp_fingerprint::TcpFingerprintCollector;
-use crate::tcp_fingerprint::TcpFingerprintConfig;
+use crate::utils::tcp_fingerprint::TcpFingerprintCollector;
+use crate::utils::tcp_fingerprint::TcpFingerprintConfig;
 use crate::cli::{Args, Config};
-use crate::wirefilter::init_config;
+use crate::waf::wirefilter::init_config;
 use crate::content_scanning::{init_content_scanner, ContentScanningConfig};
 use crate::utils::bpf_utils::{bpf_attach_to_xdp, bpf_detach_from_xdp};
 
-use crate::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
 use crate::access_log::{LogSenderConfig, set_log_sender_config};
 use crate::event_queue::start_batch_event_processor;
 use crate::authcheck::validate_api_key;
 use crate::http_client::init_global_client;
+use crate::waf::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
 
 fn main() -> Result<()> {
 
@@ -110,12 +108,38 @@ fn main() -> Result<()> {
         }
     }
 
-    // Initialize logger using CLI level
+    // Set RUST_LOG environment variable from config so other modules can use it
+    let log_level = if !config.logging.level.is_empty() {
+        config.logging.level.to_lowercase()
+    } else {
+        match args.log_level {
+            crate::cli::LogLevel::Error => "error",
+            crate::cli::LogLevel::Warn => "warn",
+            crate::cli::LogLevel::Info => "info",
+            crate::cli::LogLevel::Debug => "debug",
+            crate::cli::LogLevel::Trace => "trace",
+        }.to_string()
+    };
+    unsafe {
+        std::env::set_var("RUST_LOG", &log_level);
+    }
+
+    // Initialize logger using config level (CLI overrides if provided explicitly)
     // Note: env_logger writes to stderr by default, which is standard practice
     {
         use env_logger::Env;
         let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
-        builder.filter_level(args.log_level.to_level_filter());
+
+        // Use log level from config, or CLI if explicitly set
+        let level_filter = match log_level.as_str() {
+            "error" => log::LevelFilter::Error,
+            "warn" => log::LevelFilter::Warn,
+            "info" => log::LevelFilter::Info,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            _ => args.log_level.to_level_filter(),
+        };
+        builder.filter_level(level_filter);
         builder.format_timestamp_secs();
 
         // In daemon mode, write to stdout instead of stderr for better log separation
@@ -280,6 +304,43 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         }
     }
 
+    // Initialize content scanning from CLI config
+    let content_scanning_config = ContentScanningConfig {
+        enabled: config.content_scanning.enabled,
+        clamav_server: config.content_scanning.clamav_server.clone(),
+        max_file_size: config.content_scanning.max_file_size,
+        scan_content_types: config.content_scanning.scan_content_types.clone(),
+        skip_extensions: config.content_scanning.skip_extensions.clone(),
+        scan_expression: config.content_scanning.scan_expression.clone(),
+    };
+    if let Err(e) = init_content_scanner(content_scanning_config) {
+        log::warn!("Failed to initialize content scanner: {}", e);
+    } else {
+        log::info!("Content scanner initialized successfully");
+    }
+
+    // Initialize access log sender configuration
+    let log_sender_config = LogSenderConfig {
+        enabled: config.arxignis.log_sending_enabled,
+        base_url: config.arxignis.base_url.clone(),
+        api_key: config.arxignis.api_key.clone(),
+        batch_size_limit: 5000,        // Default: 5000 logs per batch
+        batch_size_bytes: 5 * 1024 * 1024, // Default: 5MB
+        batch_timeout_secs: 10,        // Default: 10 seconds
+        include_response_body: config.arxignis.include_response_body,
+        max_body_size: config.arxignis.max_body_size,
+    };
+    set_log_sender_config(log_sender_config);
+
+    if config.arxignis.log_sending_enabled && !config.arxignis.api_key.is_empty() {
+        log::info!("Event sending to arxignis server enabled with unified queue (10s timeout, 5MB limit)");
+        // Start the background unified event processor
+        start_batch_event_processor();
+    } else {
+        log::info!("Event sending to arxignis server disabled (enabled: {}, api_key configured: {})",
+                   config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());
+    }
+
     // Build list of interfaces to attach
     if !config.arxignis.base_url.is_empty() && !config.arxignis.api_key.is_empty() {
         if let Err(e) = init_config(
@@ -331,59 +392,6 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     } else {
         log::warn!("No API credentials provided, HTTP filter will not be initialized");
     }
-
-    // Initialize content scanning from CLI config
-    let content_scanning_config = ContentScanningConfig {
-        enabled: config.content_scanning.enabled,
-        clamav_server: config.content_scanning.clamav_server.clone(),
-        max_file_size: config.content_scanning.max_file_size,
-        scan_content_types: config.content_scanning.scan_content_types.clone(),
-        skip_extensions: config.content_scanning.skip_extensions.clone(),
-        scan_expression: config.content_scanning.scan_expression.clone(),
-    };
-    if let Err(e) = init_content_scanner(content_scanning_config) {
-        log::warn!("Failed to initialize content scanner: {}", e);
-    } else {
-        log::info!("Content scanner initialized successfully");
-    }
-
-    // Initialize access log sender configuration
-    let log_sender_config = LogSenderConfig {
-        enabled: config.arxignis.log_sending_enabled,
-        base_url: config.arxignis.base_url.clone(),
-        api_key: config.arxignis.api_key.clone(),
-        batch_size_limit: 5000,        // Default: 5000 logs per batch
-        batch_size_bytes: 5 * 1024 * 1024, // Default: 5MB
-        batch_timeout_secs: 10,        // Default: 10 seconds
-        include_response_body: config.arxignis.include_response_body,
-        max_body_size: config.arxignis.max_body_size,
-    };
-    set_log_sender_config(log_sender_config);
-
-    if config.arxignis.log_sending_enabled && !config.arxignis.api_key.is_empty() {
-        log::info!("Event sending to arxignis server enabled with unified queue (10s timeout, 5MB limit)");
-        // Start the background unified event processor
-        start_batch_event_processor();
-    } else {
-        log::info!("Event sending to arxignis server disabled (enabled: {}, api_key configured: {})",
-                   config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());
-    }
-
-    // Only parse upstream URI if HTTP server is enabled and upstream is configured
-    let _upstream_uri = if !config.server.disable_http_server && !config.server.upstream.is_empty() {
-        let parsed = config.server.upstream
-            .parse::<Uri>()
-            .context("failed to parse upstream URI from config")?;
-        if parsed.scheme().is_none() || parsed.authority().is_none() {
-            return Err(anyhow!(
-                "upstream URI must be absolute (e.g. http://127.0.0.1:8081)",
-            ));
-        }
-        Some(parsed)
-    } else {
-        None
-    };
-
 
     // Access rules were already initialized after XDP attachment above
 
@@ -448,7 +456,6 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         log::info!("Skipping TCP fingerprinting events logging (disabled or XDP not available)");
         None
     };
-
 
     signal::ctrl_c().await?;
     log::info!("Shutdown signal received, stopping servers...");

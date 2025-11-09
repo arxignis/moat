@@ -17,7 +17,7 @@ pub enum UnifiedEvent {
     #[serde(rename = "dropped_ip")]
     DroppedIp(crate::bpf_stats::DroppedIpEvent),
     #[serde(rename = "tcp_fingerprint")]
-    TcpFingerprint(crate::tcp_fingerprint::TcpFingerprintEvent),
+    TcpFingerprint(crate::utils::tcp_fingerprint::TcpFingerprintEvent),
 }
 
 impl UnifiedEvent {

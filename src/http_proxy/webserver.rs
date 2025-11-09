@@ -10,7 +10,7 @@ use axum_server::tls_openssl::OpenSSLConfig;
 use futures::channel::mpsc::Sender;
 use futures::SinkExt;
 use log::info;
-use prometheus::{gather, Encoder, TextEncoder}; 
+use prometheus::{gather, Encoder, TextEncoder};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;

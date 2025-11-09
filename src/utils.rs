@@ -11,3 +11,4 @@ pub mod tls;
 pub mod tls_client_hello;
 pub mod tls_fingerprint;
 pub mod tools;
+pub mod tcp_fingerprint;
