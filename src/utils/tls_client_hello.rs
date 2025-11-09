@@ -1,6 +1,6 @@
 use pingora_core::protocols::ClientHelloWrapper;
 use crate::utils::tls_fingerprint::Fingerprint;
-use log::{debug, info};
+use log::{debug};
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::Mutex;

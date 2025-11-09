@@ -3,11 +3,9 @@ use std::sync::Arc;
 use std::str::FromStr;
 use std::fs::File;
 
-use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
 use daemonize::Daemonize;
-use hyper::Uri;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use nix::net::if_::if_nametoindex;
 

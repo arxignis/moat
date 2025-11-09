@@ -1,8 +1,7 @@
 use crate::utils::discovery::{APIUpstreamProvider, Discovery, FromFileProvider};
 use crate::utils::parceyaml::load_configuration;
 use crate::utils::structs::Configuration;
-use crate::utils::tools::*;
-use crate::utils::*;
+use crate::utils::healthcheck;
 use crate::http_proxy::proxyhttp::LB;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -78,8 +77,8 @@ impl BackgroundService for LB {
                 val = rx.next() => {
                     match val {
                         Some(ss) => {
-                            clone_dashmap_into(&ss.upstreams, &self.ump_full);
-                            clone_dashmap_into(&ss.upstreams, &self.ump_upst);
+                            crate::utils::tools::clone_dashmap_into(&ss.upstreams, &self.ump_full);
+                            crate::utils::tools::clone_dashmap_into(&ss.upstreams, &self.ump_upst);
                             let current = self.extraparams.load_full();
                             let mut new = (*current).clone();
                             new.sticky_sessions = ss.extraparams.sticky_sessions;
@@ -102,8 +101,8 @@ impl BackgroundService for LB {
                                 let path_headers = path.value().clone();
                                 self.headers.insert(path_key.clone(), path_headers);
                                 if let Some(global_headers) = ss.headers.get("GLOBAL_HEADERS") {
-                                    if let Some(existing_headers) = self.headers.get_mut(&path_key) {
-                                        merge_headers(&existing_headers, &global_headers);
+                                    if let Some(existing_headers) = self.headers.get(&path_key) {
+                                        crate::utils::tools::merge_headers(existing_headers.value(), &global_headers);
                                     }
                                 }
                             }

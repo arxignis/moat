@@ -2,7 +2,6 @@
 use crate::utils::structs::Extraparams;
 use crate::utils::tls;
 use crate::utils::tls::CertificateConfig;
-use crate::utils::tools::*;
 use crate::http_proxy::proxyhttp::LB;
 use arc_swap::ArcSwap;
 use ctrlc;
@@ -68,22 +67,22 @@ pub fn run() {
     let bind_address_http = cfg.proxy_address_http.clone();
     let bind_address_tls = cfg.proxy_address_tls.clone();
 
-    check_priv(bind_address_http.as_str());
+    crate::utils::tools::check_priv(bind_address_http.as_str());
 
     match bind_address_tls {
         Some(bind_address_tls) => {
-            check_priv(bind_address_tls.as_str());
+            crate::utils::tools::check_priv(bind_address_tls.as_str());
             let (tx, rx): (Sender<Vec<CertificateConfig>>, Receiver<Vec<CertificateConfig>>) = channel();
             let certs_path = cfg.proxy_certificates.clone().unwrap();
             thread::spawn(move || {
-                watch_folder(certs_path, tx).unwrap();
+                crate::utils::tools::watch_folder(certs_path, tx).unwrap();
             });
             let certificate_configs = rx.recv().unwrap();
             let certificates: Arc<ArcSwap<Option<Arc<tls::Certificates>>>> = Arc::new(ArcSwap::from_pointee(None));
 
             if let Some(first_set) = tls::Certificates::new(&certificate_configs, grade.as_str()) {
-                let first_set_arc = Arc::new(first_set);
-                certificates.store(Arc::new(Some(first_set_arc.clone())));
+                let first_set_arc: Arc<tls::Certificates> = Arc::new(first_set);
+                certificates.store(Arc::new(Some(first_set_arc.clone()) as Option<Arc<tls::Certificates>>));
                 let _certs_for_callback = certificates.clone();
 
                 let default_cert_path = first_set_arc.default_cert_path.clone();
@@ -152,7 +151,7 @@ pub fn run() {
     thread::spawn(move || server.run_forever());
 
     if let (Some(user), Some(group)) = (cfg.rungroup.clone(), cfg.runuser.clone()) {
-        drop_priv(user, group, cfg.proxy_address_http.clone(), cfg.proxy_address_tls.clone());
+        crate::utils::tools::drop_priv(user, group, cfg.proxy_address_http.clone(), cfg.proxy_address_tls.clone());
     }
 
     let (tx, rx) = channel();

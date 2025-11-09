@@ -1,4 +1,3 @@
-use crate::utils::metrics::*;
 use crate::utils::structs::{AppConfig, Extraparams, Headers, InnerMap, UpstreamsDashMap, UpstreamsIdMap};
 use crate::http_proxy::gethosts::GetHost;
 use crate::waf::wirefilter::{evaluate_waf_for_pingora_request, WafAction};
@@ -430,13 +429,13 @@ impl ProxyHttp for LB {
             );
         }
 
-        let m = &MetricTypes {
+        let m = &crate::utils::metrics::MetricTypes {
             method: session.req_header().method.to_string(),
             code: session.response_written().map(|resp| resp.status.as_str().to_owned()).unwrap_or("0".to_string()),
             latency: ctx.start_time.elapsed(),
             version: session.req_header().version,
         };
-        calc_metrics(m);
+        crate::utils::metrics::calc_metrics(m);
 
         // Clean up fingerprint from storage after logging
         if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
