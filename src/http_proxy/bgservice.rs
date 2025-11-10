@@ -63,11 +63,11 @@ impl BackgroundService for LB {
         };
         let _ = tokio::spawn(async move { api_load.start(tx_api).await });
 
-        let uu = self.ump_upst.clone();
-        let ff = self.ump_full.clone();
-        let im = self.ump_byid.clone();
-        let (hc_method, hc_interval) = (self.config.hc_method.clone(), self.config.hc_interval);
-        let _ = tokio::spawn(async move { healthcheck::hc2(uu, ff, im, (&*hc_method.to_string(), hc_interval.to_string().parse().unwrap())).await });
+        // Use AppConfig values as defaults
+        let (default_healthcheck_method, default_healthcheck_interval) = (self.config.healthcheck_method.clone(), self.config.healthcheck_interval);
+        let mut healthcheck_method = default_healthcheck_method.clone();
+        let mut healthcheck_interval = default_healthcheck_interval;
+        let mut healthcheck_started = false;
 
         loop {
             tokio::select! {
@@ -77,12 +77,41 @@ impl BackgroundService for LB {
                 val = rx.next() => {
                     match val {
                         Some(ss) => {
+                            // Update healthcheck settings from upstreams config if available
+                            if let Some(interval) = ss.healthcheck_interval {
+                                healthcheck_interval = interval;
+                            }
+                            if let Some(method) = &ss.healthcheck_method {
+                                healthcheck_method = method.clone();
+                            }
+
+                            // Start healthcheck on first config load
+                            if !healthcheck_started {
+                                let uu_clone = self.ump_upst.clone();
+                                let ff_clone = self.ump_full.clone();
+                                let im_clone = self.ump_byid.clone();
+                                let method_clone = healthcheck_method.clone();
+                                let interval_clone = healthcheck_interval;
+                                let _ = tokio::spawn(async move {
+                                    healthcheck::hc2(uu_clone, ff_clone, im_clone, (&*method_clone.to_string(), interval_clone.to_string().parse().unwrap())).await
+                                });
+                                healthcheck_started = true;
+                            }
+
+                            // Update arxignis_paths (global paths that work across all hostnames)
+                            self.arxignis_paths.clear();
+                            for entry in ss.arxignis_paths.iter() {
+                                let (servers, counter) = entry.value();
+                                let new_counter = std::sync::atomic::AtomicUsize::new(counter.load(std::sync::atomic::Ordering::Relaxed));
+                                self.arxignis_paths.insert(entry.key().clone(), (servers.clone(), new_counter));
+                            }
+
                             crate::utils::tools::clone_dashmap_into(&ss.upstreams, &self.ump_full);
                             crate::utils::tools::clone_dashmap_into(&ss.upstreams, &self.ump_upst);
                             let current = self.extraparams.load_full();
                             let mut new = (*current).clone();
                             new.sticky_sessions = ss.extraparams.sticky_sessions;
-                            new.to_https = ss.extraparams.to_https;
+                            new.https_proxy_enabled = ss.extraparams.https_proxy_enabled;
                             new.authentication = ss.extraparams.authentication.clone();
                             new.rate_limit = ss.extraparams.rate_limit;
                             self.extraparams.store(Arc::new(new));

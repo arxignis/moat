@@ -2,6 +2,7 @@ use crate::utils::structs::InnerMap;
 use crate::http_proxy::proxyhttp::LB;
 use async_trait::async_trait;
 use std::sync::atomic::Ordering;
+use log::debug;
 
 #[async_trait]
 pub trait GetHost {
@@ -15,6 +16,16 @@ impl GetHost for LB {
             if let Some(bb) = self.ump_byid.get(b) {
                 // println!("BIB :===> {:?}", Some(bb.value()));
                 return Some(bb.value().clone());
+            }
+        }
+
+        // Check arxignis_paths first - these paths work regardless of hostname
+        if let Some(arxignis_path_entry) = self.arxignis_paths.get(path) {
+            let (servers, index) = arxignis_path_entry.value();
+            if !servers.is_empty() {
+                let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
+                debug!("Using Arxignis path {} -> {}", path, servers[idx].address);
+                return Some(servers[idx].clone());
             }
         }
 

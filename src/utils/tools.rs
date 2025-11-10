@@ -29,12 +29,12 @@ pub fn print_upstreams(upstreams: &UpstreamsDashMap) {
             println!("    Path: {}", path);
             for f in path_entry.value().0.clone() {
                 println!(
-                    "        IP: {}, Port: {}, SSL: {}, H2: {}, To HTTPS: {}, Rate Limit: {}",
+                    "        IP: {}, Port: {}, SSL: {}, H2: {}, HTTPS Proxy Enabled: {}, Rate Limit: {}",
                     f.address,
                     f.port,
-                    f.is_ssl,
-                    f.is_http2,
-                    f.to_https,
+                    f.ssl_enabled,
+                    f.http2_enabled,
+                    f.https_proxy_enabled,
                     f.rate_limit.unwrap_or(0)
                 );
             }
@@ -152,7 +152,7 @@ pub fn clone_idmap_into(original: &UpstreamsDashMap, cloned: &UpstreamsIdMap) {
             let new_vec = vec.clone();
             for x in vec.iter() {
                 let mut id = String::new();
-                write!(&mut id, "{}:{}:{}", x.address, x.port, x.is_ssl).unwrap();
+                write!(&mut id, "{}:{}:{}", x.address, x.port, x.ssl_enabled).unwrap();
                 let mut hasher = Sha256::new();
                 hasher.update(id.clone().into_bytes());
                 let hash = hasher.finalize();
@@ -161,9 +161,9 @@ pub fn clone_idmap_into(original: &UpstreamsDashMap, cloned: &UpstreamsIdMap) {
                 let to_add = InnerMap {
                     address: hh.clone(),
                     port: 0,
-                    is_ssl: false,
-                    is_http2: false,
-                    to_https: false,
+                    ssl_enabled: false,
+                    http2_enabled: false,
+                    https_proxy_enabled: false,
                     rate_limit: None,
                     healthcheck: None,
                 };

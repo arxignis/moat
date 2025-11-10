@@ -488,17 +488,17 @@ impl BpfStatsCollector {
         let events = self.collect_dropped_ip_events()?;
 
         if events.total_events > 0 {
-            log::info!("{}", events.summary());
+            log::debug!("{}", events.summary());
 
             // Log top 5 dropped IPs
             let top_ips = events.get_top_dropped_ips(5);
             for event in top_ips {
-                log::info!("  {}", event.summary());
+                log::debug!("  {}", event.summary());
             }
 
             // Log as JSON for structured logging
             if let Ok(json) = events.to_json() {
-                log::info!("Dropped IP Events JSON: {}", json);
+                log::debug!("Dropped IP Events JSON: {}", json);
             }
 
             // Send events to unified queue

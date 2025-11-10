@@ -378,7 +378,7 @@ impl ContentScanner {
             match self.scan_bytes(&config.clamav_server, &field_bytes).await {
                 Ok(result) => {
                     if result.malware_detected {
-                        log::warn!("Malware detected in multipart field '{}' (filename: {:?}): signature {:?}",
+                        log::info!("Malware detected in multipart field '{}' (filename: {:?}): signature {:?}",
                             field_name, field_filename, result.signature);
 
                         // Return immediately on first malware detection

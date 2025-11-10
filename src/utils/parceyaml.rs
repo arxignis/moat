@@ -66,25 +66,55 @@ pub async fn load_configuration(d: &str, kind: &str) -> Option<Configuration> {
 }
 
 async fn populate_headers_and_auth(config: &mut Configuration, parsed: &Config) {
-    if let Some(headers) = &parsed.headers {
-        let mut hl = Vec::new();
-        for header in headers {
-            if let Some((key, val)) = header.split_once(':') {
-                hl.push((key.trim().to_string(), val.trim().to_string()));
+    // Handle new config format with nested config: section
+    if let Some(global_config) = &parsed.config {
+        // Use values from config: section if present
+        config.extraparams.sticky_sessions = global_config.sticky_sessions;
+        config.extraparams.https_proxy_enabled = Some(global_config.https_proxy_enabled);
+        config.extraparams.rate_limit = global_config.global_rate_limit;
+
+        if let Some(headers) = &global_config.global_headers {
+            let mut hl = Vec::new();
+            for header in headers {
+                if let Some((key, val)) = header.split_once(':') {
+                    hl.push((key.trim().to_string(), val.trim().to_string()));
+                }
             }
+
+            let global_headers = DashMap::new();
+            global_headers.insert("/".to_string(), hl);
+            config.headers.insert("GLOBAL_HEADERS".to_string(), global_headers);
         }
 
-        let global_headers = DashMap::new();
-        global_headers.insert("/".to_string(), hl);
-        config.headers.insert("GLOBAL_HEADERS".to_string(), global_headers);
-    }
+        if let Some(rate) = &global_config.global_rate_limit {
+            info!("Applied Global Rate Limit : {} request per second", rate);
+        }
 
-    config.extraparams.sticky_sessions = parsed.sticky_sessions;
-    config.extraparams.to_https = parsed.to_https;
-    config.extraparams.rate_limit = parsed.rate_limit;
+        // Store healthcheck settings from upstreams config
+        config.healthcheck_interval = global_config.healthcheck_interval;
+        config.healthcheck_method = global_config.healthcheck_method.clone();
+    } else {
+        // Fallback to old format (top-level fields)
+        if let Some(headers) = &parsed.headers {
+            let mut hl = Vec::new();
+            for header in headers {
+                if let Some((key, val)) = header.split_once(':') {
+                    hl.push((key.trim().to_string(), val.trim().to_string()));
+                }
+            }
 
-    if let Some(rate) = &parsed.rate_limit {
-        info!("Applied Global Rate Limit : {} request per second", rate);
+            let global_headers = DashMap::new();
+            global_headers.insert("/".to_string(), hl);
+            config.headers.insert("GLOBAL_HEADERS".to_string(), global_headers);
+        }
+
+        config.extraparams.sticky_sessions = parsed.sticky_sessions;
+        config.extraparams.https_proxy_enabled = None; // Legacy format doesn't have this
+        config.extraparams.rate_limit = parsed.rate_limit;
+
+        if let Some(rate) = &parsed.rate_limit {
+            info!("Applied Global Rate Limit : {} request per second", rate);
+        }
     }
 
     if let Some(auth) = &parsed.authorization {
@@ -97,6 +127,34 @@ async fn populate_headers_and_auth(config: &mut Configuration, parsed: &Config) 
 }
 
 async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
+    // Handle arxignis_paths first - these are global paths that work across all hostnames
+    if let Some(arxignis_paths) = &parsed.arxignis_paths {
+        info!("Processing {} Arxignis paths", arxignis_paths.len());
+        for (path, path_config) in arxignis_paths {
+            let mut server_list = Vec::new();
+            for server in &path_config.servers {
+                if let Some((ip, port_str)) = server.split_once(':') {
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        let https_proxy_enabled = path_config.https_proxy_enabled.unwrap_or(false);
+                        let ssl_enabled = path_config.ssl_enabled.unwrap_or(true);
+                        let http2_enabled = path_config.http2_enabled.unwrap_or(false);
+                        server_list.push(InnerMap {
+                            address: ip.trim().to_string(),
+                            port,
+                            ssl_enabled,
+                            http2_enabled,
+                            https_proxy_enabled,
+                            rate_limit: path_config.rate_limit,
+                            healthcheck: path_config.healthcheck,
+                        });
+                    }
+                }
+            }
+            config.arxignis_paths.insert(path.clone(), (server_list, AtomicUsize::new(0)));
+            info!("Arxignis path {} -> {} backend(s)", path, config.arxignis_paths.get(path).unwrap().0.len());
+        }
+    }
+
     let imtdashmap = UpstreamsDashMap::new();
     if let Some(upstreams) = &parsed.upstreams {
         for (hostname, host_config) in upstreams {
@@ -121,12 +179,15 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
                 for server in &path_config.servers {
                     if let Some((ip, port_str)) = server.split_once(':') {
                         if let Ok(port) = port_str.parse::<u16>() {
+                            let https_proxy_enabled = path_config.https_proxy_enabled.unwrap_or(false);
+                            let ssl_enabled = path_config.ssl_enabled.unwrap_or(true); // Default to SSL
+                            let http2_enabled = path_config.http2_enabled.unwrap_or(false); // Default to HTTP/1.1
                             server_list.push(InnerMap {
                                 address: ip.trim().to_string(),
                                 port,
-                                is_ssl: true,
-                                is_http2: false,
-                                to_https: path_config.to_https.unwrap_or(false),
+                                ssl_enabled,
+                                http2_enabled,
+                                https_proxy_enabled,
                                 rate_limit: path_config.rate_limit,
                                 healthcheck: path_config.healthcheck,
                             });
@@ -159,7 +220,7 @@ pub fn parce_main_config_with_log_level(path: &str, log_level: Option<&str>) -> 
     let data = fs::read_to_string(path).unwrap();
     let mut cfo: AppConfig = serde_yaml::from_str(&*data).expect("Failed to parse main config file");
     log_builder(log_level);
-    cfo.hc_method = cfo.hc_method.to_uppercase();
+    cfo.healthcheck_method = cfo.healthcheck_method.to_uppercase();
     if let Some((ip, port_str)) = cfo.config_address.split_once(':') {
         if let Ok(port) = port_str.parse::<u16>() {
             cfo.local_server = Option::from((ip.to_string(), port));

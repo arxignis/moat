@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock, OnceLock};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use wirefilter::{ExecutionContext, Scheme, TypedArray, TypedMap};
-use crate::config::{Config, fetch_config};
+use crate::worker::config::{Config, fetch_config};
 use crate::threat;
 use anyhow::anyhow;
 
@@ -70,7 +70,7 @@ impl HttpFilter {
         // Register functions used in Cloudflare-style expressions
         builder.add_function("any", wirefilter::AnyFunction::default()).unwrap();
         builder.add_function("all", wirefilter::AllFunction::default()).unwrap();
-        
+
         builder.add_function("cidr", wirefilter::CIDRFunction::default()).unwrap();
         builder.add_function("concat", wirefilter::ConcatFunction::default()).unwrap();
         builder.add_function("decode_base64", wirefilter::DecodeBase64Function::default()).unwrap();
@@ -88,7 +88,7 @@ impl HttpFilter {
         builder.add_function("url_decode", wirefilter::UrlDecodeFunction::default()).unwrap();
         builder.add_function("uuid4", wirefilter::UUID4Function::default()).unwrap();
         builder.add_function("wildcard_replace", wirefilter::WildcardReplaceFunction::default()).unwrap();
-        
+
 
         builder.build()
     }

@@ -14,8 +14,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod access_log;
 pub mod access_rules;
-pub mod config;
 pub mod app_state;
+pub mod captcha_server;
 pub mod cli;
 pub mod content_scanning;
 pub mod firewall;
@@ -39,6 +39,7 @@ pub mod worker;
 
 use tokio::signal;
 use tokio::sync::watch;
+use log::{error, info};
 
 use crate::app_state::AppState;
 use crate::bpf_stats::BpfStatsCollector;
@@ -162,6 +163,14 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         log::info!("Running in daemon mode (PID file: {})", config.daemon.pid_file);
     }
 
+    // Log mode and active features
+    if config.mode == "agent" {
+        log::info!("Running in AGENT mode - BPF, access rules, TCP fingerprinting, and logging are active");
+        log::info!("Agent mode features: XDP packet filtering, access rules enforcement, TCP fingerprinting, BPF statistics, and event logging");
+    } else {
+        log::info!("Running in PROXY mode - Full reverse proxy with all security features");
+    }
+
     // Initialize global HTTP client with keepalive configuration
     if let Err(e) = init_global_client() {
         log::warn!("Failed to initialize global HTTP client: {}", e);
@@ -219,18 +228,27 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         // Initialize access rules immediately after XDP attachment
         if !skels.is_empty() {
             let _ = access_rules::init_access_rules_from_global(&skels);
+            if config.mode == "agent" {
+                log::info!("Access rules initialized for agent mode - network-level filtering active");
+            }
         }
     }
 
 
     // Create BPF statistics collector
     let bpf_stats_collector = BpfStatsCollector::new(skels.clone(), config.bpf_stats.enabled);
+    if config.mode == "agent" && !skels.is_empty() {
+        log::info!("BPF statistics collector initialized for agent mode (enabled: {})", config.bpf_stats.enabled);
+    }
 
     // Create TCP fingerprinting collector
     let tcp_fingerprint_collector = TcpFingerprintCollector::new_with_config(
         skels.clone(),
         TcpFingerprintConfig::from_cli_config(&config.tcp_fingerprint)
     );
+    if config.mode == "agent" && !skels.is_empty() {
+        log::info!("TCP fingerprinting collector initialized for agent mode (enabled: {})", config.tcp_fingerprint.enabled);
+    }
 
     let state = AppState {
         skels: skels.clone(),
@@ -239,15 +257,52 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         tcp_fingerprint_collector,
     };
 
-    // Start the old Pingora proxy system in a separate thread (non-blocking)
-    std::thread::spawn(|| {
-        http_proxy::start::run();
+    // Start the captcha verification server in a separate task
+    tokio::spawn(async move {
+        if let Err(e) = captcha_server::start_captcha_server().await {
+            error!("Captcha server error: {}", e);
+        }
     });
+    info!("Captcha verification server started on 127.0.0.1:3001");
+
+    // Start the old Pingora proxy system in a separate thread (non-blocking)
+    // Only start if mode is "proxy" (disabled in agent mode)
+    if config.mode == "proxy" {
+        let bpf_stats_config = config.bpf_stats.clone();
+        let logging_config = config.logging.clone();
+        let arxignis_config = config.arxignis.clone();
+        let network_config = config.network.clone();
+        let tcp_fingerprint_config = config.tcp_fingerprint.clone();
+        let pingora_config = config.pingora.clone();
+        std::thread::spawn(move || {
+            http_proxy::start::run_with_config(Some(crate::cli::Config {
+                mode: "proxy".to_string(),
+                http_addr: Default::default(),
+                http_bind: Default::default(),
+                tls_addr: Default::default(),
+                tls_bind: Default::default(),
+                upstream: Default::default(),
+                proxy_protocol: Default::default(),
+                health_check: Default::default(),
+                redis: Default::default(),
+                network: network_config,
+                arxignis: arxignis_config,
+                content_scanning: Default::default(),
+                logging: logging_config,
+                bpf_stats: bpf_stats_config,
+                tcp_fingerprint: tcp_fingerprint_config,
+                daemon: Default::default(),
+                pingora: pingora_config,
+            }));
+        });
+    } else {
+        log::info!("Pingora proxy system disabled (mode: {})", config.mode);
+    }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Initialize Redis manager if Redis URL is provided
-    log::info!("Checking Redis configuration: url is_empty={}, tls.mode={}", config.redis.url.is_empty(), config.tls.mode);
+    log::info!("Checking Redis configuration: url is_empty={}", config.redis.url.is_empty());
     if !config.redis.url.is_empty() {
         log::info!("Initializing Redis manager with URL: {} (prefix: {})", config.redis.url, config.redis.prefix);
         if let Err(e) = redis::RedisManager::init(&config.redis.url, config.redis.prefix.clone()).await {
@@ -259,37 +314,37 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         log::warn!("Redis URL is empty, skipping Redis manager initialization");
     }
 
-    // Start certificate fetcher if TLS mode is redis
-    log::info!("Checking certificate fetcher conditions: tls.mode={}, redis.url.is_empty={}", config.tls.mode, config.redis.url.is_empty());
-    let certificate_fetcher_handle = if config.tls.mode == "redis" && !config.redis.url.is_empty() {
-        log::info!("Certificate fetcher conditions met, starting fetcher...");
+    // Initialize worker manager
+    let (mut worker_manager, _worker_shutdown_rx) = worker::WorkerManager::new();
+
+    // Register certificate worker if Redis URL is provided (certificates loaded from Redis)
+    if !config.redis.url.is_empty() {
         // Parse proxy_certificates from config file
         let certificate_path = if let Some(config_path) = &_args.config {
-            // Try to read proxy_certificates from config.yaml
-            if let Ok(config_content) = std::fs::read_to_string(config_path) {
-                if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&config_content) {
-                    yaml.get("proxy_certificates")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "/tmp/moat-certs".to_string())
-                } else {
-                    "/tmp/moat-certs".to_string()
-                }
-            } else {
-                "/tmp/moat-certs".to_string()
-            }
+            std::fs::read_to_string(config_path)
+                .ok()
+                .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
+                .and_then(|yaml| yaml.get("proxy_certificates")?.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "/tmp/moat-certs".to_string())
         } else {
             "/tmp/moat-certs".to_string()
         };
 
         let refresh_interval = 300; // 5 minutes default refresh interval
-        let shutdown = shutdown_rx.clone();
-        log::info!("Starting certificate fetcher for Redis TLS mode (certificate path: {}, refresh interval: {}s). Domains will be read from ssl-storage:domains key in Redis.", certificate_path, refresh_interval);
-        Some(worker::certificate::start_certificate_fetcher(certificate_path, refresh_interval, shutdown))
-    } else {
-        log::warn!("Certificate fetcher not started: tls.mode={}, redis.url.is_empty={}", config.tls.mode, config.redis.url.is_empty());
-        None
-    };
+        let worker_config = worker::WorkerConfig {
+            name: "certificate".to_string(),
+            interval_secs: refresh_interval,
+            enabled: true,
+        };
+
+        let certificate_worker = worker::certificate::CertificateWorker::new(certificate_path.clone(), refresh_interval);
+
+        if let Err(e) = worker_manager.register_worker(worker_config, certificate_worker) {
+            log::error!("Failed to register certificate worker: {}", e);
+        } else {
+            log::info!("Registered certificate worker (path: {}, interval: {}s)", certificate_path, refresh_interval);
+        }
+    }
 
     // Validate API key if provided
     if !config.arxignis.base_url.is_empty() && !config.arxignis.api_key.is_empty() {
@@ -393,26 +448,50 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
 
     // Access rules were already initialized after XDP attachment above
 
-    // Start periodic access rules updater (if BPF is available)
-    let access_rules_handle = if !state.skels.is_empty() {
-        let skels = state.skels.clone();
-        let api_key = config.arxignis.api_key.clone();
-        let base_url = config.arxignis.base_url.clone();
-        let shutdown = shutdown_rx.clone();
-        Some(access_rules::start_access_rules_updater(base_url, skels, api_key, shutdown))
+    // Register config worker to fetch and apply configuration periodically
+    if !config.arxignis.base_url.is_empty() && !config.arxignis.api_key.is_empty() {
+        let refresh_interval = 10; // 10 seconds config refresh interval
+        let worker_config = worker::WorkerConfig {
+            name: "config".to_string(),
+            interval_secs: refresh_interval,
+            enabled: true,
+        };
+
+        let config_worker = worker::config::ConfigWorker::new(
+            config.arxignis.base_url.clone(),
+            config.arxignis.api_key.clone(),
+            refresh_interval,
+            state.skels.clone(),
+        );
+
+        if let Err(e) = worker_manager.register_worker(worker_config, config_worker) {
+            log::error!("Failed to register config worker: {}", e);
+        } else {
+            if config.mode == "agent" {
+                log::info!("Registered config worker for agent mode (interval: {}s) - fetches access rules, WAF rules, and content scanning config", refresh_interval);
+            } else {
+                log::info!("Registered config worker (interval: {}s) - fetches access rules, WAF rules, and content scanning config", refresh_interval);
+            }
+        }
     } else {
-        log::info!("Skipping access rules updater (XDP disabled)");
-        None
-    };
+        log::info!("Skipping config worker (no API credentials provided)");
+    }
 
     // Start BPF statistics logging task
     let bpf_stats_handle = if config.bpf_stats.enabled && !state.skels.is_empty() {
         let collector = state.bpf_stats_collector.clone();
         let log_interval = config.bpf_stats.log_interval_secs;
         let shutdown = shutdown_rx.clone();
+        if config.mode == "agent" {
+            log::info!("Starting BPF statistics logging for agent mode (interval: {}s)", log_interval);
+        }
         Some(start_bpf_stats_logging(collector, log_interval, shutdown))
     } else {
-        log::info!("Skipping BPF statistics logging (disabled or XDP not available)");
+        if config.mode == "agent" {
+            log::warn!("BPF statistics logging disabled in agent mode - enable bpf_stats.enabled in config");
+        } else {
+            log::info!("Skipping BPF statistics logging (disabled or XDP not available)");
+        }
         None
     };
 
@@ -435,9 +514,16 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         let log_interval = config.tcp_fingerprint.log_interval_secs;
         let shutdown = shutdown_rx.clone();
         let state_clone = Arc::new(state.clone());
+        if config.mode == "agent" {
+            log::info!("Starting TCP fingerprinting statistics logging for agent mode (interval: {}s)", log_interval);
+        }
         Some(start_tcp_fingerprint_stats_logging(collector, log_interval, shutdown, state_clone))
     } else {
-        log::info!("Skipping TCP fingerprinting statistics logging (disabled or XDP not available)");
+        if config.mode == "agent" {
+            log::warn!("TCP fingerprinting statistics logging disabled in agent mode - enable tcp_fingerprint.enabled in config");
+        } else {
+            log::info!("Skipping TCP fingerprinting statistics logging (disabled or XDP not available)");
+        }
         None
     };
 
@@ -458,12 +544,6 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     signal::ctrl_c().await?;
     log::info!("Shutdown signal received, stopping servers...");
     let _ = shutdown_tx.send(true);
-
-    if let Some(handle) = access_rules_handle
-        && let Err(err) = handle.await
-    {
-        log::error!("access-rules task join error: {err}");
-    }
 
     if let Some(handle) = bpf_stats_handle
         && let Err(err) = handle.await
@@ -489,11 +569,9 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         log::error!("tcp-fingerprint-events task join error: {err}");
     }
 
-    if let Some(handle) = certificate_fetcher_handle
-        && let Err(err) = handle.await
-    {
-        log::error!("certificate-fetcher task join error: {err}");
-    }
+    // Shutdown all workers
+    worker_manager.shutdown();
+    worker_manager.wait_for_all().await;
 
     // Detach XDP programs from interfaces
     if !ifindices.is_empty() {

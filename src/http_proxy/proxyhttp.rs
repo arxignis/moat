@@ -5,7 +5,8 @@ use crate::waf::actions::captcha::{validate_captcha_token, apply_captcha_challen
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Bytes;
-use log::{debug, error, info};
+use dashmap::DashMap;
+use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use pingora_http::{RequestHeader, ResponseHeader, StatusCode};
 use pingora_core::prelude::*;
@@ -15,7 +16,9 @@ use pingora_core::listeners::ALPN;
 use pingora_core::prelude::HttpPeer;
 use pingora_limits::rate::Rate;
 use pingora_proxy::{ProxyHttp, Session};
+use serde_json;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -26,6 +29,7 @@ pub struct LB {
     pub ump_upst: Arc<UpstreamsDashMap>,
     pub ump_full: Arc<UpstreamsDashMap>,
     pub ump_byid: Arc<UpstreamsIdMap>,
+    pub arxignis_paths: Arc<DashMap<String, (Vec<InnerMap>, AtomicUsize)>>,
     pub headers: Arc<Headers>,
     pub config: Arc<AppConfig>,
     pub extraparams: Arc<ArcSwap<Extraparams>>,
@@ -33,13 +37,16 @@ pub struct LB {
 
 pub struct Context {
     backend_id: String,
-    to_https: bool,
+    https_proxy_enabled: bool,
     redirect_to: String,
     start_time: Instant,
     hostname: Option<String>,
     upstream_peer: Option<InnerMap>,
     extraparams: arc_swap::Guard<Arc<Extraparams>>,
     tls_fingerprint: Option<Arc<crate::utils::tls_fingerprint::Fingerprint>>,
+    request_body: Vec<u8>,
+    malware_detected: bool,
+    malware_response_sent: bool,
 }
 
 #[async_trait]
@@ -48,13 +55,16 @@ impl ProxyHttp for LB {
     fn new_ctx(&self) -> Self::CTX {
         Context {
             backend_id: String::new(),
-            to_https: false,
+            https_proxy_enabled: false,
             redirect_to: String::new(),
             start_time: Instant::now(),
             hostname: None,
             upstream_peer: None,
             extraparams: self.extraparams.load(),
             tls_fingerprint: None,
+            request_body: Vec::new(),
+            malware_detected: false,
+            malware_response_sent: false,
         }
     }
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
@@ -286,30 +296,91 @@ impl ProxyHttp for LB {
         Ok(false)
     }
     async fn upstream_peer(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
+        // Check if malware was detected, send JSON response and prevent forwarding
+        if ctx.malware_detected && !ctx.malware_response_sent {
+            // Check if response has already been written
+            if session.response_written().is_some() {
+                warn!("Response already written, cannot block malware request in upstream_peer");
+                ctx.malware_response_sent = true;
+                return Err(Box::new(Error {
+                    etype: HTTPStatus(403),
+                    esource: Upstream,
+                    retry: RetryType::Decided(false),
+                    cause: None,
+                    context: Option::from(ImmutStr::Static("Malware detected")),
+                }));
+            }
+
+            info!("Blocking request due to malware detection");
+
+            // Build JSON response
+            let json_response = serde_json::json!({
+                "success": false,
+                "error": "Request blocked",
+                "reason": "malware_detected",
+                "message": "Malware detected in request"
+            });
+            let json_body = Bytes::from(json_response.to_string());
+
+            // Build response header
+            let mut header = ResponseHeader::build(403, None).unwrap();
+            header.insert_header("Content-Type", "application/json").ok();
+            header.insert_header("X-Content-Scan-Result", "malware_detected").ok();
+
+            session.set_keepalive(None);
+
+            // Try to write response, handle error if response already sent
+            match session.write_response_header(Box::new(header), false).await {
+                Ok(_) => {
+                    match session.write_response_body(Some(json_body), true).await {
+                        Ok(_) => {
+                            ctx.malware_response_sent = true;
+                        }
+                        Err(e) => {
+                            warn!("Failed to write response body for malware block in upstream_peer: {}", e);
+                            ctx.malware_response_sent = true;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to write response header for malware block in upstream_peer: {}", e);
+                    ctx.malware_response_sent = true;
+                }
+            }
+
+            return Err(Box::new(Error {
+                etype: HTTPStatus(403),
+                esource: Upstream,
+                retry: RetryType::Decided(false),
+                cause: None,
+                context: Option::from(ImmutStr::Static("Malware detected")),
+            }));
+        }
+
         // let host_name = return_header_host(&session);
         match ctx.hostname.as_ref() {
             Some(hostname) => {
                 match ctx.upstream_peer.as_ref() {
-                    // Some((address, port, ssl, is_h2, to_https)) => {
+                    // Some((address, port, ssl, is_h2, https_proxy_enabled)) => {
                     Some(innermap) => {
-                        let mut peer = Box::new(HttpPeer::new((innermap.address.clone(), innermap.port.clone()), innermap.is_ssl, String::new()));
+                        let mut peer = Box::new(HttpPeer::new((innermap.address.clone(), innermap.port.clone()), innermap.ssl_enabled, String::new()));
                         // if session.is_http2() {
-                        if innermap.is_http2 {
+                        if innermap.http2_enabled {
                             peer.options.alpn = ALPN::H2;
                         }
-                        if innermap.is_ssl {
+                        if innermap.ssl_enabled {
                             peer.sni = hostname.clone();
                             peer.options.verify_cert = false;
                             peer.options.verify_hostname = false;
                         }
-                        if ctx.to_https || innermap.to_https {
+                        if ctx.https_proxy_enabled || innermap.https_proxy_enabled {
                             if let Some(stream) = session.stream() {
                                 if stream.get_ssl().is_none() {
                                     if let Some(addr) = session.server_addr() {
                                         if let Some((host, _)) = addr.to_string().split_once(':') {
                                             let uri = session.req_header().uri.path_and_query().map_or("/", |pq| pq.as_str());
                                             let port = self.config.proxy_port_tls.unwrap_or(403);
-                                            ctx.to_https = true;
+                                            ctx.https_proxy_enabled = true;
                                             ctx.redirect_to = format!("https://{}:{}{}", host, port, uri);
                                         }
                                     }
@@ -317,7 +388,7 @@ impl ProxyHttp for LB {
                             }
                         }
 
-                        ctx.backend_id = format!("{}:{}:{}", innermap.address.clone(), innermap.port.clone(), innermap.is_ssl);
+                        ctx.backend_id = format!("{}:{}:{}", innermap.address.clone(), innermap.port.clone(), innermap.ssl_enabled);
                         Ok(peer)
                     }
                     None => {
@@ -360,12 +431,103 @@ impl ProxyHttp for LB {
         Ok(())
     }
 
-    // async fn request_body_filter(&self, _session: &mut Session, _body: &mut Option<Bytes>, _end_of_stream: bool, _ctx: &mut Self::CTX) -> Result<()>
-    // where
-    //     Self::CTX: Send + Sync,
-    // {
-    //     Ok(())
-    // }
+
+    async fn request_body_filter(&self, _session: &mut Session, body: &mut Option<Bytes>, end_of_stream: bool, ctx: &mut Self::CTX) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        // Accumulate request body for content scanning
+        if let Some(body_bytes) = body {
+            ctx.request_body.extend_from_slice(body_bytes);
+        }
+
+        // When stream ends, perform content scanning if enabled
+        if end_of_stream && !ctx.request_body.is_empty() {
+            if let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
+                // Get peer address for scanning
+                let peer_addr = if let Some(addr) = _session.client_addr().and_then(|a| a.as_inet()) {
+                    std::net::SocketAddr::new(addr.ip(), addr.port())
+                } else {
+                    return Ok(()); // Can't scan without peer address
+                };
+
+                // Convert request header to Parts for should_scan check
+                let req_header = _session.req_header();
+                let method = req_header.method.as_str();
+                let uri = req_header.uri.to_string();
+                let mut req_builder = hyper::http::Request::builder()
+                    .method(method)
+                    .uri(&uri);
+
+                // Copy essential headers for content scanning (content-type, content-length)
+                if let Some(content_type) = req_header.headers.get("content-type") {
+                    if let Ok(ct_str) = content_type.to_str() {
+                        req_builder = req_builder.header("content-type", ct_str);
+                    }
+                }
+                if let Some(content_length) = req_header.headers.get("content-length") {
+                    if let Ok(cl_str) = content_length.to_str() {
+                        req_builder = req_builder.header("content-length", cl_str);
+                    }
+                }
+
+                let req = match req_builder.body(()) {
+                    Ok(req) => req,
+                    Err(_) => {
+                        warn!("Failed to build request for content scanning, skipping scan");
+                        return Ok(());
+                    }
+                };
+                let (req_parts, _) = req.into_parts();
+
+                // Check if we should scan this request
+                if scanner.should_scan(&req_parts, &ctx.request_body, peer_addr) {
+                    debug!("Content scanner: scanning request body (size: {} bytes)", ctx.request_body.len());
+
+                    // Check if content-type is multipart and scan accordingly
+                    let content_type = req_parts.headers
+                        .get("content-type")
+                        .and_then(|h| h.to_str().ok());
+
+                    let scan_result = if let Some(ct) = content_type {
+                        if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
+                            debug!("Detected multipart content, scanning parts individually");
+                            scanner.scan_multipart_content(&ctx.request_body, &boundary).await
+                        } else {
+                            scanner.scan_content(&ctx.request_body).await
+                        }
+                    } else {
+                        scanner.scan_content(&ctx.request_body).await
+                    };
+
+                    match scan_result {
+                        Ok(scan_result) => {
+                            if scan_result.malware_detected {
+                                info!("Malware detected in request from {}: {} {} - signature: {:?}",
+                                    peer_addr, method, uri, scan_result.signature);
+
+                                // Mark malware detected in context - upstream_peer will handle blocking
+                                ctx.malware_detected = true;
+
+                                // Don't send response here - let upstream_peer handle it before forwarding
+                                return Ok(());
+                            } else {
+                                debug!("Content scan completed: no malware detected");
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Content scanning failed: {}", e);
+                            // On scanning error, allow the request to proceed (fail open)
+                        }
+                    }
+                } else {
+                    debug!("Content scanner: skipping scan (should_scan returned false)");
+                }
+            }
+        }
+
+        Ok(())
+    }
     async fn response_filter(&self, session: &mut Session, _upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
         // _upstream_response.insert_header("X-Proxied-From", "Fooooooooooooooo").unwrap();
         if ctx.extraparams.sticky_sessions {
@@ -374,7 +536,7 @@ impl ProxyHttp for LB {
                 let _ = _upstream_response.insert_header("set-cookie", format!("backend_id={}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax", bid.address));
             }
         }
-        if ctx.to_https {
+        if ctx.https_proxy_enabled {
             let mut redirect_response = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
             redirect_response.insert_header("Location", ctx.redirect_to.clone())?;
             redirect_response.insert_header("Content-Length", "0")?;
@@ -443,6 +605,8 @@ impl ProxyHttp for LB {
         }
     }
 }
+
+impl LB {}
 
 fn return_header_host(session: &Session) -> Option<String> {
     if session.is_http2() {

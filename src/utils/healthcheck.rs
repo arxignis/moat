@@ -58,9 +58,9 @@ async fn build_upstreams(fullist: &UpstreamsDashMap, method: &str, client: &Clie
                 let mut scheme = InnerMap {
                     address: upstream.address.clone(),
                     port: upstream.port,
-                    is_ssl: tls.0,
-                    is_http2: is_h2,
-                    to_https: upstream.to_https,
+                    ssl_enabled: tls.0,
+                    http2_enabled: is_h2,
+                    https_proxy_enabled: upstream.https_proxy_enabled,
                     rate_limit: upstream.rate_limit,
                     healthcheck: upstream.healthcheck,
                 };
@@ -69,7 +69,7 @@ async fn build_upstreams(fullist: &UpstreamsDashMap, method: &str, client: &Clie
                     let resp = http_request(&link, method, "", &client).await;
                     if resp.0 {
                         if resp.1 {
-                            scheme.is_http2 = is_h2; // could be adjusted further
+                            scheme.http2_enabled = is_h2; // could be adjusted further
                         }
                         innervec.push(scheme);
                     } else {

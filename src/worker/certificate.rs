@@ -7,6 +7,7 @@ use tokio::time::{interval, Duration};
 
 use crate::redis::RedisManager;
 use crate::utils::tls::{CertificateConfig, Certificates};
+use crate::worker::Worker;
 
 /// Normalize PEM certificate chain to ensure proper format
 /// - Ensures newline between certificates (END CERTIFICATE and BEGIN CERTIFICATE)
@@ -50,48 +51,79 @@ pub fn get_certificate_store() -> Arc<tokio::sync::RwLock<Option<Arc<Certificate
     CERTIFICATE_STORE.get_or_init(|| Arc::new(tokio::sync::RwLock::new(None))).clone()
 }
 
+/// Certificate worker that fetches SSL certificates from Redis
+pub struct CertificateWorker {
+    certificate_path: String,
+    refresh_interval_secs: u64,
+}
+
+impl CertificateWorker {
+    pub fn new(certificate_path: String, refresh_interval_secs: u64) -> Self {
+        Self {
+            certificate_path,
+            refresh_interval_secs,
+        }
+    }
+}
+
+impl Worker for CertificateWorker {
+    fn name(&self) -> &str {
+        "certificate"
+    }
+
+    fn run(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+        let certificate_path = self.certificate_path.clone();
+        let refresh_interval_secs = self.refresh_interval_secs;
+        let worker_name = self.name().to_string();
+
+        tokio::spawn(async move {
+            // Initial fetch on startup - download all certificates immediately
+            log::info!("[{}] Starting certificate download from Redis on service startup...", worker_name);
+            match fetch_certificates_from_redis(&certificate_path).await {
+                Ok(_) => {
+                    log::info!("[{}] Successfully downloaded all certificates from Redis on startup", worker_name);
+                }
+                Err(e) => {
+                    log::warn!("[{}] Failed to fetch certificates from Redis on startup: {}", worker_name, e);
+                    log::warn!("[{}] Will retry on next scheduled interval", worker_name);
+                }
+            }
+
+            // Set up periodic refresh interval
+            let mut interval = interval(Duration::from_secs(refresh_interval_secs));
+            // Skip the first tick since we already fetched on startup
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    _ = interval.tick() => {
+                        log::debug!("[{}] Periodic certificate refresh triggered", worker_name);
+                        if let Err(e) = fetch_certificates_from_redis(&certificate_path).await {
+                            log::warn!("[{}] Failed to fetch certificates from Redis: {}", worker_name, e);
+                        }
+                    }
+                }
+            }
+
+            log::info!("[{}] Certificate fetcher task stopped", worker_name);
+        })
+    }
+}
+
 /// Start a background task that periodically fetches SSL certificates from Redis
+/// This is kept for backward compatibility
 pub fn start_certificate_fetcher(
     certificate_path: String,
     refresh_interval_secs: u64,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        // Initial fetch on startup - download all certificates immediately
-        log::info!("Starting certificate download from Redis on service startup...");
-        match fetch_certificates_from_redis(&certificate_path).await {
-            Ok(_) => {
-                log::info!("Successfully downloaded all certificates from Redis on startup");
-            }
-            Err(e) => {
-                log::warn!("Failed to fetch certificates from Redis on startup: {}", e);
-                log::warn!("Will retry on next scheduled interval");
-            }
-        }
-
-        // Set up periodic refresh interval
-        let mut interval = interval(Duration::from_secs(refresh_interval_secs));
-        // Skip the first tick since we already fetched on startup
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        break;
-                    }
-                }
-                _ = interval.tick() => {
-                    log::debug!("Periodic certificate refresh triggered");
-                    if let Err(e) = fetch_certificates_from_redis(&certificate_path).await {
-                        log::warn!("Failed to fetch certificates from Redis: {}", e);
-                    }
-                }
-            }
-        }
-
-        log::info!("Certificate fetcher task stopped");
-    })
+    let worker = CertificateWorker::new(certificate_path, refresh_interval_secs);
+    worker.run(shutdown)
 }
 
 /// Fetch domains from ssl-storage:domains key in Redis

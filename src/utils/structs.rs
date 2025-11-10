@@ -13,7 +13,8 @@ pub struct ServiceMapping {
     pub upstream: String,
     pub hostname: String,
     pub path: Option<String>,
-    pub to_https: Option<bool>,
+    #[serde(default)]
+    pub https_proxy_enabled: Option<bool>,
     pub rate_limit: Option<isize>,
     pub headers: Option<Vec<String>>,
 }
@@ -23,7 +24,7 @@ pub struct ServiceMapping {
 #[derive(Clone, Debug, Default)]
 pub struct Extraparams {
     pub sticky_sessions: bool,
-    pub to_https: Option<bool>,
+    pub https_proxy_enabled: Option<bool>,
     pub authentication: DashMap<String, Vec<String>>,
     pub rate_limit: Option<isize>,
 }
@@ -41,13 +42,31 @@ pub struct Consul {
     pub token: Option<String>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GlobalConfig {
+    #[serde(default)]
+    pub https_proxy_enabled: bool,
+    #[serde(default)]
+    pub sticky_sessions: bool,
+    #[serde(default)]
+    pub global_rate_limit: Option<isize>,
+    #[serde(default)]
+    pub global_headers: Option<Vec<String>>,
+    #[serde(default)]
+    pub healthcheck_interval: Option<u16>,
+    #[serde(default)]
+    pub healthcheck_method: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default)]
+    pub config: Option<GlobalConfig>,
+    #[serde(default)]
     pub sticky_sessions: bool,
     #[serde(default)]
-    pub to_https: Option<bool>,
+    pub arxignis_paths: Option<HashMap<String, PathConfig>>,
     #[serde(default)]
     pub upstreams: Option<HashMap<String, HostConfig>>,
     #[serde(default)]
@@ -79,13 +98,22 @@ pub struct HostConfig {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PathConfig {
     pub servers: Vec<String>,
-    pub to_https: Option<bool>,
+    #[serde(default)]
+    pub https_proxy_enabled: Option<bool>,
+    #[serde(default)]
+    pub ssl_enabled: Option<bool>,
+    #[serde(default)]
+    pub http2_enabled: Option<bool>,
+    #[serde(default)]
     pub headers: Option<Vec<String>>,
+    #[serde(default)]
     pub rate_limit: Option<isize>,
+    #[serde(default)]
     pub healthcheck: Option<bool>,
 }
 #[derive(Debug, Default)]
 pub struct Configuration {
+    pub arxignis_paths: DashMap<String, (Vec<InnerMap>, AtomicUsize)>,
     pub upstreams: UpstreamsDashMap,
     pub headers: Headers,
     pub consul: Option<Consul>,
@@ -93,13 +121,15 @@ pub struct Configuration {
     pub typecfg: String,
     pub extraparams: Extraparams,
     pub certificates: DashMap<String, String>, // hostname -> certificate_name mapping
+    pub healthcheck_interval: Option<u16>,
+    pub healthcheck_method: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
-    pub hc_interval: u16,
-    pub hc_method: String,
+    pub healthcheck_interval: u16,
+    pub healthcheck_method: String,
     pub master_key: String,
     pub upstreams_conf: String,
     pub config_address: String,
@@ -123,9 +153,9 @@ pub struct AppConfig {
 pub struct InnerMap {
     pub address: String,
     pub port: u16,
-    pub is_ssl: bool,
-    pub is_http2: bool,
-    pub to_https: bool,
+    pub ssl_enabled: bool,
+    pub http2_enabled: bool,
+    pub https_proxy_enabled: bool,
     pub rate_limit: Option<isize>,
     pub healthcheck: Option<bool>,
 }
@@ -136,9 +166,9 @@ impl InnerMap {
         Self {
             address: Default::default(),
             port: Default::default(),
-            is_ssl: Default::default(),
-            is_http2: Default::default(),
-            to_https: Default::default(),
+            ssl_enabled: Default::default(),
+            http2_enabled: Default::default(),
+            https_proxy_enabled: Default::default(),
             rate_limit: Default::default(),
             healthcheck: Default::default(),
         }

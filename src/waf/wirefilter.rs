@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock, OnceLock};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use wirefilter::{ExecutionContext, Scheme, TypedArray, TypedMap};
-use crate::config::{Config, fetch_config};
+use crate::worker::config::{Config, fetch_config};
 use crate::threat;
 use anyhow::anyhow;
 

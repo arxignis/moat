@@ -6,7 +6,7 @@ use crate::http_proxy::proxyhttp::LB;
 use arc_swap::ArcSwap;
 use ctrlc;
 use dashmap::DashMap;
-use log::info;
+use log::{debug, info, warn};
 // use pingora_core::tls::ssl::{SslAlert, SslRef}; // Not used currently
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::prelude::{background_service, Opt};
@@ -15,10 +15,19 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 pub fn run() {
+    run_with_config(None)
+}
+
+pub fn run_with_config(config: Option<crate::cli::Config>) {
     // default_provider().install_default().expect("Failed to install rustls crypto provider");
-    let parameters = Some(Opt::parse_args()).unwrap();
-    let file = parameters.conf.clone().unwrap();
-    let maincfg = crate::utils::parceyaml::parce_main_config(file.as_str());
+    let maincfg = if let Some(cfg) = config {
+        cfg.pingora.to_app_config()
+    } else {
+        // Fallback to old parsing method for backward compatibility
+        let parameters = Some(Opt::parse_args()).unwrap();
+        let file = parameters.conf.clone().unwrap();
+        crate::utils::parceyaml::parce_main_config(file.as_str())
+    };
 
     // Skip old proxy system if no proxy addresses are configured (using new config format)
     if maincfg.proxy_address_http.is_empty() {
@@ -40,10 +49,11 @@ pub fn run() {
     let ff_config = Arc::new(DashMap::new());
     let im_config = Arc::new(DashMap::new());
     let hh_config = Arc::new(DashMap::new());
+    let ap_config = Arc::new(DashMap::new());
 
     let ec_config = Arc::new(ArcSwap::from_pointee(Extraparams {
         sticky_sessions: false,
-        to_https: None,
+        https_proxy_enabled: None,
         authentication: DashMap::new(),
         rate_limit: None,
     }));
@@ -54,6 +64,7 @@ pub fn run() {
         ump_upst: uf_config,
         ump_full: ff_config,
         ump_byid: im_config,
+        arxignis_paths: ap_config,
         config: cfg.clone(),
         headers: hh_config,
         extraparams: ec_config,
@@ -111,13 +122,13 @@ pub fn run() {
                             .and_then(|a| a.as_inet())
                             .map(|inet| format!("{}:{}", inet.ip(), inet.port()))
                             .unwrap_or_else(|| "unknown".to_string());
-                        info!("ClientHello callback invoked for peer: {}, SNI: {:?}, ALPN: {:?}, raw_len={}",
+                        debug!("ClientHello callback invoked for peer: {}, SNI: {:?}, ALPN: {:?}, raw_len={}",
                               peer_str, hello.sni, hello.alpn, hello.raw.len());
                         // Generate fingerprint from ClientHello
                         if let Some(_fp) = crate::utils::tls_client_hello::generate_fingerprint_from_client_hello(hello, peer_addr) {
-                            info!("Fingerprint generated successfully for peer: {}", peer_str);
+                            debug!("Fingerprint generated successfully for peer: {}", peer_str);
                         } else {
-                            info!("Failed to generate fingerprint for peer: {}", peer_str);
+                            warn!("Failed to generate fingerprint for peer: {}", peer_str);
                         }
                     }));
                     info!("TLS ClientHello callback registered for fingerprint generation");

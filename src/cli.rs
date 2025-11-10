@@ -15,12 +15,36 @@ pub enum TlsMode {
     Disabled,
 }
 
+/// Application operating mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum AppMode {
+    /// Agent mode: Only access rules and monitoring (no proxy)
+    Agent,
+    /// Proxy mode: Full reverse proxy functionality
+    Proxy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_mode")]
+    pub mode: String,
+
+    // Global server options (moved from server section)
     #[serde(default)]
-    pub server: ServerConfig,
+    pub http_addr: String,
     #[serde(default)]
-    pub tls: TlsConfig,
+    pub http_bind: Vec<String>,
+    #[serde(default)]
+    pub tls_addr: String,
+    #[serde(default)]
+    pub tls_bind: Vec<String>,
+    #[serde(default)]
+    pub upstream: String,
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocolConfig,
+    #[serde(default)]
+    pub health_check: HealthCheckConfig,
     #[serde(default)]
     pub redis: RedisConfig,
     #[serde(default)]
@@ -37,29 +61,11 @@ pub struct Config {
     pub tcp_fingerprint: TcpFingerprintConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub pingora: PingoraConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ServerConfig {
-    #[serde(default = "default_disable_http_server")]
-    pub disable_http_server: bool,
-    #[serde(default)]
-    pub http_addr: String,
-    #[serde(default)]
-    pub http_bind: Vec<String>,
-    #[serde(default)]
-    pub tls_addr: String,
-    #[serde(default)]
-    pub tls_bind: Vec<String>,
-    #[serde(default)]
-    pub upstream: String,
-    #[serde(default)]
-    pub proxy_protocol: ProxyProtocolConfig,
-    #[serde(default)]
-    pub health_check: HealthCheckConfig,
-}
-
-fn default_disable_http_server() -> bool { false }
+fn default_mode() -> String { "proxy".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxyProtocolConfig {
@@ -92,17 +98,6 @@ fn default_health_check_port() -> String { "0.0.0.0:8080".to_string() }
 fn default_health_check_methods() -> Vec<String> { vec!["GET".to_string(), "HEAD".to_string()] }
 fn default_health_check_allowed_cidrs() -> Vec<String> { vec![] }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TlsConfig {
-    #[serde(default)]
-    pub mode: String,
-    #[serde(default)]
-    pub only: bool,
-    #[serde(default)]
-    pub cert_path: Option<String>,
-    #[serde(default)]
-    pub key_path: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RedisConfig {
@@ -206,30 +201,22 @@ impl Config {
 
     pub fn default() -> Self {
         Self {
-            server: ServerConfig {
-                disable_http_server: false,
-                http_addr: "0.0.0.0:80".to_string(),
-                http_bind: vec![],
-                tls_addr: "0.0.0.0:443".to_string(),
-                tls_bind: vec![],
-                upstream: "http://localhost:8080".to_string(),
-                proxy_protocol: ProxyProtocolConfig {
-                    enabled: false,
-                    timeout_ms: 1000,
-                },
-                health_check: HealthCheckConfig {
-                    enabled: true,
-                    endpoint: "/health".to_string(),
-                    port: "0.0.0.0:8080".to_string(),
-                    methods: vec!["GET".to_string(), "HEAD".to_string()],
-                    allowed_cidrs: vec![],
-                },
+            mode: "proxy".to_string(),
+            http_addr: "0.0.0.0:80".to_string(),
+            http_bind: vec![],
+            tls_addr: "0.0.0.0:443".to_string(),
+            tls_bind: vec![],
+            upstream: "http://localhost:8080".to_string(),
+            proxy_protocol: ProxyProtocolConfig {
+                enabled: false,
+                timeout_ms: 1000,
             },
-            tls: TlsConfig {
-                mode: "disabled".to_string(),
-                only: false,
-                cert_path: None,
-                key_path: None,
+            health_check: HealthCheckConfig {
+                enabled: true,
+                endpoint: "/health".to_string(),
+                port: "0.0.0.0:8080".to_string(),
+                methods: vec!["GET".to_string(), "HEAD".to_string()],
+                allowed_cidrs: vec![],
             },
             redis: RedisConfig {
                 url: "redis://127.0.0.1/0".to_string(),
@@ -275,19 +262,20 @@ impl Config {
             bpf_stats: BpfStatsConfig::default(),
             tcp_fingerprint: TcpFingerprintConfig::default(),
             daemon: DaemonConfig::default(),
+            pingora: PingoraConfig::default(),
         }
     }
 
     pub fn merge_with_args(&mut self, args: &Args) {
         // Override config values with command line arguments if provided
         if args.disable_http_server {
-            self.server.disable_http_server = true;
+            self.mode = "agent".to_string();
         }
         if !args.http_bind.is_empty() {
-            self.server.http_bind = args.http_bind.iter().map(|addr| addr.to_string()).collect();
+            self.http_bind = args.http_bind.iter().map(|addr| addr.to_string()).collect();
         }
         if !args.tls_bind.is_empty() {
-            self.server.tls_bind = args.tls_bind.iter().map(|addr| addr.to_string()).collect();
+            self.tls_bind = args.tls_bind.iter().map(|addr| addr.to_string()).collect();
         }
         if !args.ifaces.is_empty() {
             self.network.ifaces = args.ifaces.clone();
@@ -296,7 +284,7 @@ impl Config {
             self.arxignis.api_key = api_key.clone();
         }
         if let Some(upstream) = &args.upstream {
-            self.server.upstream = upstream.clone();
+            self.upstream = upstream.clone();
         }
         if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.arxignis.com/v1" {
             self.arxignis.base_url = args.arxignis_base_url.clone();
@@ -321,10 +309,10 @@ impl Config {
 
         // Proxy protocol configuration overrides
         if args.proxy_protocol_enabled {
-            self.server.proxy_protocol.enabled = true;
+            self.proxy_protocol.enabled = true;
         }
         if args.proxy_protocol_timeout != 1000 {
-            self.server.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
+            self.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
         }
 
         // Daemon configuration overrides
@@ -361,11 +349,11 @@ impl Config {
 
     pub fn validate_required_fields(&mut self, args: &Args) -> Result<()> {
         // Check if server section is configured (has http_addr or upstream)
-        let server_configured = !self.server.http_addr.is_empty() || !self.server.upstream.is_empty();
+        let server_configured = !self.http_addr.is_empty() || !self.upstream.is_empty();
 
         // Check if upstream is provided either via CLI args or config file
-        // Skip this check if HTTP server is disabled or server section is not configured
-        if server_configured && !self.server.disable_http_server && args.upstream.is_none() && self.server.upstream.is_empty() {
+        // Skip this check if in agent mode or server section is not configured
+        if server_configured && self.mode != "agent" && args.upstream.is_none() && self.upstream.is_empty() {
             return Err(anyhow::anyhow!("Upstream URL is required. Provide it via --upstream argument or in config file"));
         }
 
@@ -392,51 +380,43 @@ impl Config {
     }
 
     pub fn apply_env_overrides(&mut self) {
-        // Server configuration overrides
-        if let Ok(val) = env::var("AX_SERVER_HTTP_ADDR") {
-            self.server.http_addr = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_TLS_ADDR") {
-            self.server.tls_addr = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_UPSTREAM") {
-            self.server.upstream = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HTTP_BIND") {
-            self.server.http_bind = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_TLS_BIND") {
-            self.server.tls_bind = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENABLED") {
-            self.server.health_check.enabled = val.parse().unwrap_or(true);
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENDPOINT") {
-            self.server.health_check.endpoint = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_PORT") {
-            self.server.health_check.port = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_METHODS") {
-            self.server.health_check.methods = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS") {
-            self.server.health_check.allowed_cidrs = val.split(',').map(|s| s.trim().to_string()).collect();
+        // Mode override
+        if let Ok(val) = env::var("AX_MODE") {
+            self.mode = val;
         }
 
-        // TLS configuration overrides
-        if let Ok(val) = env::var("AX_TLS_MODE") {
-            self.tls.mode = val;
+        // Server configuration overrides
+        if let Ok(val) = env::var("AX_SERVER_HTTP_ADDR") {
+            self.http_addr = val;
         }
-        if let Ok(val) = env::var("AX_TLS_ONLY") {
-            self.tls.only = val.parse().unwrap_or(false);
+        if let Ok(val) = env::var("AX_SERVER_TLS_ADDR") {
+            self.tls_addr = val;
         }
-        if let Ok(val) = env::var("AX_TLS_CERT_PATH") {
-            self.tls.cert_path = Some(val);
+        if let Ok(val) = env::var("AX_SERVER_UPSTREAM") {
+            self.upstream = val;
         }
-        if let Ok(val) = env::var("AX_TLS_KEY_PATH") {
-            self.tls.key_path = Some(val);
+        if let Ok(val) = env::var("AX_SERVER_HTTP_BIND") {
+            self.http_bind = val.split(',').map(|s| s.trim().to_string()).collect();
         }
+        if let Ok(val) = env::var("AX_SERVER_TLS_BIND") {
+            self.tls_bind = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENABLED") {
+            self.health_check.enabled = val.parse().unwrap_or(true);
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENDPOINT") {
+            self.health_check.endpoint = val;
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_PORT") {
+            self.health_check.port = val;
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_METHODS") {
+            self.health_check.methods = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS") {
+            self.health_check.allowed_cidrs = val.split(',').map(|s| s.trim().to_string()).collect();
+        }
+
 
         // Redis configuration overrides
         if let Ok(val) = env::var("AX_REDIS_URL") {
@@ -523,10 +503,10 @@ impl Config {
 
         // Proxy protocol configuration overrides
         if let Ok(val) = env::var("AX_PROXY_PROTOCOL_ENABLED") {
-            self.server.proxy_protocol.enabled = val.parse().unwrap_or(false);
+            self.proxy_protocol.enabled = val.parse().unwrap_or(false);
         }
         if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
-            self.server.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
+            self.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
         }
 
         // Daemon configuration overrides
@@ -821,3 +801,70 @@ fn default_daemon_working_directory() -> String { "/".to_string() }
 fn default_daemon_stdout() -> String { "/var/log/moat.out".to_string() }
 fn default_daemon_stderr() -> String { "/var/log/moat.err".to_string() }
 fn default_daemon_chown_pid_file() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PingoraConfig {
+    #[serde(default)]
+    pub proxy_address_http: String,
+    #[serde(default)]
+    pub proxy_address_tls: Option<String>,
+    #[serde(default)]
+    pub proxy_certificates: Option<String>,
+    #[serde(default = "default_pingora_tls_grade")]
+    pub proxy_tls_grade: String,
+    #[serde(default)]
+    pub upstreams_conf: String,
+    #[serde(default)]
+    pub config_address: String,
+    #[serde(default = "default_pingora_config_api_enabled")]
+    pub config_api_enabled: bool,
+    #[serde(default)]
+    pub master_key: String,
+    #[serde(default = "default_pingora_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_pingora_healthcheck_method")]
+    pub healthcheck_method: String,
+    #[serde(default = "default_pingora_healthcheck_interval")]
+    pub healthcheck_interval: u16,
+}
+
+fn default_pingora_tls_grade() -> String { "medium".to_string() }
+fn default_pingora_config_api_enabled() -> bool { true }
+fn default_pingora_log_level() -> String { "debug".to_string() }
+fn default_pingora_healthcheck_method() -> String { "HEAD".to_string() }
+fn default_pingora_healthcheck_interval() -> u16 { 2 }
+
+impl PingoraConfig {
+    /// Convert PingoraConfig to AppConfig for compatibility with old proxy system
+    pub fn to_app_config(&self) -> crate::utils::structs::AppConfig {
+        let mut app_config = crate::utils::structs::AppConfig::default();
+        app_config.proxy_address_http = self.proxy_address_http.clone();
+        app_config.proxy_address_tls = self.proxy_address_tls.clone();
+        app_config.proxy_certificates = self.proxy_certificates.clone();
+        app_config.proxy_tls_grade = Some(self.proxy_tls_grade.clone());
+        app_config.upstreams_conf = self.upstreams_conf.clone();
+        app_config.config_address = self.config_address.clone();
+        app_config.config_api_enabled = self.config_api_enabled;
+        app_config.master_key = self.master_key.clone();
+        app_config.healthcheck_method = self.healthcheck_method.clone();
+        app_config.healthcheck_interval = self.healthcheck_interval;
+
+        // Parse config_address to local_server
+        if let Some((ip, port_str)) = self.config_address.split_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                app_config.local_server = Some((ip.to_string(), port));
+            }
+        }
+
+        // Parse proxy_address_tls to proxy_port_tls
+        if let Some(ref tls_addr) = self.proxy_address_tls {
+            if let Some((_, port_str)) = tls_addr.split_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    app_config.proxy_port_tls = Some(port);
+                }
+            }
+        }
+
+        app_config
+    }
+}
