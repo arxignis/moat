@@ -40,7 +40,7 @@ PrivateTmp=true
 # File system access
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/moat /var/run /var/lib/moat
+ReadWritePaths=/var/log/moat /var/run /var/lib/moat /etc/moat/certs
 
 # Capabilities (required for XDP/BPF)
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_BPF
