@@ -1,0 +1,67 @@
+# Upstreams Configuration for Pingora Proxy - Consul Provider
+# This file demonstrates Consul service discovery configuration
+#
+# Schema Version: New format with nested config: section
+
+# Provider type: "consul"
+provider: "consul"
+
+# Global configuration section (new format)
+config:
+  # Enable HTTPS proxy redirects globally
+  https_proxy_enabled: false
+
+  # Enable sticky sessions (session affinity) globally
+  sticky_sessions: true
+
+  # Global rate limit (requests per second)
+  global_rate_limit: 200
+
+  # Global headers to add to all responses
+  global_headers:
+    - "Access-Control-Allow-Origin:*"
+    - "X-Proxy-From:Consul-Moat"
+
+# Arxignis paths - Global paths that work across ALL hostnames
+# These paths are evaluated BEFORE hostname-specific routing and Consul service discovery
+# Perfect for common endpoints like captcha, health checks, admin panels, etc.
+arxignis_paths:
+  # Example: Captcha verification endpoint
+  "/cgi-bin/captcha/verify":
+    rate_limit: 200
+    https_proxy_enabled: false
+    ssl_enabled: false
+    servers:
+      - "127.0.0.1:3001"
+
+# Consul configuration
+consul:
+  # Consul server addresses (can specify multiple for HA)
+  servers:
+    - "consul1.example.com:8500"
+    - "consul2.example.com:8500"
+    - "consul3.example.com:8500"
+
+  # Consul ACL token (optional, for authentication)
+  token: "your-consul-acl-token-here"
+
+  # Services to discover from Consul
+  services:
+    # Example service mapping
+    - upstream: "http://service-name.service.consul:8080"
+      hostname: "api.example.com"
+      path: "/"
+      https_proxy_enabled: false
+      rate_limit: 500
+      headers:
+        - "X-Service-Name:api"
+
+    # Another service with different path
+    - upstream: "http://web-service.service.consul:80"
+      hostname: "web.example.com"
+      path: "/"
+      https_proxy_enabled: true
+      rate_limit: 1000
+      headers:
+        - "X-Service-Name:web"
+

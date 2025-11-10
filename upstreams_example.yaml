@@ -1,25 +1,157 @@
-provider: "file" # "file" "consul" "kubernetes"
-sticky_sessions: false
-to_https: false
-rate_limit: 100
-headers:
-  - "Access-Control-Allow-Origin:*"
-  - "Access-Control-Allow-Methods:POST, GET, OPTIONS"
-  - "Access-Control-Max-Age:86400"
-  - "Strict-Transport-Security:max-age=31536000; includeSubDomains; preload"
+# Upstreams Configuration for Pingora Proxy
+# This file is watched and hot-reloaded - changes apply immediately without restart
+#
+# Schema Version: New format with nested config: section
+# This file demonstrates all available configuration options
 
+# Provider type: "file", "consul", or "kubernetes"
+provider: "file"
+
+# Global configuration section (new format)
+config:
+  # Enable HTTPS proxy redirects globally
+  https_proxy_enabled: false
+
+  # Enable sticky sessions (session affinity) globally
+  sticky_sessions: false
+
+  # Global rate limit (requests per second) - applies to all upstreams unless overridden
+  global_rate_limit: 100
+
+  # Global headers to add to all responses
+  global_headers:
+    - "Access-Control-Allow-Origin:*"
+    - "Access-Control-Allow-Methods:POST, GET, OPTIONS"
+    - "Access-Control-Max-Age:86400"
+    - "Strict-Transport-Security:max-age=31536000; includeSubDomains; preload"
+    - "X-Content-Type-Options:nosniff"
+    - "X-Frame-Options:DENY"
+    - "X-XSS-Protection:1; mode=block"
+
+  # Upstream health check configuration
+  # Health check interval in seconds (how often to check upstream servers)
+  healthcheck_interval: 30
+  # HTTP method to use for health checks (GET, HEAD, POST, etc.)
+  healthcheck_method: "GET"
+
+# Arxignis paths - Global paths that work across ALL hostnames
+# These paths are evaluated BEFORE hostname-specific routing
+# Perfect for common endpoints like captcha verification, health checks, APIs, etc.
+arxignis_paths:
+  # Example: Captcha verification endpoint (handled by dedicated service)
+  "/cgi-bin/captcha/verify":
+    rate_limit: 200
+    https_proxy_enabled: false
+    ssl_enabled: false
+    servers:
+      - "127.0.0.1:3001"
+
+  "/.well-known/acme-challenge/":
+    rate_limit: 200
+    https_proxy_enabled: false
+    ssl_enabled: false
+    servers:
+      - "127.0.0.1:3001"
 # Upstream servers configuration
 # Format: hostname -> paths -> servers
 upstreams:
+  # Example 1: Simple service with single path
   example.com:
+    # Certificate name (without .crt/.key extension) in the certificate directory
+    # If not specified, no TLS certificate will be used for this hostname
     certificate: "example.com"
+
     paths:
       "/":
+        # Rate limit for this specific path (overrides global rate limit)
         rate_limit: 200
-        to_https: false
+
+        # Enable HTTPS redirect for this path (overrides global setting)
+        https_proxy_enabled: false
+        ssl_enabled: true
+        http2_enabled: true
+
+        # Custom headers for this path (merged with global headers)
         headers:
           - "X-Proxy-From:Moat"
+          - "X-Forwarded-Proto:https"
+
+        # Backend servers (load balanced)
         servers:
           - "127.0.0.1:8000"
+          - "127.0.0.1:8001"
+          - "127.0.0.1:8002"
 
+  # Example 2: Multi-path service with different configurations
+  api.example.com:
+    certificate: "api_example_com"
 
+    paths:
+      # API root path
+      "/":
+        rate_limit: 500
+        https_proxy_enabled: true
+        headers:
+          - "X-API-Version:v1"
+        servers:
+          - "127.0.0.1:9000"
+          - "127.0.0.1:9001"
+
+      # Health check endpoint (no rate limit)
+      "/health":
+        rate_limit: 1000
+        https_proxy_enabled: false
+        headers:
+          - "Cache-Control:no-cache"
+        servers:
+          - "127.0.0.1:9000"
+
+      # Admin endpoint with higher rate limit
+      "/admin":
+        rate_limit: 50
+        https_proxy_enabled: true
+        headers:
+          - "X-Admin-Access:true"
+        servers:
+          - "127.0.0.1:9002"
+
+  # Example 3: Service without certificate (HTTP only)
+  localhost:
+    paths:
+      "/":
+        rate_limit: 100
+        https_proxy_enabled: false
+        # Enable health checks for this path
+        healthcheck: true
+        headers:
+          - "X-Local-Service:true"
+        servers:
+          - "127.0.0.1:8080"
+
+  # Example 4: Service with host-level rate limit
+  high-traffic.example.com:
+    # Host-level rate limit (applies to all paths unless overridden)
+    rate_limit: 1000
+    certificate: "high_traffic_example_com"
+
+    paths:
+      "/":
+        # Path inherits host-level rate limit (1000)
+        https_proxy_enabled: true
+        headers:
+          - "X-High-Traffic:true"
+        servers:
+          - "10.0.0.1:80"
+          - "10.0.0.2:80"
+          - "10.0.0.3:80"
+
+      "/static":
+        # Override host-level rate limit for static content
+        rate_limit: 2000
+        https_proxy_enabled: true
+        headers:
+          - "Cache-Control:public, max-age=31536000"
+        servers:
+          - "10.0.0.1:80"
+          - "10.0.0.2:80"
+          - "10.0.0.3:80"
