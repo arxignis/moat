@@ -118,6 +118,36 @@ impl Certificates {
         // println!("Context  ==> {:?} <==", start_time.elapsed());
         Ok(())
     }
+
+    /// Get certificate path for a given hostname
+    pub fn get_cert_path_for_hostname(&self, hostname: &str) -> Option<String> {
+        // First try exact match
+        if self.name_map.contains_key(hostname) {
+            // Find the certificate info that matches this hostname
+            for config in &self.configs {
+                if config.common_names.contains(&hostname.to_string()) || config.alt_names.contains(&hostname.to_string()) {
+                    return Some(config.cert_path.clone());
+                }
+            }
+        }
+
+        // Try wildcard match
+        for config in &self.configs {
+            for name in &config.common_names {
+                if name.starts_with("*.") && hostname.ends_with(&name[1..]) {
+                    return Some(config.cert_path.clone());
+                }
+            }
+            for name in &config.alt_names {
+                if name.starts_with("*.") && hostname.ends_with(&name[1..]) {
+                    return Some(config.cert_path.clone());
+                }
+            }
+        }
+
+        // Return default certificate path if no match found
+        Some(self.default_cert_path.clone())
+    }
 }
 
 fn load_cert_info(cert_path: &str, key_path: &str, _grade: &str) -> Option<CertificateInfo> {
@@ -282,5 +312,47 @@ pub fn set_tsl_grade(tls_settings: &mut TlsSettings, grade: &str) {
             warn!("TLS grade is not detected defaulting top MEDIUM");
         }
     }
+}
+
+/// Extract server certificate information for access logging
+pub fn extract_cert_info(cert_path: &str) -> Option<crate::access_log::ServerCertInfo> {
+    use sha2::{Digest, Sha256};
+
+    let file = File::open(cert_path).ok()?;
+    let mut reader = BufReader::new(file);
+
+    // Read the first certificate from the PEM file
+    let item = read_one(&mut reader).ok()??;
+
+    let cert_der = match item {
+        Item::X509Certificate(der) => der,
+        _ => return None,
+    };
+
+    // Parse the X.509 certificate
+    let (_, cert) = X509Certificate::from_der(&cert_der).ok()?;
+
+    // Extract issuer
+    let issuer = cert.issuer().to_string();
+
+    // Extract subject
+    let subject = cert.subject().to_string();
+
+    // Extract validity dates (as ISO 8601 format)
+    let not_before = cert.validity().not_before.to_datetime().to_string();
+    let not_after = cert.validity().not_after.to_datetime().to_string();
+
+    // Calculate SHA256 fingerprint
+    let mut hasher = Sha256::new();
+    hasher.update(&cert_der);
+    let fingerprint_sha256 = format!("{:x}", hasher.finalize());
+
+    Some(crate::access_log::ServerCertInfo {
+        issuer,
+        subject,
+        not_before,
+        not_after,
+        fingerprint_sha256,
+    })
 }
 

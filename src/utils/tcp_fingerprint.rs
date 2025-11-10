@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use std::net::Ipv4Addr;
 use libbpf_rs::MapCore;
-use crate::event_queue::{send_event, UnifiedEvent};
+use crate::worker::log::{send_event, UnifiedEvent};
 
 use crate::bpf::FilterSkel;
 
@@ -201,6 +201,19 @@ impl TcpFingerprintStats {
 
         summary
     }
+}
+
+/// Global TCP fingerprint collector
+static TCP_FINGERPRINT_COLLECTOR: std::sync::OnceLock<Arc<TcpFingerprintCollector>> = std::sync::OnceLock::new();
+
+/// Set the global TCP fingerprint collector
+pub fn set_global_tcp_fingerprint_collector(collector: TcpFingerprintCollector) {
+    let _ = TCP_FINGERPRINT_COLLECTOR.set(Arc::new(collector));
+}
+
+/// Get the global TCP fingerprint collector
+pub fn get_global_tcp_fingerprint_collector() -> Option<Arc<TcpFingerprintCollector>> {
+    TCP_FINGERPRINT_COLLECTOR.get().cloned()
 }
 
 /// TCP fingerprint collector

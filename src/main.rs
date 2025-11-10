@@ -32,7 +32,6 @@ pub mod bpf {
 }
 
 pub mod bpf_stats;
-pub mod event_queue;
 pub mod ja4_plus;
 pub mod utils;
 pub mod worker;
@@ -50,8 +49,8 @@ use crate::waf::wirefilter::init_config;
 use crate::content_scanning::{init_content_scanner, ContentScanningConfig};
 use crate::utils::bpf_utils::{bpf_attach_to_xdp, bpf_detach_from_xdp};
 
-use crate::access_log::{LogSenderConfig, set_log_sender_config};
-use crate::event_queue::start_batch_event_processor;
+use crate::access_log::LogSenderConfig;
+use crate::worker::log::set_log_sender_config;
 use crate::authcheck::validate_api_key;
 use crate::http_client::init_global_client;
 use crate::waf::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
@@ -250,6 +249,9 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         log::info!("TCP fingerprinting collector initialized for agent mode (enabled: {})", config.tcp_fingerprint.enabled);
     }
 
+    // Set global TCP fingerprint collector for proxy access
+    crate::utils::tcp_fingerprint::set_global_tcp_fingerprint_collector(tcp_fingerprint_collector.clone());
+
     let state = AppState {
         skels: skels.clone(),
         ifindices: ifindices.clone(),
@@ -380,15 +382,29 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         batch_size_limit: 5000,        // Default: 5000 logs per batch
         batch_size_bytes: 5 * 1024 * 1024, // Default: 5MB
         batch_timeout_secs: 10,        // Default: 10 seconds
-        include_response_body: config.arxignis.include_response_body,
+        include_request_body: false,   // Default: disabled
         max_body_size: config.arxignis.max_body_size,
     };
     set_log_sender_config(log_sender_config);
 
+    // Register log sender worker if log sending is enabled
     if config.arxignis.log_sending_enabled && !config.arxignis.api_key.is_empty() {
         log::info!("Event sending to arxignis server enabled with unified queue (10s timeout, 5MB limit)");
-        // Start the background unified event processor
-        start_batch_event_processor();
+
+        let check_interval = 1; // Check every 1 second
+        let worker_config = worker::WorkerConfig {
+            name: "log_sender".to_string(),
+            interval_secs: check_interval,
+            enabled: true,
+        };
+
+        let log_sender_worker = worker::log::LogSenderWorker::new(check_interval);
+
+        if let Err(e) = worker_manager.register_worker(worker_config, log_sender_worker) {
+            log::error!("Failed to register log sender worker: {}", e);
+        } else {
+            log::info!("Registered log sender worker (interval: {}s)", check_interval);
+        }
     } else {
         log::info!("Event sending to arxignis server disabled (enabled: {}, api_key configured: {})",
                    config.arxignis.log_sending_enabled, !config.arxignis.api_key.is_empty());

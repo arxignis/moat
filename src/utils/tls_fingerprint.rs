@@ -201,7 +201,9 @@ fn extract_tls_signature_from_client_hello(
     client_hello: &TlsClientHelloContents,
 ) -> Result<Signature, ()> {
     let cipher_suites: Vec<u16> = client_hello.ciphers.iter().map(|c| c.0).collect();
-    let preferred_cipher_suite = cipher_suites.first().copied();
+    // Filter out GREASE values before selecting preferred cipher suite
+    let filtered_cipher_suites = filter_grease_values(&cipher_suites);
+    let preferred_cipher_suite = filtered_cipher_suites.first().copied();
 
     let mut extensions = Vec::new();
     let mut sni = None;

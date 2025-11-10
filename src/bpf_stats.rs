@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use libbpf_rs::MapCore;
-use crate::event_queue::{send_event, UnifiedEvent};
+use crate::worker::log::{send_event, UnifiedEvent};
 
 use crate::bpf::FilterSkel;
 

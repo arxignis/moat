@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::time::Instant;
+use hyper::http;
 
 static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new(Duration::from_secs(1)));
 
@@ -33,6 +34,7 @@ pub struct LB {
     pub headers: Arc<Headers>,
     pub config: Arc<AppConfig>,
     pub extraparams: Arc<ArcSwap<Extraparams>>,
+    pub tcp_fingerprint_collector: Option<Arc<crate::utils::tcp_fingerprint::TcpFingerprintCollector>>,
 }
 
 pub struct Context {
@@ -40,6 +42,7 @@ pub struct Context {
     https_proxy_enabled: bool,
     redirect_to: String,
     start_time: Instant,
+    upstream_start_time: Option<Instant>,
     hostname: Option<String>,
     upstream_peer: Option<InnerMap>,
     extraparams: arc_swap::Guard<Arc<Extraparams>>,
@@ -47,6 +50,9 @@ pub struct Context {
     request_body: Vec<u8>,
     malware_detected: bool,
     malware_response_sent: bool,
+    waf_result: Option<crate::waf::wirefilter::WafResult>,
+    threat_data: Option<crate::threat::ThreatResponse>,
+    upstream_time: Option<Duration>,
 }
 
 #[async_trait]
@@ -58,6 +64,7 @@ impl ProxyHttp for LB {
             https_proxy_enabled: false,
             redirect_to: String::new(),
             start_time: Instant::now(),
+            upstream_start_time: None,
             hostname: None,
             upstream_peer: None,
             extraparams: self.extraparams.load(),
@@ -65,6 +72,9 @@ impl ProxyHttp for LB {
             request_body: Vec::new(),
             malware_detected: false,
             malware_response_sent: false,
+            waf_result: None,
+            threat_data: None,
+            upstream_time: None,
         }
     }
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
@@ -92,6 +102,10 @@ impl ProxyHttp for LB {
             match evaluate_waf_for_pingora_request(session.req_header(), b"", socket_addr).await {
                 Ok(Some(waf_result)) => {
                     debug!("WAF rule matched: rule={}, id={}, action={:?}", waf_result.rule_name, waf_result.rule_id, waf_result.action);
+
+                    // Store WAF result in context for access logging
+                    _ctx.waf_result = Some(waf_result.clone());
+
                     match waf_result.action {
                         WafAction::Block => {
                             info!("WAF blocked request: rule={}, id={}, uri={}", waf_result.rule_name, waf_result.rule_id, session.req_header().uri);
@@ -240,6 +254,24 @@ impl ProxyHttp for LB {
                 Err(e) => {
                     error!("WAF evaluation error: {}", e);
                     // On error, allow request to continue (fail open)
+                }
+            }
+
+            // Get threat intelligence data
+            if _ctx.threat_data.is_none() {
+                if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
+                    match crate::threat::get_threat_intel(&peer_addr.ip().to_string()).await {
+                        Ok(Some(threat_response)) => {
+                            _ctx.threat_data = Some(threat_response);
+                            debug!("Threat intelligence retrieved for IP: {}", peer_addr.ip());
+                        }
+                        Ok(None) => {
+                            debug!("No threat intelligence data for IP: {}", peer_addr.ip());
+                        }
+                        Err(e) => {
+                            debug!("Threat intelligence error for IP {}: {}", peer_addr.ip(), e);
+                        }
+                    }
                 }
             }
         } else {
@@ -422,6 +454,9 @@ impl ProxyHttp for LB {
     }
 
     async fn upstream_request_filter(&self, _session: &mut Session, upstream_request: &mut RequestHeader, ctx: &mut Self::CTX) -> Result<()> {
+        // Track when we start upstream request
+        ctx.upstream_start_time = Some(Instant::now());
+
         if let Some(hostname) = ctx.hostname.as_ref() {
             upstream_request.insert_header("Host", hostname)?;
         }
@@ -529,6 +564,11 @@ impl ProxyHttp for LB {
         Ok(())
     }
     async fn response_filter(&self, session: &mut Session, _upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
+        // Calculate upstream response time
+        if let Some(upstream_start) = ctx.upstream_start_time {
+            ctx.upstream_time = Some(upstream_start.elapsed());
+        }
+
         // _upstream_response.insert_header("X-Proxied-From", "Fooooooooooooooo").unwrap();
         if ctx.extraparams.sticky_sessions {
             let backend_id = ctx.backend_id.clone();
@@ -599,9 +639,172 @@ impl ProxyHttp for LB {
         };
         crate::utils::metrics::calc_metrics(m);
 
-        // Clean up fingerprint from storage after logging
-        if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
-            crate::utils::tls_client_hello::remove_fingerprint(&peer_addr);
+        // Create access log
+        if let (Some(peer_addr), Some(local_addr)) = (
+            session.client_addr().and_then(|addr| addr.as_inet()),
+            session.server_addr().and_then(|addr| addr.as_inet())
+        ) {
+            let peer_socket_addr = std::net::SocketAddr::new(peer_addr.ip(), peer_addr.port());
+            let local_socket_addr = std::net::SocketAddr::new(local_addr.ip(), local_addr.port());
+
+            // Convert request headers to hyper::http::request::Parts
+            let mut request_builder = http::Request::builder()
+                .method(session.req_header().method.as_str())
+                .uri(session.req_header().uri.to_string())
+                .version(session.req_header().version);
+
+            // Copy headers
+            for (name, value) in session.req_header().headers.iter() {
+                request_builder = request_builder.header(name, value);
+            }
+
+            let hyper_request = request_builder.body(()).unwrap();
+            let (req_parts, _) = hyper_request.into_parts();
+
+            // Convert request body to Bytes
+            let req_body_bytes = bytes::Bytes::from(ctx.request_body.clone());
+
+            // Generate JA4H fingerprint from HTTP request
+            let ja4h_fingerprint = crate::ja4_plus::Ja4hFingerprint::from_http_request(
+                session.req_header().method.as_str(),
+                &format!("{:?}", session.req_header().version),
+                &session.req_header().headers
+            );
+
+            // Try to get TLS fingerprint from context or retrieve it again
+            // Priority: 1) Context, 2) Retrieve from storage, 3) None
+            let tls_fp_for_log = if let Some(tls_fp) = ctx.tls_fingerprint.as_ref() {
+                debug!("TLS fingerprint found in context - JA4: {}, SNI: {:?}, ALPN: {:?}",
+                       tls_fp.ja4, tls_fp.sni, tls_fp.alpn);
+                Some(tls_fp.clone())
+            } else if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
+                // Try to retrieve TLS fingerprint again if not in context
+                let std_addr = std::net::SocketAddr::new(peer_addr.ip().into(), peer_addr.port());
+                if let Some(fingerprint) = crate::utils::tls_client_hello::get_fingerprint(&std_addr) {
+                    debug!("TLS fingerprint retrieved from storage - JA4: {}, SNI: {:?}, ALPN: {:?}",
+                           fingerprint.ja4, fingerprint.sni, fingerprint.alpn);
+                    Some(fingerprint)
+                } else {
+                    debug!("No TLS fingerprint found in storage for peer: {}", std_addr);
+                    None
+                }
+            } else {
+                debug!("No peer address available for TLS fingerprint retrieval");
+                None
+            };
+
+            // Use HTTP JA4H fingerprint for tls_fingerprint parameter
+            // The TLS JA4 fingerprint will be passed separately via tls_ja4_unsorted
+            let tls_fingerprint_for_log = Some(ja4h_fingerprint.clone());
+
+            // Get TCP fingerprint data (if available)
+            let tcp_fingerprint_data = if let Some(collector) = crate::utils::tcp_fingerprint::get_global_tcp_fingerprint_collector() {
+                collector.lookup_fingerprint(peer_addr.ip(), peer_addr.port())
+            } else {
+                None
+            };
+
+            // Get server certificate info (if available)
+            let server_cert_info_opt = if let Some(hostname) = ctx.hostname.as_ref() {
+                // Try to get certificate path from certificate store
+                let cert_path = if let Ok(store) = crate::worker::certificate::get_certificate_store().try_read() {
+                    if let Some(certs) = store.as_ref() {
+                        certs.get_cert_path_for_hostname(hostname)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // If certificate path found, extract certificate info
+                if let Some(cert_path) = cert_path {
+                    crate::utils::tls::extract_cert_info(&cert_path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Build upstream info
+            let upstream_info = ctx.upstream_peer.as_ref().map(|peer| {
+                crate::access_log::UpstreamInfo {
+                    selected: peer.address.clone(),
+                    method: "round_robin".to_string(), // TODO: Get actual method from config
+                    reason: "healthy".to_string(), // TODO: Get actual reason
+                }
+            });
+
+            // Build performance info
+            let performance_info = crate::access_log::PerformanceInfo {
+                request_time_ms: Some(ctx.start_time.elapsed().as_millis() as u64),
+                upstream_time_ms: ctx.upstream_time.map(|d| d.as_millis() as u64),
+            };
+
+            // Build response data
+            let response_data = crate::access_log::ResponseData {
+                response_json: serde_json::json!({
+                    "status": response_code,
+                    "status_text": session.response_written()
+                        .and_then(|resp| resp.status.canonical_reason())
+                        .unwrap_or("Unknown"),
+                    "content_type": session.response_written()
+                        .and_then(|resp| resp.headers.get("content-type"))
+                        .and_then(|h| h.to_str().ok()),
+                    "content_length": session.response_written()
+                        .and_then(|resp| resp.headers.get("content-length"))
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    "body": ""  // Response body not captured
+                }),
+                blocking_info: None,
+                waf_result: ctx.waf_result.clone(),
+                threat_data: ctx.threat_data.clone(),
+            };
+
+            // Extract SNI, ALPN, cipher, JA4, and JA4_unsorted from TLS fingerprint if available
+            // Use the same TLS fingerprint we retrieved above
+            let (tls_sni, tls_alpn, tls_cipher, tls_ja4, tls_ja4_unsorted) = if let Some(tls_fp) = tls_fp_for_log.as_ref() {
+                debug!(
+                    "TLS fingerprint found for logging - JA4: {}, JA4_unsorted: {}, SNI: {:?}, ALPN: {:?}, Cipher: {:?}",
+                    tls_fp.ja4, tls_fp.ja4_unsorted, tls_fp.sni, tls_fp.alpn, tls_fp.cipher_suite
+                );
+                (
+                    tls_fp.sni.clone(),
+                    tls_fp.alpn.clone(),
+                    tls_fp.cipher_suite.clone(),
+                    Some(tls_fp.ja4.clone()),
+                    Some(tls_fp.ja4_unsorted.clone()),
+                )
+            } else {
+                debug!("No TLS fingerprint found for logging - peer: {:?}", peer_addr);
+                (None, None, None, None, None)
+            };
+
+            // Create access log with upstream and performance info
+            if let Err(e) = crate::access_log::HttpAccessLog::create_from_parts(
+                &req_parts,
+                &req_body_bytes,
+                peer_socket_addr,
+                local_socket_addr,
+                tls_fingerprint_for_log.as_ref(),
+                tcp_fingerprint_data.as_ref(),
+                server_cert_info_opt.as_ref(),
+                response_data,
+                ctx.waf_result.as_ref(),
+                ctx.threat_data.as_ref(),
+                upstream_info,
+                Some(performance_info),
+                tls_sni,
+                tls_alpn,
+                tls_cipher,
+                tls_ja4,
+                tls_ja4_unsorted,
+            ).await {
+                warn!("Failed to create access log: {}", e);
+            }
         }
     }
 }

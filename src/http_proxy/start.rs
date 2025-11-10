@@ -68,6 +68,7 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
         config: cfg.clone(),
         headers: hh_config,
         extraparams: ec_config,
+        tcp_fingerprint_collector: None, // TODO: Pass from main.rs if available
     };
 
     let grade = cfg.proxy_tls_grade.clone().unwrap_or("medium".to_string());
