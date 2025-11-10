@@ -98,18 +98,29 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
                 let first_set_arc: Arc<tls::Certificates> = Arc::new(first_set);
                 certificates_arc.store(Arc::new(Some(first_set_arc.clone()) as Option<Arc<tls::Certificates>>));
 
+                // Set global certificates for SNI callback
+                tls::set_global_certificates(first_set_arc.clone());
+
                 let default_cert_path = first_set_arc.default_cert_path.clone();
                 let default_key_path = first_set_arc.default_key_path.clone();
 
-                let mut tls_settings =
-                    TlsSettings::intermediate(&default_cert_path, &default_key_path).expect("unable to load or parse cert/key");
-
-                tls::set_tsl_grade(&mut tls_settings, grade.as_str());
-                // Set servername callback to use upstreams certificate mappings
-                // The callback is registered through the SSL context in create_ssl_context
-                // We need to ensure certificates are accessible during TLS handshake
-                // For now, the certificate selection will use upstreams mappings via find_ssl_context
-                tls::set_alpn_prefer_h2(&mut tls_settings);
+                // Create TlsSettings with SNI callback for certificate selection
+                let tls_settings = match tls::create_tls_settings_with_sni(
+                    &default_cert_path,
+                    &default_key_path,
+                    grade.as_str(),
+                    Some(first_set_arc.clone()),
+                ) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        warn!("Failed to create TlsSettings with SNI callback: {}, falling back to default", e);
+                        let mut settings = TlsSettings::intermediate(&default_cert_path, &default_key_path)
+                            .expect("unable to load or parse cert/key");
+                        tls::set_tsl_grade(&mut settings, grade.as_str());
+                        tls::set_alpn_prefer_h2(&mut settings);
+                        settings
+                    }
+                };
 
                 // Register ClientHello callback to generate fingerprints
                 #[cfg(unix)]
