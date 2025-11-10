@@ -1,12 +1,61 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::time::interval;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
-use crate::access_log::{get_log_sender_config, LogSenderConfig};
 use crate::http_client;
+
+/// Configuration for sending access logs to arxignis server
+#[derive(Debug, Clone)]
+pub struct LogSenderConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub api_key: String,
+    pub batch_size_limit: usize,    // Maximum number of logs in a batch
+    pub batch_size_bytes: usize,    // Maximum size of batch in bytes (5MB)
+    pub batch_timeout_secs: u64,    // Maximum time to wait before sending batch (10 seconds)
+    pub include_request_body: bool,  // Whether to include request body in logs
+    pub max_body_size: usize,       // Maximum size for request body (1MB)
+}
+
+impl LogSenderConfig {
+    pub fn new(enabled: bool, base_url: String, api_key: String) -> Self {
+        Self {
+            enabled,
+            base_url,
+            api_key,
+            batch_size_limit: 5000,        // Default: 5000 logs per batch
+            batch_size_bytes: 5 * 1024 * 1024, // Default: 5MB
+            batch_timeout_secs: 10,        // Default: 10 seconds
+            include_request_body: false,   // Default: disabled
+            max_body_size: 1024 * 1024,    // Default: 1MB
+        }
+    }
+
+    /// Check if log sending is enabled and api_key is configured
+    pub fn should_send_logs(&self) -> bool {
+        self.enabled && !self.api_key.is_empty()
+    }
+}
+
+/// Global log sender configuration
+static LOG_SENDER_CONFIG: std::sync::OnceLock<Arc<RwLock<Option<LogSenderConfig>>>> = std::sync::OnceLock::new();
+
+pub fn get_log_sender_config() -> Arc<RwLock<Option<LogSenderConfig>>> {
+    LOG_SENDER_CONFIG
+        .get_or_init(|| Arc::new(RwLock::new(None)))
+        .clone()
+}
+
+pub fn set_log_sender_config(config: LogSenderConfig) {
+    let store = get_log_sender_config();
+    if let Ok(mut guard) = store.write() {
+        *guard = Some(config);
+    }
+}
 
 /// Unified event types that can be sent to the /events endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +96,7 @@ impl UnifiedEvent {
 
 /// Buffer for storing events before batch sending
 #[derive(Debug)]
-pub struct EventBuffer {
+struct EventBuffer {
     events: Vec<UnifiedEvent>,
     failed_events: Vec<UnifiedEvent>, // Store events that failed to send
     total_size_bytes: usize,
@@ -133,17 +182,8 @@ fn estimate_event_size(event: &UnifiedEvent) -> usize {
     }
 }
 
-/// Global event buffer for batching events
-static EVENT_BUFFER: std::sync::OnceLock<Arc<RwLock<EventBuffer>>> = std::sync::OnceLock::new();
-
 /// Channel for sending events to the batch processor
 static EVENT_CHANNEL: std::sync::OnceLock<mpsc::UnboundedSender<UnifiedEvent>> = std::sync::OnceLock::new();
-
-pub fn get_event_buffer() -> Arc<RwLock<EventBuffer>> {
-    EVENT_BUFFER
-        .get_or_init(|| Arc::new(RwLock::new(EventBuffer::new())))
-        .clone()
-}
 
 pub fn get_event_channel() -> Option<&'static mpsc::UnboundedSender<UnifiedEvent>> {
     EVENT_CHANNEL.get()
@@ -216,124 +256,132 @@ async fn send_event_batch(events: Vec<UnifiedEvent>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Start the background batch event processor
-pub fn start_batch_event_processor() {
-    let (sender, mut receiver) = mpsc::unbounded_channel::<UnifiedEvent>();
-    set_event_channel(sender);
+/// Log sender worker that batches and sends events
+pub struct LogSenderWorker {
+    check_interval_secs: u64,
+}
 
-    tokio::spawn(async move {
-        let mut buffer = EventBuffer::new();
-        let mut flush_interval = tokio::time::interval(Duration::from_secs(1)); // Check every second
+impl LogSenderWorker {
+    pub fn new(check_interval_secs: u64) -> Self {
+        Self {
+            check_interval_secs,
+        }
+    }
+}
 
-        loop {
-            tokio::select! {
-                // Receive new events
-                event = receiver.recv() => {
-                    match event {
-                        Some(event) => {
-                            let count = buffer.add_event(event);
-                            log::trace!("Added event to buffer, total: {}", count);
-                        }
-                        None => {
-                            log::info!("Event channel closed, flushing remaining events");
+impl super::Worker for LogSenderWorker {
+    fn name(&self) -> &str {
+        "log_sender"
+    }
+
+    fn run(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+        let check_interval_secs = self.check_interval_secs;
+        let worker_name = self.name().to_string();
+
+        // Create event channel
+        let (sender, mut receiver) = mpsc::unbounded_channel::<UnifiedEvent>();
+        set_event_channel(sender);
+
+        tokio::spawn(async move {
+            log::info!("[{}] Starting log sender worker", worker_name);
+
+            let mut buffer = EventBuffer::new();
+            let mut flush_interval = interval(Duration::from_secs(check_interval_secs));
+            flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            log::info!("[{}] Shutdown signal received, flushing remaining events", worker_name);
+
                             // Flush any remaining events before exiting
                             if !buffer.is_empty() {
                                 let events = buffer.take_events();
                                 if let Err(e) = send_event_batch(events.clone()).await {
-                                    log::warn!("Failed to send final event batch: {}, storing locally", e);
+                                    log::warn!("[{}] Failed to send final event batch: {}, storing locally", worker_name, e);
                                     buffer.add_failed_events(events);
                                 }
                             }
+
                             // Also try to flush any remaining failed events
                             if buffer.has_failed_events() {
                                 let failed_events = buffer.take_failed_events();
-                                log::warn!("Storing {} failed events locally (endpoint unavailable)", failed_events.len());
-                                // In a real implementation, you might want to write these to disk
-                                // For now, we just log the count
+                                log::warn!("[{}] Storing {} failed events locally (endpoint unavailable)", worker_name, failed_events.len());
                             }
+
+                            log::info!("[{}] Log sender worker stopped", worker_name);
                             break;
                         }
                     }
-                }
 
-                // Periodic flush check
-                _ = flush_interval.tick() => {
-                    let config = {
-                        let config_store = get_log_sender_config();
-                        let config_guard = config_store.read().unwrap();
-                        config_guard.as_ref().cloned()
-                    };
+                    // Receive new events
+                    event = receiver.recv() => {
+                        match event {
+                            Some(event) => {
+                                let count = buffer.add_event(event);
+                                log::trace!("[{}] Added event to buffer, total: {}", worker_name, count);
+                            }
+                            None => {
+                                log::info!("[{}] Event channel closed, flushing remaining events", worker_name);
 
-                    if let Some(config) = config {
-                        // Handle regular event flushing
-                        if buffer.should_flush(&config) {
-                            let events = buffer.take_events();
-                            if !events.is_empty() {
-                                log::debug!("Flushing event batch: {} events", events.len());
-                                if let Err(e) = send_event_batch(events.clone()).await {
-                                    log::warn!("Failed to send event batch: {}, storing locally for retry", e);
-                                    buffer.add_failed_events(events);
+                                // Flush any remaining events before exiting
+                                if !buffer.is_empty() {
+                                    let events = buffer.take_events();
+                                    if let Err(e) = send_event_batch(events.clone()).await {
+                                        log::warn!("[{}] Failed to send final event batch: {}, storing locally", worker_name, e);
+                                        buffer.add_failed_events(events);
+                                    }
                                 }
+
+                                // Also try to flush any remaining failed events
+                                if buffer.has_failed_events() {
+                                    let failed_events = buffer.take_failed_events();
+                                    log::warn!("[{}] Storing {} failed events locally (endpoint unavailable)", worker_name, failed_events.len());
+                                }
+
+                                break;
                             }
                         }
+                    }
 
-                        // Handle retry of failed events
-                        if buffer.should_retry_failed_events() {
-                            let failed_events = buffer.take_failed_events();
-                            if !failed_events.is_empty() {
-                                log::debug!("Retrying failed event batch: {} events", failed_events.len());
-                                if let Err(e) = send_event_batch(failed_events.clone()).await {
-                                    log::warn!("Failed to retry event batch: {}, storing locally again", e);
-                                    buffer.add_failed_events(failed_events);
+                    // Periodic flush check
+                    _ = flush_interval.tick() => {
+                        let config = {
+                            let config_store = get_log_sender_config();
+                            let config_guard = config_store.read().unwrap();
+                            config_guard.as_ref().cloned()
+                        };
+
+                        if let Some(config) = config {
+                            // Handle regular event flushing
+                            if buffer.should_flush(&config) {
+                                let events = buffer.take_events();
+                                if !events.is_empty() {
+                                    log::debug!("[{}] Flushing event batch: {} events", worker_name, events.len());
+                                    if let Err(e) = send_event_batch(events.clone()).await {
+                                        log::warn!("[{}] Failed to send event batch: {}, storing locally for retry", worker_name, e);
+                                        buffer.add_failed_events(events);
+                                    }
+                                }
+                            }
+
+                            // Handle retry of failed events
+                            if buffer.should_retry_failed_events() {
+                                let failed_events = buffer.take_failed_events();
+                                if !failed_events.is_empty() {
+                                    log::debug!("[{}] Retrying failed event batch: {} events", worker_name, failed_events.len());
+                                    if let Err(e) = send_event_batch(failed_events.clone()).await {
+                                        log::warn!("[{}] Failed to retry event batch: {}, storing locally again", worker_name, e);
+                                        buffer.add_failed_events(failed_events);
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bpf_stats::{DroppedIpEvent, IpVersion, DropReason};
-
-    #[test]
-    fn test_unified_event_types() {
-        let dropped_ip_event = DroppedIpEvent::new(
-            "192.168.1.1".to_string(),
-            IpVersion::IPv4,
-            5,
-            DropReason::AccessRules,
-        );
-
-        let unified_event = UnifiedEvent::DroppedIp(dropped_ip_event);
-        assert_eq!(unified_event.event_type(), "dropped_ip");
-
-        let json = unified_event.to_json().unwrap();
-        assert!(json.contains("dropped_ip"));
-    }
-
-    #[test]
-    fn test_event_buffer_operations() {
-        let mut buffer = EventBuffer::new();
-        assert!(buffer.is_empty());
-
-        let event = UnifiedEvent::DroppedIp(DroppedIpEvent::new(
-            "192.168.1.1".to_string(),
-            IpVersion::IPv4,
-            5,
-            DropReason::AccessRules,
-        ));
-
-        let count = buffer.add_event(event);
-        assert_eq!(count, 1);
-        assert!(!buffer.is_empty());
-
-        let events = buffer.take_events();
-        assert_eq!(events.len(), 1);
-        assert!(buffer.is_empty());
+        })
     }
 }
+

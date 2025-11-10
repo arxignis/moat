@@ -1,44 +1,46 @@
 services:
 
-  moat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    depends_on:
-      - redis
-      - clamav
-    container_name: moat
-    privileged: true
-    network_mode: host
-    cap_add:
-          - SYS_ADMIN
-          - NET_ADMIN
-          - BPF
-          - SYS_RESOURCE
-    volumes:
-      - ./config.yaml:/app/config.yaml
-    restart: unless-stopped
-    command: ["--config", "/app/config.yaml"]
+  # moat:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   depends_on:
+  #     - redis
+  #     - clamav
+  #   container_name: moat
+  #   privileged: true
+  #   network_mode: host
+  #   cap_add:
+  #         - SYS_ADMIN
+  #         - NET_ADMIN
+  #         - BPF
+  #         - SYS_RESOURCE
+  #   volumes:
+  #     - ./config.yaml:/app/config.yaml
+  #   restart: unless-stopped
+  #   command: ["--config", "/app/config.yaml"]
 
-  redis:
-    image: redis:7-alpine
-    container_name: moat-redis
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - moat-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: moat-redis
+  #   ports:
+  #     - "127.0.0.1:6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - moat-network
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 5
+  #   restart: unless-stopped
 
   demo-app:
     image: containous/whoami:latest
     container_name: moat-demo-app
+    ports:
+      - "8000:80"
     networks:
       - moat-network
     labels:
@@ -47,47 +49,47 @@ services:
       - "traefik.http.services.demo.loadbalancer.server.port=80"
     restart: unless-stopped
 
-  traefik:
-    image: traefik:v3.5
-    container_name: moat-traefik
-    command:
-      - "--api.insecure=true"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.web.address=:80"
-      - "--log.level=INFO"
-      - "--accesslog=true"
-    ports:
-      - "127.0.0.1:8081:80"
-      - "127.0.0.1:8082:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - moat-network
-    depends_on:
-      - demo-app
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+  # traefik:
+  #   image: traefik:v3.5
+  #   container_name: moat-traefik
+  #   command:
+  #     - "--api.insecure=true"
+  #     - "--providers.docker=true"
+  #     - "--providers.docker.exposedbydefault=false"
+  #     - "--entrypoints.web.address=:80"
+  #     - "--log.level=INFO"
+  #     - "--accesslog=true"
+  #   ports:
+  #     - "127.0.0.1:8081:80"
+  #     - "127.0.0.1:8082:8080"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   networks:
+  #     - moat-network
+  #   depends_on:
+  #     - demo-app
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "traefik", "healthcheck", "--ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
 
-  clamav:
-    image: clamav/clamav:latest
-    container_name: moat-clamav
-    ports:
-      - "3310"
-    volumes:
-      - clamav-data:/data
-    networks:
-      - moat-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "clamscan", "--version"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+  # clamav:
+  #   image: clamav/clamav:latest
+  #   container_name: moat-clamav
+  #   ports:
+  #     - "3310"
+  #   volumes:
+  #     - clamav-data:/data
+  #   networks:
+  #     - moat-network
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "clamscan", "--version"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
 
 networks:
   moat-network:

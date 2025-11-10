@@ -33,4 +33,6 @@ go.work.sum
 
 target/
 config.yaml
+upstreams.yaml
 docker/volumes/
+certs

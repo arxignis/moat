@@ -543,6 +543,92 @@ pub fn update_http_filter_from_config_value(config: &Config) -> anyhow::Result<(
     }
 }
 
+/// Evaluate WAF rules for a Pingora request
+/// This is a convenience function that converts Pingora's RequestHeader to hyper's Parts
+pub async fn evaluate_waf_for_pingora_request(
+    req_header: &pingora_http::RequestHeader,
+    body_bytes: &[u8],
+    peer_addr: SocketAddr,
+) -> Result<Option<WafResult>> {
+    let filter = match get_global_http_filter() {
+        Some(f) => {
+            // Check if filter has any rules
+            let rules_count = f.rules.read().unwrap().len();
+            if rules_count == 0 {
+                log::debug!("WAF filter initialized but has no rules loaded");
+            } else {
+                log::debug!("WAF filter has {} rules loaded", rules_count);
+            }
+            f
+        }
+        None => {
+            log::debug!("WAF filter not initialized, skipping evaluation");
+            return Ok(None);
+        }
+    };
+
+    // Convert Pingora RequestHeader to hyper::http::request::Parts
+    // Pingora URIs might be relative, so we need to construct a full URI
+    let uri_str = if req_header.uri.scheme().is_some() {
+        // Already an absolute URI
+        req_header.uri.to_string()
+    } else {
+        // Construct absolute URI from relative path
+        // Use http://localhost as base since we only need the path/query for WAF evaluation
+        format!("http://localhost{}", req_header.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"))
+    };
+
+    let uri = match uri_str.parse::<hyper::http::Uri>() {
+        Ok(u) => u,
+        Err(e) => {
+            log::error!("WAF: Failed to parse URI '{}': {}", uri_str, e);
+            return Err(anyhow!("Failed to parse URI: {}", e));
+        }
+    };
+
+    let mut builder = hyper::http::request::Builder::new()
+        .method(req_header.method.as_str())
+        .uri(uri);
+
+    // Copy headers
+    for (name, value) in req_header.headers.iter() {
+        if let Ok(name_str) = name.as_str().parse::<hyper::http::HeaderName>() {
+            if let Ok(value_str) = value.to_str() {
+                builder = builder.header(name_str, value_str);
+            } else {
+                builder = builder.header(name_str, value.as_bytes());
+            }
+        } else {
+            log::debug!("WAF: Failed to parse header name: {}", name.as_str());
+        }
+    }
+
+    let req = match builder.body(()) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("WAF: Failed to build hyper request: {}", e);
+            return Err(anyhow!("Failed to build hyper request: {}", e));
+        }
+    };
+    let (req_parts, _) = req.into_parts();
+
+    log::debug!("WAF: Evaluating request - method={}, uri={}, peer={}",
+                req_header.method.as_str(), uri_str, peer_addr);
+
+    match filter.should_block_request_from_parts(&req_parts, body_bytes, peer_addr).await {
+        Ok(result) => {
+            if result.is_some() {
+                log::debug!("WAF: Rule matched - {:?}", result);
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            log::error!("WAF: Evaluation error: {}", e);
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,70 @@
+# Upstreams Configuration for Pingora Proxy - Kubernetes Provider
+# This file demonstrates Kubernetes service discovery configuration
+#
+# Schema Version: New format with nested config: section
+
+# Provider type: "kubernetes"
+provider: "kubernetes"
+
+# Global configuration section (new format)
+config:
+  # Enable HTTPS proxy redirects globally
+  https_proxy_enabled: false
+
+  # Enable sticky sessions (session affinity) globally
+  sticky_sessions: true
+
+  # Global rate limit (requests per second)
+  global_rate_limit: 300
+
+  # Global headers to add to all responses
+  global_headers:
+    - "Access-Control-Allow-Origin:*"
+    - "X-Proxy-From:Kubernetes-Moat"
+    - "X-K8s-Cluster:production"
+
+# Arxignis paths - Global paths that work across ALL hostnames
+# These paths are evaluated BEFORE hostname-specific routing and Kubernetes service discovery
+# Perfect for common endpoints like captcha, health checks, monitoring, etc.
+arxignis_paths:
+  # Example: Captcha verification (handled by dedicated service)
+  "/cgi-bin/captcha/verify":
+    rate_limit: 200
+    https_proxy_enabled: false
+    ssl_enabled: false
+    servers:
+      - "127.0.0.1:3001"
+
+
+# Kubernetes configuration
+kubernetes:
+  # Kubernetes API server addresses (can specify multiple for HA)
+  servers:
+    - "https://k8s-api.example.com:6443"
+    - "https://k8s-api-backup.example.com:6443"
+
+  # Path to Kubernetes service account token (for authentication)
+  tokenpath: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+  # Services to discover from Kubernetes
+  services:
+    # Example service mapping
+    - upstream: "http://my-service.default.svc.cluster.local:8080"
+      hostname: "api.example.com"
+      path: "/"
+      https_proxy_enabled: false
+      rate_limit: 500
+      headers:
+        - "X-K8s-Service:my-service"
+        - "X-K8s-Namespace:default"
+
+    # Another service with different configuration
+    - upstream: "http://web-service.production.svc.cluster.local:80"
+      hostname: "web.example.com"
+      path: "/"
+      https_proxy_enabled: true
+      rate_limit: 1000
+      headers:
+        - "X-K8s-Service:web-service"
+        - "X-K8s-Namespace:production"
+

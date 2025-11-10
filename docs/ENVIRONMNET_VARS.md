@@ -1,17 +1,6 @@
 ```bash
-# Server configuration
-export AX_SERVER_UPSTREAM="http://localhost:8080"
-export AX_SERVER_HTTP_ADDR="0.0.0.0:80"
-export AX_SERVER_TLS_ADDR="0.0.0.0:443"
-
-# TLS configuration
-export AX_TLS_MODE="acme"
-export AX_TLS_ONLY="false"
-
-# ACME configuration
-export AX_ACME_DOMAINS="example.com,www.example.com"
-export AX_ACME_CONTACTS="admin@example.com"
-export AX_ACME_USE_PROD="true"
+# Application mode
+export AX_MODE="proxy"
 
 # Redis configuration
 export AX_REDIS_URL="redis://127.0.0.1/0"
@@ -19,6 +8,7 @@ export AX_REDIS_PREFIX="ax:moat"
 
 # Network configuration
 export AX_NETWORK_IFACE="eth0"
+export AX_NETWORK_IFACES="eth0,eth1"
 export AX_NETWORK_DISABLE_XDP="false"
 
 # Arxignis configuration
@@ -30,9 +20,8 @@ export AX_CAPTCHA_SITE_KEY="your-site-key"
 export AX_CAPTCHA_SECRET_KEY="your-secret-key"
 export AX_CAPTCHA_JWT_SECRET="your-jwt-secret"
 export AX_CAPTCHA_PROVIDER="turnstile"
-
-# Domain filtering
-export AX_DOMAINS_WHITELIST="trusted.com,secure.example.com"
+export AX_CAPTCHA_TOKEN_TTL="7200"
+export AX_CAPTCHA_CACHE_TTL="300"
 
 # Content scanning
 export AX_CONTENT_SCANNING_ENABLED="true"
@@ -42,16 +31,12 @@ export AX_CONTENT_SCAN_CONTENT_TYPES="text/html,application/x-www-form-urlencode
 export AX_CONTENT_SKIP_EXTENSIONS=".jpg,.png,.gif"
 export AX_CONTENT_SCAN_EXPRESSION="http.request.method eq \"POST\" or http.request.method eq \"PUT\""
 
-# PROXY protocol
-export AX_PROXY_PROTOCOL_ENABLED="true"
-export AX_PROXY_PROTOCOL_TIMEOUT="1000"
-
 # Daemon mode
 export AX_DAEMON_ENABLED="false"
 export AX_DAEMON_PID_FILE="/var/run/moat.pid"
 export AX_DAEMON_WORKING_DIRECTORY="/"
-export AX_DAEMON_STDOUT="/var/log/moat.out"
-export AX_DAEMON_STDERR="/var/log/moat.err"
+export AX_DAEMON_STDOUT="/var/log/moat/access.log"
+export AX_DAEMON_STDERR="/var/log/moat/error.log"
 export AX_DAEMON_USER="nobody"
 export AX_DAEMON_GROUP="daemon"
 export AX_DAEMON_CHOWN_PID_FILE="true"

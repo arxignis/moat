@@ -3,65 +3,203 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use hyper::Response;
-use http_body_util::BodyExt;
+use hyper::{Response, header::HeaderValue};
+use http_body_util::{BodyExt, Full};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use std::sync::Arc;
-use std::sync::RwLock;
-
 use crate::ja4_plus::{Ja4hFingerprint, Ja4tFingerprint};
-use crate::proxy_utils::ProxyBody;
-use crate::event_queue::{send_event, UnifiedEvent};
-use crate::tcp_fingerprint::TcpFingerprintData;
+use crate::utils::tcp_fingerprint::TcpFingerprintData;
+use crate::worker::log::{get_log_sender_config, send_event, UnifiedEvent};
 
-/// Configuration for sending access logs to arxignis server
+// Re-export for compatibility
+pub use crate::worker::log::LogSenderConfig;
+
+/// Server certificate information for access logging
 #[derive(Debug, Clone)]
-pub struct LogSenderConfig {
-    pub enabled: bool,
-    pub base_url: String,
-    pub api_key: String,
-    pub batch_size_limit: usize,    // Maximum number of logs in a batch
-    pub batch_size_bytes: usize,    // Maximum size of batch in bytes (5MB)
-    pub batch_timeout_secs: u64,    // Maximum time to wait before sending batch (10 seconds)
-    pub include_response_body: bool, // Whether to include response body in logs
-    pub max_body_size: usize,       // Maximum size for request/response bodies (1MB)
+pub struct ServerCertInfo {
+    pub issuer: String,
+    pub subject: String,
+    pub not_before: String,  // RFC3339 format
+    pub not_after: String,   // RFC3339 format
+    pub fingerprint_sha256: String,
 }
 
-impl LogSenderConfig {
-    pub fn new(enabled: bool, base_url: String, api_key: String) -> Self {
-        Self {
-            enabled,
-            base_url,
-            api_key,
-            batch_size_limit: 5000,        // Default: 5000 logs per batch
-            batch_size_bytes: 5 * 1024 * 1024, // Default: 5MB
-            batch_timeout_secs: 10,        // Default: 10 seconds
-            include_response_body: true,   // Default: include response body
-            max_body_size: 1024 * 1024,    // Default: 1MB
+/// Lightweight access log summary for returning with responses
+///
+/// # Usage Example
+///
+/// ```no_run
+/// use moat::access_log::{AccessLogSummary, UpstreamInfo, PerformanceInfo};
+/// use chrono::Utc;
+///
+/// // Create a summary with upstream and performance info
+/// let summary = AccessLogSummary {
+///     request_id: "req_123".to_string(),
+///     timestamp: Utc::now(),
+///     upstream: Some(UpstreamInfo {
+///         selected: "backend1.example.com".to_string(),
+///         method: "round_robin".to_string(),
+///         reason: "healthy".to_string(),
+///     }),
+///     waf: None,
+///     threat: None,
+///     network: moat::access_log::NetworkSummary {
+///         src_ip: "1.2.3.4".to_string(),
+///         dst_ip: "10.0.0.1".to_string(),
+///         protocol: "https".to_string(),
+///     },
+///     performance: PerformanceInfo {
+///         request_time_ms: Some(150),
+///         upstream_time_ms: Some(120),
+///     },
+/// };
+///
+/// // Add to response headers
+/// // summary.add_to_response_headers(&mut response);
+///
+/// // Or get as JSON
+/// let json = summary.to_json().unwrap();
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessLogSummary {
+    pub request_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub upstream: Option<UpstreamInfo>,
+    pub waf: Option<WafInfo>,
+    pub threat: Option<ThreatInfo>,
+    pub network: NetworkSummary,
+    pub performance: PerformanceInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamInfo {
+    pub selected: String,
+    pub method: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WafInfo {
+    pub action: String,
+    pub rule_id: String,
+    pub rule_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatInfo {
+    pub score: u32,
+    pub confidence: f64,
+    pub categories: Vec<String>,
+    pub reason: String,
+    pub country: Option<String>,
+    pub asn: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkSummary {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceInfo {
+    pub request_time_ms: Option<u64>,
+    pub upstream_time_ms: Option<u64>,
+}
+
+impl AccessLogSummary {
+    /// Convert to JSON string
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Convert to compact JSON for headers (excludes null fields)
+    pub fn to_compact_json(&self) -> String {
+        let mut parts = vec![format!(r#""request_id":"{}""#, self.request_id)];
+
+        if let Some(upstream) = &self.upstream {
+            parts.push(format!(r#""upstream":"{}""#, upstream.selected));
+            parts.push(format!(r#""upstream_method":"{}""#, upstream.method));
         }
+
+        if let Some(waf) = &self.waf {
+            parts.push(format!(r#""waf_action":"{}""#, waf.action));
+            parts.push(format!(r#""waf_rule":"{}""#, waf.rule_name));
+        }
+
+        if let Some(threat) = &self.threat {
+            parts.push(format!(r#""threat_score":{}"#, threat.score));
+            parts.push(format!(r#""threat_confidence":{:.2}"#, threat.confidence));
+        }
+
+        if let Some(ms) = self.performance.request_time_ms {
+            parts.push(format!(r#""request_time_ms":{}"#, ms));
+        }
+
+        format!("{{{}}}", parts.join(","))
     }
 
-    /// Check if log sending is enabled and api_key is configured
-    pub fn should_send_logs(&self) -> bool {
-        self.enabled && !self.api_key.is_empty()
-    }
-}
+    /// Add as response headers
+    pub fn add_to_response_headers(&self, response: &mut Response<Full<bytes::Bytes>>) {
+        let headers = response.headers_mut();
 
-/// Global log sender configuration
-static LOG_SENDER_CONFIG: std::sync::OnceLock<Arc<RwLock<Option<LogSenderConfig>>>> = std::sync::OnceLock::new();
+        // Add request ID header
+        if let Ok(value) = HeaderValue::from_str(&self.request_id) {
+            headers.insert("X-Request-ID", value);
+        }
 
-pub fn get_log_sender_config() -> Arc<RwLock<Option<LogSenderConfig>>> {
-    LOG_SENDER_CONFIG
-        .get_or_init(|| Arc::new(RwLock::new(None)))
-        .clone()
-}
+        // Add upstream info
+        if let Some(upstream) = &self.upstream {
+            if let Ok(value) = HeaderValue::from_str(&upstream.selected) {
+                headers.insert("X-Upstream-Server", value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&upstream.method) {
+                headers.insert("X-Upstream-Method", value);
+            }
+        }
 
-pub fn set_log_sender_config(config: LogSenderConfig) {
-    let store = get_log_sender_config();
-    if let Ok(mut guard) = store.write() {
-        *guard = Some(config);
+        // Add WAF info
+        if let Some(waf) = &self.waf {
+            if let Ok(value) = HeaderValue::from_str(&waf.action) {
+                headers.insert("X-WAF-Action", value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&waf.rule_id) {
+                headers.insert("X-WAF-Rule-ID", value);
+            }
+        }
+
+        // Add threat info
+        if let Some(threat) = &self.threat {
+            if let Ok(value) = HeaderValue::from_str(&threat.score.to_string()) {
+                headers.insert("X-Threat-Score", value);
+            }
+            if let Some(country) = &threat.country {
+                if let Ok(value) = HeaderValue::from_str(country) {
+                    headers.insert("X-Client-Country", value);
+                }
+            }
+        }
+
+        // Add performance metrics
+        if let Some(ms) = self.performance.request_time_ms {
+            if let Ok(value) = HeaderValue::from_str(&ms.to_string()) {
+                headers.insert("X-Request-Time-Ms", value);
+            }
+        }
+
+        if let Some(ms) = self.performance.upstream_time_ms {
+            if let Ok(value) = HeaderValue::from_str(&ms.to_string()) {
+                headers.insert("X-Upstream-Time-Ms", value);
+            }
+        }
+
+        // Add compact JSON summary
+        let compact = self.to_compact_json();
+        if let Ok(value) = HeaderValue::from_str(&compact) {
+            headers.insert("X-Access-Log", value);
+        }
     }
 }
 
@@ -76,6 +214,8 @@ pub struct HttpAccessLog {
     pub tls: Option<TlsDetails>,
     pub response: ResponseDetails,
     pub remediation: Option<RemediationDetails>,
+    pub upstream: Option<UpstreamInfo>,
+    pub performance: Option<PerformanceInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,12 +300,19 @@ impl HttpAccessLog {
         req_body_bytes: &bytes::Bytes,
         peer_addr: SocketAddr,
         dst_addr: SocketAddr,
-        tls_fingerprint: Option<&crate::http::tls_fingerprint::Fingerprint>,
+        tls_fingerprint: Option<&crate::ja4_plus::Ja4hFingerprint>,
         tcp_fingerprint_data: Option<&TcpFingerprintData>,
+        server_cert_info: Option<&ServerCertInfo>,
         response_data: ResponseData,
-        waf_result: Option<&crate::wirefilter::WafResult>,
+        waf_result: Option<&crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
-        server_cert_info: Option<&crate::http::ServerCertInfo>,
+        upstream_info: Option<UpstreamInfo>,
+        performance_info: Option<PerformanceInfo>,
+        tls_sni: Option<String>,
+        tls_alpn: Option<String>,
+        tls_cipher: Option<String>,
+        tls_ja4: Option<String>,
+        tls_ja4_unsorted: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
         let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
@@ -221,7 +368,6 @@ impl HttpAccessLog {
             &format!("{:?}", req_parts.version),
             &req_parts.headers
         );
-        let ja4h = Some(ja4h_fp.fingerprint);
 
         // Get log sender configuration for body processing
         let log_config = {
@@ -230,23 +376,33 @@ impl HttpAccessLog {
             config_guard.as_ref().cloned()
         };
 
-        // Process request body with truncation
-        let max_body_size = log_config.as_ref()
-            .map(|c| c.max_body_size)
-            .unwrap_or(1024 * 1024); // Default: 1MB limit
-        let body_truncated = req_body_bytes.len() > max_body_size;
-        let truncated_body_bytes = if body_truncated {
+        // Process request body with truncation - respect include_request_body setting
+        let (body_str, body_sha256, body_truncated) = if let Some(config) = &log_config {
+            if !config.include_request_body {
+                // Request body logging disabled
+                ("".to_string(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(), false)
+            } else {
+                let max_body_size = config.max_body_size;
+                let truncated = req_body_bytes.len() > max_body_size;
+                let truncated_body_bytes = if truncated {
             req_body_bytes.slice(..max_body_size)
         } else {
             req_body_bytes.clone()
         };
-        let body_str = String::from_utf8_lossy(&truncated_body_bytes).to_string();
+                let body = String::from_utf8_lossy(&truncated_body_bytes).to_string();
 
         // Calculate SHA256 hash - handle empty body explicitly
-        let body_sha256 = if req_body_bytes.is_empty() {
+                let hash = if req_body_bytes.is_empty() {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
         } else {
             format!("{:x}", Sha256::digest(req_body_bytes))
+                };
+
+                (body, hash, truncated)
+            }
+        } else {
+            // No config, default to disabled
+            ("".to_string(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(), false)
         };
 
         // Generate JA4T from TCP fingerprint data if available
@@ -263,30 +419,56 @@ impl HttpAccessLog {
 
         // Process TLS details
         let tls_details = if let Some(fp) = tls_fingerprint {
-            // Determine cipher based on TLS version
-            let cipher = match fp.tls_version.as_str() {
-                "TLSv1.3" | "13" => "TLS_AES_256_GCM_SHA384", // Most common TLS 1.3 cipher
-                "TLSv1.2" | "12" => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", // Most common TLS 1.2 cipher
-                "TLSv1.1" | "11" => "TLS_RSA_WITH_AES_256_CBC_SHA",
-                "TLSv1.0" | "10" => "TLS_RSA_WITH_AES_256_CBC_SHA",
-                _ => "TLS_AES_256_GCM_SHA384", // Default to TLS 1.3 cipher
+            // Use actual TLS version from fingerprint if available, otherwise infer from HTTP version
+            let tls_version = if scheme == "https" {
+                // Check if version looks like TLS version (e.g., "TLS 1.2", "TLS 1.3")
+                if fp.version.starts_with("TLS") {
+                    fp.version.clone()
+                } else {
+                    // Otherwise infer from HTTP version
+                    match fp.version.as_str() {
+                        "2.0" | "2" => "TLS 1.2".to_string(), // HTTP/2 typically uses TLS 1.2+
+                        "3.0" | "3" => "TLS 1.3".to_string(), // HTTP/3 uses TLS 1.3
+                        _ => "TLS 1.2".to_string(), // Default for HTTPS
+                    }
+                }
+            } else {
+                "".to_string() // No TLS for HTTP
+            };
+
+            // Determine cipher - use provided cipher or infer from TLS version
+            let cipher = if let Some(ref provided_cipher) = tls_cipher {
+                provided_cipher.clone()
+            } else if scheme == "https" {
+                match fp.version.as_str() {
+                    "3.0" | "3" => "TLS_AES_256_GCM_SHA384".to_string(), // HTTP/3 uses TLS 1.3
+                    "2.0" | "2" => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(), // HTTP/2 typically uses TLS 1.2
+                    _ => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(), // Default TLS 1.2 cipher
+                }
+            } else {
+                "".to_string() // No cipher for HTTP
             };
 
             // Extract server certificate details if available
-            let server_cert = extract_server_cert_details(&fp, server_cert_info);
+            let server_cert = extract_server_cert_details(server_cert_info);
+
+            // Extract JA4 from TLS fingerprint data - use tls_ja4 if available
+            let ja4_value = tls_ja4.clone();
 
             Some(TlsDetails {
-                version: fp.tls_version.clone(),
-                cipher: cipher.to_string(),
-                alpn: fp.alpn.clone(),
-                sni: fp.sni.clone(),
-                ja4: Some(fp.ja4.clone()),
-                ja4_unsorted: Some(fp.ja4_unsorted.clone()),
+                version: tls_version,
+                cipher,
+                alpn: tls_alpn.clone(),
+                sni: tls_sni.clone(),
+                ja4: ja4_value,
+                ja4_unsorted: tls_ja4_unsorted.clone(),
                 ja4t: ja4t.clone(),
                 server_cert,
             })
         } else if scheme == "https" {
             // Create minimal TLS details for HTTPS connections without fingerprint (e.g., PROXY protocol)
+            let server_cert = extract_server_cert_details(server_cert_info);
+
             Some(TlsDetails {
                 version: "TLS 1.3".to_string(),
                 cipher: "TLS_AES_256_GCM_SHA384".to_string(),
@@ -295,7 +477,7 @@ impl HttpAccessLog {
                 ja4: Some("t13d".to_string()),
                 ja4_unsorted: Some("t13d".to_string()),
                 ja4t: ja4t.clone(),
-                server_cert: None,
+                server_cert,
             })
         } else {
             None
@@ -311,7 +493,7 @@ impl HttpAccessLog {
             query: query.clone(),
             query_hash: if query.is_empty() { None } else { Some(format!("{:x}", Sha256::digest(query.as_bytes()))) },
             headers,
-            ja4h,
+            ja4h: Some(ja4h_fp.fingerprint.clone()),
             user_agent,
             content_type,
             content_length: Some(req_body_bytes.len() as u64),
@@ -328,26 +510,13 @@ impl HttpAccessLog {
             dst_port: dst_addr.port(),
         };
 
-        // Create response details from response_data
-        let response_body = response_data.response_json["body"].as_str().unwrap_or("");
-        let response_body_truncated = if let Some(config) = &log_config {
-            if !config.include_response_body {
-                "" // Don't include response body if disabled
-            } else if response_body.len() > config.max_body_size {
-                &response_body[..config.max_body_size] // Truncate if too large
-            } else {
-                response_body
-            }
-        } else {
-            response_body
-        };
-
+        // Create response details from response_data - response body logging disabled
         let response_details = ResponseDetails {
             status: response_data.response_json["status"].as_u64().unwrap_or(0) as u16,
             status_text: response_data.response_json["status_text"].as_str().unwrap_or("Unknown").to_string(),
             content_type: response_data.response_json["content_type"].as_str().map(|s| s.to_string()),
             content_length: response_data.response_json["content_length"].as_u64(),
-            body: response_body_truncated.to_string(),
+            body: "".to_string(),
         };
 
         // Create remediation details
@@ -364,6 +533,8 @@ impl HttpAccessLog {
             tls: tls_details,
             response: response_details,
             remediation: remediation_details,
+            upstream: upstream_info,
+            performance: performance_info,
         };
 
         // Log to stdout (existing behavior)
@@ -379,7 +550,7 @@ impl HttpAccessLog {
 
     /// Create remediation details from WAF result and threat intelligence data
     fn create_remediation_details(
-        waf_result: Option<&crate::wirefilter::WafResult>,
+        waf_result: Option<&crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Option<RemediationDetails> {
         // If neither WAF result nor threat data is available, return None
@@ -441,7 +612,77 @@ impl HttpAccessLog {
         Ok(())
     }
 
+    /// Create a lightweight summary suitable for returning with responses
+    pub fn to_summary(&self) -> AccessLogSummary {
+        let waf_info = if let Some(remediation) = &self.remediation {
+            if let (Some(action), Some(rule_id), Some(rule_name)) =
+                (&remediation.waf_action, &remediation.waf_rule_id, &remediation.waf_rule_name) {
+                Some(WafInfo {
+                    action: action.clone(),
+                    rule_id: rule_id.clone(),
+                    rule_name: rule_name.clone(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
+        let threat_info = if let Some(remediation) = &self.remediation {
+            if let (Some(score), Some(confidence)) =
+                (remediation.threat_score, remediation.threat_confidence) {
+                Some(ThreatInfo {
+                    score,
+                    confidence,
+                    categories: remediation.threat_categories.clone().unwrap_or_default(),
+                    reason: remediation.threat_reason_summary.clone().unwrap_or_default(),
+                    country: remediation.ip_country.clone(),
+                    asn: remediation.ip_asn,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let protocol = if self.tls.is_some() {
+            format!("{} over {}", self.http.scheme,
+                self.tls.as_ref().map(|t| t.version.as_str()).unwrap_or("TLS"))
+        } else {
+            self.http.scheme.clone()
+        };
+
+        AccessLogSummary {
+            request_id: self.request_id.clone(),
+            timestamp: self.timestamp,
+            upstream: self.upstream.clone(),
+            waf: waf_info,
+            threat: threat_info,
+            network: NetworkSummary {
+                src_ip: self.network.src_ip.clone(),
+                dst_ip: self.network.dst_ip.clone(),
+                protocol,
+            },
+            performance: self.performance.clone().unwrap_or(PerformanceInfo {
+                request_time_ms: None,
+                upstream_time_ms: None,
+            }),
+        }
+    }
+
+    /// Add upstream routing information to the access log
+    pub fn with_upstream(mut self, upstream: UpstreamInfo) -> Self {
+        self.upstream = Some(upstream);
+        self
+    }
+
+    /// Add performance metrics to the access log
+    pub fn with_performance(mut self, performance: PerformanceInfo) -> Self {
+        self.performance = Some(performance);
+        self
+    }
 }
 
 /// Helper struct to hold response data for access logging
@@ -449,13 +690,13 @@ impl HttpAccessLog {
 pub struct ResponseData {
     pub response_json: serde_json::Value,
     pub blocking_info: Option<serde_json::Value>,
-    pub waf_result: Option<crate::wirefilter::WafResult>,
+    pub waf_result: Option<crate::waf::wirefilter::WafResult>,
     pub threat_data: Option<crate::threat::ThreatResponse>,
 }
 
 impl ResponseData {
     /// Create response data for a regular response
-    pub async fn from_response(response: Response<ProxyBody>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn from_response(response: Response<Full<bytes::Bytes>>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (response_parts, response_body) = response.into_parts();
         let response_body_bytes = response_body.collect().await?.to_bytes();
         let response_body_str = String::from_utf8_lossy(&response_body_bytes).to_string();
@@ -485,7 +726,7 @@ impl ResponseData {
     pub fn for_blocked_request(
         block_reason: &str,
         status_code: u16,
-        waf_result: Option<crate::wirefilter::WafResult>,
+        waf_result: Option<crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Self {
         let status_text = match status_code {
@@ -521,7 +762,7 @@ impl ResponseData {
     pub fn for_malware_blocked_request(
         signature: Option<String>,
         scan_error: Option<String>,
-        waf_result: Option<crate::wirefilter::WafResult>,
+        waf_result: Option<crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Self {
         let response_json = serde_json::json!({
@@ -558,7 +799,7 @@ impl ResponseData {
 
 
 /// Extract server certificate details from server certificate info
-fn extract_server_cert_details(_fp: &crate::http::tls_fingerprint::Fingerprint, server_cert_info: Option<&crate::http::ServerCertInfo>) -> Option<ServerCertDetails> {
+fn extract_server_cert_details(server_cert_info: Option<&ServerCertInfo>) -> Option<ServerCertDetails> {
     server_cert_info.map(|cert_info| {
         // Parse the date strings from ServerCertInfo
         let not_before = chrono::DateTime::parse_from_rfc3339(&cert_info.not_before)
@@ -583,8 +824,6 @@ fn extract_server_cert_details(_fp: &crate::http::tls_fingerprint::Fingerprint, 
 mod tests {
     use super::*;
     use hyper::Request;
-    use http_body_util::Full;
-    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_access_log_creation() {
@@ -593,14 +832,14 @@ mod tests {
             .method("GET")
             .uri("https://example.com/test?param=value")
             .header("User-Agent", format!("TestAgent/{}", env!("CARGO_PKG_VERSION")))
-            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .body(Full::new(bytes::Bytes::new()))
             .unwrap();
 
         // Create a simple response
         let _response = Response::builder()
             .status(200)
             .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from("{\"ok\":true}")))
+            .body(Full::new(bytes::Bytes::from("{\"ok\":true}")))
             .unwrap();
 
         let _peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
@@ -645,11 +884,27 @@ mod tests {
                 body: "{\"ok\":true}".to_string(),
             },
             remediation: None,
+            upstream: Some(UpstreamInfo {
+                selected: "backend1".to_string(),
+                method: "round_robin".to_string(),
+                reason: "healthy".to_string(),
+            }),
+            performance: Some(PerformanceInfo {
+                request_time_ms: Some(50),
+                upstream_time_ms: Some(45),
+            }),
         };
 
         let json = log.to_json().unwrap();
         assert!(json.contains("http_access_log"));
         assert!(json.contains("GET"));
         assert!(json.contains("example.com"));
+        assert!(json.contains("backend1"));
+
+        // Test summary creation
+        let summary = log.to_summary();
+        assert_eq!(summary.request_id, "test_123");
+        assert_eq!(summary.upstream.as_ref().unwrap().selected, "backend1");
+        assert_eq!(summary.performance.request_time_ms, Some(50));
     }
 }

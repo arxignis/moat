@@ -1,23 +1,45 @@
-use std::{net::SocketAddr, path::PathBuf, env};
+use std::{path::PathBuf, env};
 
 use anyhow::Result;
 use clap::Parser;
 use clap::ValueEnum;
-use serde::{Deserialize, Deserializer, Serialize};
-use serde::de::{self, Visitor};
+use serde::{Deserialize, Serialize};
 
-use crate::http::TlsMode;
-use crate::actions::captcha::CaptchaProvider;
+use crate::waf::actions::captcha::CaptchaProvider;
+
+/// TLS operating mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    /// TLS is disabled
+    Disabled,
+}
+
+/// Application operating mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum AppMode {
+    /// Agent mode: Only access rules and monitoring (no proxy)
+    Agent,
+    /// Proxy mode: Full reverse proxy functionality
+    Proxy,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub server: ServerConfig,
-    pub tls: TlsConfig,
-    pub acme: AcmeConfig,
+    #[serde(default = "default_mode")]
+    pub mode: String,
+
+    // Global server options (moved from server section)
+    #[serde(default)]
     pub redis: RedisConfig,
+    #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
     pub arxignis: ArxignisConfig,
+    #[serde(default)]
     pub content_scanning: ContentScanningCliConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
     pub bpf_stats: BpfStatsConfig,
@@ -25,24 +47,13 @@ pub struct Config {
     pub tcp_fingerprint: TcpFingerprintConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub pingora: PingoraConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
-    #[serde(default = "default_disable_http_server")]
-    pub disable_http_server: bool,
-    pub http_addr: String,
-    pub http_bind: Vec<String>,
-    pub tls_addr: String,
-    pub tls_bind: Vec<String>,
-    pub upstream: String,
-    pub proxy_protocol: ProxyProtocolConfig,
-    pub health_check: HealthCheckConfig,
-}
+fn default_mode() -> String { "proxy".to_string() }
 
-fn default_disable_http_server() -> bool { false }
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxyProtocolConfig {
     #[serde(default = "default_proxy_protocol_enabled")]
     pub enabled: bool,
@@ -53,55 +64,7 @@ pub struct ProxyProtocolConfig {
 fn default_proxy_protocol_enabled() -> bool { false }
 fn default_proxy_protocol_timeout() -> u64 { 1000 }
 
-impl<'de> Deserialize<'de> for ProxyProtocolConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ProxyProtocolConfigVisitor;
-
-        impl<'de> Visitor<'de> for ProxyProtocolConfigVisitor {
-            type Value = ProxyProtocolConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a boolean or a ProxyProtocolConfig struct")
-            }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(ProxyProtocolConfig {
-                    enabled: value,
-                    timeout_ms: default_proxy_protocol_timeout(),
-                })
-            }
-
-            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                #[derive(Deserialize)]
-                struct ProxyProtocolConfigHelper {
-                    #[serde(default = "default_proxy_protocol_enabled")]
-                    enabled: bool,
-                    #[serde(default = "default_proxy_protocol_timeout")]
-                    timeout_ms: u64,
-                }
-
-                let helper = ProxyProtocolConfigHelper::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(ProxyProtocolConfig {
-                    enabled: helper.enabled,
-                    timeout_ms: helper.timeout_ms,
-                })
-            }
-        }
-
-        deserializer.deserialize_any(ProxyProtocolConfigVisitor)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthCheckConfig {
     #[serde(default = "default_health_check_enabled")]
     pub enabled: bool,
@@ -121,39 +84,28 @@ fn default_health_check_port() -> String { "0.0.0.0:8080".to_string() }
 fn default_health_check_methods() -> Vec<String> { vec!["GET".to_string(), "HEAD".to_string()] }
 fn default_health_check_allowed_cidrs() -> Vec<String> { vec![] }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TlsConfig {
-    pub mode: String,
-    pub only: bool,
-    pub cert_path: Option<String>,
-    pub key_path: Option<String>,
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcmeConfig {
-    pub domains: Vec<String>,
-    pub contacts: Vec<String>,
-    pub use_prod: bool,
-    pub directory: Option<String>,
-    pub accept_tos: bool,
-    pub ca_root: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RedisConfig {
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NetworkConfig {
+    #[serde(default)]
     pub iface: String,
+    #[serde(default)]
     pub ifaces: Vec<String>,
+    #[serde(default)]
     pub disable_xdp: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArxignisConfig {
+    #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -163,6 +115,7 @@ pub struct ArxignisConfig {
     pub include_response_body: bool,
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
+    #[serde(default)]
     pub captcha: CaptchaConfig,
 }
 
@@ -182,7 +135,7 @@ fn default_max_body_size() -> usize {
     1024 * 1024 // 1MB
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContentScanningCliConfig {
     #[serde(default = "default_scanning_enabled")]
     pub enabled: bool,
@@ -203,18 +156,25 @@ fn default_clamav_server() -> String { "localhost:3310".to_string() }
 fn default_max_file_size() -> usize { 10 * 1024 * 1024 }
 fn default_scan_expression() -> String { "http.request.method eq \"POST\" or http.request.method eq \"PUT\"".to_string() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LoggingConfig {
+    #[serde(default)]
     pub level: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CaptchaConfig {
+    #[serde(default)]
     pub site_key: Option<String>,
+    #[serde(default)]
     pub secret_key: Option<String>,
+    #[serde(default)]
     pub jwt_secret: Option<String>,
+    #[serde(default)]
     pub provider: String,
+    #[serde(default)]
     pub token_ttl: u64,
+    #[serde(default)]
     pub cache_ttl: u64,
 }
 
@@ -227,39 +187,7 @@ impl Config {
 
     pub fn default() -> Self {
         Self {
-            server: ServerConfig {
-                disable_http_server: false,
-                http_addr: "0.0.0.0:80".to_string(),
-                http_bind: vec![],
-                tls_addr: "0.0.0.0:443".to_string(),
-                tls_bind: vec![],
-                upstream: "http://localhost:8080".to_string(),
-                proxy_protocol: ProxyProtocolConfig {
-                    enabled: false,
-                    timeout_ms: 1000,
-                },
-                health_check: HealthCheckConfig {
-                    enabled: true,
-                    endpoint: "/health".to_string(),
-                    port: "0.0.0.0:8080".to_string(),
-                    methods: vec!["GET".to_string(), "HEAD".to_string()],
-                    allowed_cidrs: vec![],
-                },
-            },
-            tls: TlsConfig {
-                mode: "disabled".to_string(),
-                only: false,
-                cert_path: None,
-                key_path: None,
-            },
-            acme: AcmeConfig {
-                domains: vec![],
-                contacts: vec![],
-                use_prod: false,
-                directory: None,
-                accept_tos: false,
-                ca_root: None,
-            },
+            mode: "proxy".to_string(),
             redis: RedisConfig {
                 url: "redis://127.0.0.1/0".to_string(),
                 prefix: "ax:moat".to_string(),
@@ -304,31 +232,18 @@ impl Config {
             bpf_stats: BpfStatsConfig::default(),
             tcp_fingerprint: TcpFingerprintConfig::default(),
             daemon: DaemonConfig::default(),
+            pingora: PingoraConfig::default(),
         }
     }
 
     pub fn merge_with_args(&mut self, args: &Args) {
         // Override config values with command line arguments if provided
-        if args.disable_http_server {
-            self.server.disable_http_server = true;
-        }
-        if !args.http_bind.is_empty() {
-            self.server.http_bind = args.http_bind.iter().map(|addr| addr.to_string()).collect();
-        }
-        if !args.tls_bind.is_empty() {
-            self.server.tls_bind = args.tls_bind.iter().map(|addr| addr.to_string()).collect();
-        }
-        if !args.acme_domains.is_empty() {
-            self.acme.domains = args.acme_domains.clone();
-        }
+
         if !args.ifaces.is_empty() {
             self.network.ifaces = args.ifaces.clone();
         }
         if let Some(api_key) = &args.arxignis_api_key {
             self.arxignis.api_key = api_key.clone();
-        }
-        if let Some(upstream) = &args.upstream {
-            self.server.upstream = upstream.clone();
         }
         if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.arxignis.com/v1" {
             self.arxignis.base_url = args.arxignis_base_url.clone();
@@ -352,12 +267,12 @@ impl Config {
         }
 
         // Proxy protocol configuration overrides
-        if args.proxy_protocol_enabled {
-            self.server.proxy_protocol.enabled = true;
-        }
-        if args.proxy_protocol_timeout != 1000 {
-            self.server.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
-        }
+        // if args.proxy_protocol_enabled {
+        //     self.proxy_protocol.enabled = true;
+        // }
+        // if args.proxy_protocol_timeout != 1000 {
+        //     self.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
+        // }
 
         // Daemon configuration overrides
         if args.daemon {
@@ -392,15 +307,10 @@ impl Config {
     }
 
     pub fn validate_required_fields(&mut self, args: &Args) -> Result<()> {
-        // Check if upstream is provided either via CLI args or config file
-        // Skip this check if HTTP server is disabled (standalone agent mode)
-        if !self.server.disable_http_server && args.upstream.is_none() && self.server.upstream.is_empty() {
-            return Err(anyhow::anyhow!("Upstream URL is required. Provide it via --upstream argument or in config file"));
-        }
-
-        // Check if arxignis API key is provided either via CLI args or config file
+        // Check if arxignis API key is provided - only warn if not provided
+        // (to support old config format that doesn't have this field)
         if args.arxignis_api_key.is_none() && self.arxignis.api_key.is_empty() {
-            return Err(anyhow::anyhow!("Arxignis API key is required. Provide it via --arxignis-api-key argument or in config file"));
+            log::warn!("Arxignis API key not provided. Some features may not work.");
         }
 
         Ok(())
@@ -420,70 +330,9 @@ impl Config {
     }
 
     pub fn apply_env_overrides(&mut self) {
-        // Server configuration overrides
-        if let Ok(val) = env::var("AX_SERVER_HTTP_ADDR") {
-            self.server.http_addr = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_TLS_ADDR") {
-            self.server.tls_addr = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_UPSTREAM") {
-            self.server.upstream = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HTTP_BIND") {
-            self.server.http_bind = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_TLS_BIND") {
-            self.server.tls_bind = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENABLED") {
-            self.server.health_check.enabled = val.parse().unwrap_or(true);
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENDPOINT") {
-            self.server.health_check.endpoint = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_PORT") {
-            self.server.health_check.port = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_METHODS") {
-            self.server.health_check.methods = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS") {
-            self.server.health_check.allowed_cidrs = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-
-        // TLS configuration overrides
-        if let Ok(val) = env::var("AX_TLS_MODE") {
-            self.tls.mode = val;
-        }
-        if let Ok(val) = env::var("AX_TLS_ONLY") {
-            self.tls.only = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_TLS_CERT_PATH") {
-            self.tls.cert_path = Some(val);
-        }
-        if let Ok(val) = env::var("AX_TLS_KEY_PATH") {
-            self.tls.key_path = Some(val);
-        }
-
-        // ACME configuration overrides
-        if let Ok(val) = env::var("AX_ACME_DOMAINS") {
-            self.acme.domains = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_ACME_CONTACTS") {
-            self.acme.contacts = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_ACME_USE_PROD") {
-            self.acme.use_prod = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_ACME_DIRECTORY") {
-            self.acme.directory = Some(val);
-        }
-        if let Ok(val) = env::var("AX_ACME_ACCEPT_TOS") {
-            self.acme.accept_tos = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_ACME_CA_ROOT") {
-            self.acme.ca_root = Some(val);
+        // Mode override
+        if let Ok(val) = env::var("AX_MODE") {
+            self.mode = val;
         }
 
         // Redis configuration overrides
@@ -570,12 +419,12 @@ impl Config {
         }
 
         // Proxy protocol configuration overrides
-        if let Ok(val) = env::var("AX_PROXY_PROTOCOL_ENABLED") {
-            self.server.proxy_protocol.enabled = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
-            self.server.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
-        }
+        // if let Ok(val) = env::var("AX_PROXY_PROTOCOL_ENABLED") {
+        //     self.proxy_protocol.enabled = val.parse().unwrap_or(false);
+        // }
+        // if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
+        //     self.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
+        // }
 
         // Daemon configuration overrides
         if let Ok(val) = env::var("AX_DAEMON_ENABLED") {
@@ -612,74 +461,7 @@ pub struct Args {
     #[arg(long, short = 'c')]
     pub config: Option<PathBuf>,
 
-    /// Disable HTTP server and run as standalone agent with access rules only
-    #[arg(long, default_value_t = false)]
-    pub disable_http_server: bool,
-
-    /// HTTP server bind address (for ACME HTTP-01 challenges and regular HTTP traffic).
-    #[arg(long, default_value = "0.0.0.0:80")]
-    pub http_addr: SocketAddr,
-
-    /// Additional HTTP bind addresses (comma-separated). If set, overrides http_addr.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub http_bind: Vec<SocketAddr>,
-
-    /// HTTPS reverse-proxy bind address.
-    #[arg(long, default_value = "0.0.0.0:443")]
-    pub tls_addr: SocketAddr,
-
-    /// Additional HTTPS bind addresses (comma-separated). If set, overrides tls_addr.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub tls_bind: Vec<SocketAddr>,
-
-    /// TLS operating mode.
-    #[arg(long, value_enum, default_value_t = TlsMode::Disabled)]
-    pub tls_mode: TlsMode,
-
-    /// Require TLS for application traffic (HTTP used only for ACME).
-    /// If enabled, plain HTTP requests (except ACME) will be rejected with 426.
-    #[arg(long, default_value_t = false)]
-    pub tls_only: bool,
-
-    /// Upstream origin URL (required unless TLS is disabled or config file provided).
-    #[arg(long)]
-    pub upstream: Option<String>,
-
-    /// Path to custom certificate (PEM) when using custom TLS mode.
-    #[arg(long)]
-    pub tls_cert_path: Option<PathBuf>,
-
-    /// Path to custom private key (PEM) when using custom TLS mode.
-    #[arg(long)]
-    pub tls_key_path: Option<PathBuf>,
-
-    /// Domains for ACME certificate issuance and domain whitelist (comma separated or repeated).
-    /// These domains will be used for SSL certificate generation and domain filtering.
-    /// Only requests to these domains (or matching wildcards) will be allowed.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub acme_domains: Vec<String>,
-
-    /// ACME contact addresses (mailto: optional, comma separated or repeated).
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub acme_contacts: Vec<String>,
-
-    /// Use Let's Encrypt production directory instead of staging.
-    #[arg(long)]
-    pub acme_use_prod: bool,
-
-    /// Override ACME directory URL (useful for Pebble or other test CAs).
-    #[arg(long)]
-    pub acme_directory: Option<String>,
-
-    /// Explicitly accept the ACME Terms of Service.
-    #[arg(long, default_value_t = false)]
-    pub acme_accept_tos: bool,
-
-    /// Custom CA bundle for the ACME directory (PEM file).
-    #[arg(long)]
-    pub acme_ca_root: Option<PathBuf>,
-
-    /// Redis connection URL for ACME cache storage.
+     /// Redis connection URL for ACME cache storage.
     #[arg(long, default_value = "redis://127.0.0.1/0")]
     pub redis_url: String,
 
@@ -869,3 +651,70 @@ fn default_daemon_working_directory() -> String { "/".to_string() }
 fn default_daemon_stdout() -> String { "/var/log/moat.out".to_string() }
 fn default_daemon_stderr() -> String { "/var/log/moat.err".to_string() }
 fn default_daemon_chown_pid_file() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PingoraConfig {
+    #[serde(default)]
+    pub proxy_address_http: String,
+    #[serde(default)]
+    pub proxy_address_tls: Option<String>,
+    #[serde(default)]
+    pub proxy_certificates: Option<String>,
+    #[serde(default = "default_pingora_tls_grade")]
+    pub proxy_tls_grade: String,
+    #[serde(default)]
+    pub upstreams_conf: String,
+    #[serde(default)]
+    pub config_address: String,
+    #[serde(default = "default_pingora_config_api_enabled")]
+    pub config_api_enabled: bool,
+    #[serde(default)]
+    pub master_key: String,
+    #[serde(default = "default_pingora_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_pingora_healthcheck_method")]
+    pub healthcheck_method: String,
+    #[serde(default = "default_pingora_healthcheck_interval")]
+    pub healthcheck_interval: u16,
+}
+
+fn default_pingora_tls_grade() -> String { "medium".to_string() }
+fn default_pingora_config_api_enabled() -> bool { true }
+fn default_pingora_log_level() -> String { "debug".to_string() }
+fn default_pingora_healthcheck_method() -> String { "HEAD".to_string() }
+fn default_pingora_healthcheck_interval() -> u16 { 2 }
+
+impl PingoraConfig {
+    /// Convert PingoraConfig to AppConfig for compatibility with old proxy system
+    pub fn to_app_config(&self) -> crate::utils::structs::AppConfig {
+        let mut app_config = crate::utils::structs::AppConfig::default();
+        app_config.proxy_address_http = self.proxy_address_http.clone();
+        app_config.proxy_address_tls = self.proxy_address_tls.clone();
+        app_config.proxy_certificates = self.proxy_certificates.clone();
+        app_config.proxy_tls_grade = Some(self.proxy_tls_grade.clone());
+        app_config.upstreams_conf = self.upstreams_conf.clone();
+        app_config.config_address = self.config_address.clone();
+        app_config.config_api_enabled = self.config_api_enabled;
+        app_config.master_key = self.master_key.clone();
+        app_config.healthcheck_method = self.healthcheck_method.clone();
+        app_config.healthcheck_interval = self.healthcheck_interval;
+
+        // Parse config_address to local_server
+        if let Some((ip, port_str)) = self.config_address.split_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                app_config.local_server = Some((ip.to_string(), port));
+            }
+        }
+
+        // Parse proxy_address_tls to proxy_port_tls
+        if let Some(ref tls_addr) = self.proxy_address_tls {
+            if let Some((_, port_str)) = tls_addr.split_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    app_config.proxy_port_tls = Some(port);
+                }
+            }
+        }
+
+        app_config
+    }
+}

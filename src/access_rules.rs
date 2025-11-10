@@ -1,65 +1,32 @@
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr, IpAddr};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use tokio::select;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, MissedTickBehavior, interval};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::bpf;
-use crate::config;
-use crate::config::{fetch_config, global_config};
-use crate::wirefilter::update_http_filter_from_config_value;
+use crate::worker::config;
+use crate::worker::config::global_config;
+use crate::waf::wirefilter::update_http_filter_from_config_value;
 use crate::firewall::{Firewall, MOATFirewall};
-use crate::utils::http_utils::parse_ip_or_cidr;
-use crate::utils::http_utils::is_ip_in_cidr;
+use crate::utils::http_utils::{parse_ip_or_cidr, is_ip_in_cidr};
 
 // Store previous rules state for comparison
 type PreviousRules = Arc<Mutex<HashSet<(Ipv4Addr, u32)>>>;
 type PreviousRulesV6 = Arc<Mutex<HashSet<(Ipv6Addr, u32)>>>;
 
-/// Start a background task that fetches access rules every 10 seconds and
-/// applies them to the `banned_ips` BPF map in the provided skeleton.
-///
-/// Contract:
-/// - Inputs: `banned_ip_map` is the BPF LPM_TRIE for banned IPv4s (key = lpm_key, value = u8 flag)
-///   `api_key` is the ArxIgnis API key
-///   `shutdown` is a watch receiver that signals graceful shutdown when set to true
-/// - Behavior: Runs immediately, then every 10s; on fetch error, logs and continues
-/// - Returns: JoinHandle for the spawned task
-pub fn start_access_rules_updater(
-    base_url: String,
-    skels: Vec<Arc<bpf::FilterSkel<'static>>>,
-    api_key: String,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    // Initialize previous rules state
-    let previous_rules = Arc::new(Mutex::new(HashSet::new()));
-    let previous_rules_v6 = Arc::new(Mutex::new(HashSet::new()));
-    tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_secs(10));
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+// Global previous rules state for the access rules worker
+static PREVIOUS_RULES: OnceLock<PreviousRules> = OnceLock::new();
+static PREVIOUS_RULES_V6: OnceLock<PreviousRulesV6> = OnceLock::new();
 
-        if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), &skels, &previous_rules, &previous_rules_v6).await {
-            log::error!("initial access rules update failed: {e}");
-        }
-
-        loop {
-            select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = ticker.tick() => {
-                    if let Err(e) = fetch_and_apply(base_url.clone(), api_key.clone(), &skels, &previous_rules, &previous_rules_v6).await {
-                        log::error!("periodic access rules update failed: {e}");
-                    }
-                }
-            }
-        }
-    })
+fn get_previous_rules() -> &'static PreviousRules {
+    PREVIOUS_RULES.get_or_init(|| Arc::new(Mutex::new(HashSet::new())))
 }
 
-/// Apply access rules once using the current global config snapshot
+fn get_previous_rules_v6() -> &'static PreviousRulesV6 {
+    PREVIOUS_RULES_V6.get_or_init(|| Arc::new(Mutex::new(HashSet::new())))
+}
+
+/// Apply access rules once using the current global config snapshot (initial setup)
 pub fn init_access_rules_from_global(
     skels: &Vec<Arc<bpf::FilterSkel<'static>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -77,16 +44,13 @@ pub fn init_access_rules_from_global(
     Ok(())
 }
 
-async fn fetch_and_apply(
-    base_url: String,
-    api_key: String,
+/// Apply access rules and WAF rules from global config snapshot
+/// This is called periodically by the ConfigWorker after it fetches new config
+pub fn apply_rules_from_global(
     skels: &Vec<Arc<bpf::FilterSkel<'static>>>,
     previous_rules: &PreviousRules,
     previous_rules_v6: &PreviousRulesV6,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Refresh global config from API
-    let _ = fetch_config(base_url, api_key).await;
-
     // Read from global config and apply if available
     if let Ok(guard) = global_config().read() {
         if let Some(cfg) = guard.as_ref() {
@@ -107,6 +71,14 @@ async fn fetch_and_apply(
         }
     }
     Ok(())
+}
+
+/// Apply access rules and WAF rules from global config using global state
+/// This is called by the ConfigWorker after it fetches new config
+pub fn apply_rules_from_global_with_state(
+    skels: &Vec<Arc<bpf::FilterSkel<'static>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    apply_rules_from_global(skels, get_previous_rules(), get_previous_rules_v6())
 }
 
 fn apply_rules(
