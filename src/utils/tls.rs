@@ -2,14 +2,31 @@ use dashmap::DashMap;
 use log::{error, info, warn};
 use pingora_core::tls::ssl::{select_next_proto, AlpnError, NameType, SniError, SslAlert, SslContext, SslFiletype, SslMethod, SslRef, SslVersion};
 use pingora_core::listeners::tls::TlsSettings;
+use pingora_core::listeners::TlsAccept;
 use rustls_pemfile::{read_one, Item};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::Arc;
+use once_cell::sync::OnceCell;
+use async_trait::async_trait;
 use x509_parser::extensions::GeneralName;
 use x509_parser::nom::Err as NomErr;
 use x509_parser::prelude::*;
+
+// Global certificate store for SNI callback
+static GLOBAL_CERTIFICATES: OnceCell<Arc<Certificates>> = OnceCell::new();
+
+/// Set the global certificates for SNI callback
+pub fn set_global_certificates(certificates: Arc<Certificates>) {
+    let _ = GLOBAL_CERTIFICATES.set(certificates);
+}
+
+/// Get the global certificates for SNI callback
+fn get_global_certificates() -> Option<Arc<Certificates>> {
+    GLOBAL_CERTIFICATES.get().cloned()
+}
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct CertificateConfig {
@@ -17,7 +34,7 @@ pub struct CertificateConfig {
     pub key_path: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CertificateInfo {
     common_names: Vec<String>,
     alt_names: Vec<String>,
@@ -28,7 +45,7 @@ struct CertificateInfo {
     key_path: String, // Only used for logging
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Certificates {
     configs: Vec<CertificateInfo>,
     name_map: DashMap<String, SslContext>,
@@ -40,12 +57,73 @@ pub struct Certificates {
     pub default_key_path: String,
 }
 
+// Implement TlsAccept trait for dynamic certificate selection based on SNI
+#[async_trait]
+impl TlsAccept for Certificates {
+    async fn certificate_callback(&self, ssl: &mut SslRef) {
+        if let Some(server_name) = ssl.servername(NameType::HOST_NAME) {
+            let name_str = server_name.to_string();
+            log::info!("TlsAccept::certificate_callback invoked for hostname: {}", name_str);
+            log::debug!("TlsAccept: upstreams_cert_map has {} entries", self.upstreams_cert_map.len());
+            log::debug!("TlsAccept: cert_name_map has {} entries", self.cert_name_map.len());
+
+            // Find the matching SSL context for this hostname
+            if let Some(ctx) = self.find_ssl_context(&name_str) {
+                log::info!("TlsAccept: Found matching certificate for hostname: {}", name_str);
+
+                // Get the certificate and key from the SSL context
+                // We need to extract them from the context to use with ssl_use_certificate
+                // However, SslContext doesn't expose the certificate/key directly
+                // So we'll use set_ssl_context instead, which should work
+                match ssl.set_ssl_context(&*ctx) {
+                    Ok(_) => {
+                        log::info!("TlsAccept: Successfully set SSL context for hostname: {}", name_str);
+                        return;
+                    }
+                    Err(e) => {
+                        log::error!("TlsAccept: Failed to set SSL context for hostname {}: {:?}", name_str, e);
+                        // Fall through to use default certificate
+                    }
+                }
+            } else {
+                log::warn!("TlsAccept: No matching certificate found for hostname: {}, using default", name_str);
+            }
+        } else {
+            log::debug!("TlsAccept: No SNI provided, using default certificate");
+        }
+
+        // Use default certificate - try to find it in cert_name_map or use first available
+        if let Some(default_ctx) = self.cert_name_map.iter().next() {
+            let ctx = default_ctx.value();
+            if let Err(e) = ssl.set_ssl_context(&*ctx) {
+                log::error!("TlsAccept: Failed to set default SSL context: {:?}", e);
+            } else {
+                log::info!("TlsAccept: Using default certificate");
+            }
+        } else {
+            log::error!("TlsAccept: No certificates available!");
+        }
+    }
+}
+
 impl Certificates {
     pub fn new(configs: &Vec<CertificateConfig>, _grade: &str, default_certificate: Option<&String>) -> Option<Self> {
+        Self::new_with_sni_callback(configs, _grade, default_certificate, None)
+    }
+
+    pub fn new_with_sni_callback(
+        configs: &Vec<CertificateConfig>,
+        _grade: &str,
+        default_certificate: Option<&String>,
+        _certificates_for_callback: Option<Arc<Certificates>>,
+    ) -> Option<Self> {
         if configs.is_empty() {
             warn!("No TLS certificates found, TLS will be disabled until certificates are added");
             return None;
         }
+
+        // First, create a temporary Certificates struct to get access to it in the callback
+        // We'll recreate it properly after loading all certificates
         let mut cert_infos = Vec::new();
         let name_map: DashMap<String, SslContext> = DashMap::new();
         let mut valid_configs = Vec::new();
@@ -195,22 +273,31 @@ impl Certificates {
         log::info!("TLS server_name_callback invoked: server_name = {:?}", server_name_opt);
         if let Some(name) = server_name_opt {
             let name_str = name.to_string();
+            log::info!("SNI callback: Looking up certificate for hostname: {}", name_str);
+            log::debug!("SNI callback: upstreams_cert_map has {} entries", self.upstreams_cert_map.len());
+            log::debug!("SNI callback: cert_name_map has {} entries", self.cert_name_map.len());
+
             match self.find_ssl_context(&name_str) {
                 Some(ctx) => {
-                    log::info!("Setting SSL context for hostname: {}", name_str);
+                    log::info!("SNI callback: Found matching certificate for hostname: {}", name_str);
+                    log::info!("SNI callback: Setting SSL context for hostname: {}", name_str);
                     ssl_ref.set_ssl_context(&*ctx).map_err(|e| {
-                        log::error!("Failed to set SSL context for hostname {}: {:?}", name_str, e);
+                        log::error!("SNI callback: Failed to set SSL context for hostname {}: {:?}", name_str, e);
                         SniError::ALERT_FATAL
                     })?;
-                    log::info!("Successfully set SSL context for hostname: {}", name_str);
+                    log::info!("SNI callback: Successfully set SSL context for hostname: {}", name_str);
                 }
                 None => {
-                    log::warn!("No matching certificate found for hostname: {}, using default certificate", name_str);
+                    log::warn!("SNI callback: No matching certificate found for hostname: {}, using default certificate", name_str);
+                    log::debug!("SNI callback: Available upstreams mappings: {:?}",
+                        self.upstreams_cert_map.iter().map(|e| (e.key().clone(), e.value().clone())).collect::<Vec<_>>());
+                    log::debug!("SNI callback: Available certificate names: {:?}",
+                        self.cert_name_map.iter().map(|e| e.key().clone()).collect::<Vec<_>>());
                     // Don't set a context - let it use the default
                 }
             }
         } else {
-            log::debug!("No server name (SNI) provided in TLS handshake");
+            log::debug!("SNI callback: No server name (SNI) provided in TLS handshake");
         }
         Ok(())
     }
@@ -320,6 +407,17 @@ fn load_cert_info(cert_path: &str, key_path: &str, _grade: &str) -> Option<Certi
 }
 
 fn create_ssl_context(cert_path: &str, key_path: &str) -> Result<SslContext, Box<dyn std::error::Error>> {
+    // Always try to use global certificates for SNI callback
+    // This ensures that even contexts created without explicit certificates
+    // will have the SNI callback set if global certificates are available
+    create_ssl_context_with_sni_callback(cert_path, key_path, None)
+}
+
+fn create_ssl_context_with_sni_callback(
+    cert_path: &str,
+    key_path: &str,
+    certificates: Option<Arc<Certificates>>,
+) -> Result<SslContext, Box<dyn std::error::Error>> {
     let mut ctx = SslContext::builder(SslMethod::tls())
         .map_err(|e| format!("Failed to create SSL context builder: {}", e))?;
 
@@ -331,9 +429,17 @@ fn create_ssl_context(cert_path: &str, key_path: &str) -> Result<SslContext, Box
 
     ctx.set_alpn_select_callback(prefer_h2);
 
-    // Note: Server name callback needs to be set on the SSL context
-    // However, we need access to the Certificates struct which is not available here
-    // The callback will be set at the TlsSettings level or through a different mechanism
+    // Set SNI callback - use provided certificates or global certificates
+    let certs_for_callback = certificates.or_else(get_global_certificates);
+    if let Some(certs) = certs_for_callback {
+        let certs_clone = certs.clone();
+        ctx.set_servername_callback(move |ssl_ref: &mut SslRef, _ssl_alert: &mut SslAlert| -> Result<(), SniError> {
+            certs_clone.server_name_callback(ssl_ref, _ssl_alert)
+        });
+        log::debug!("Set SNI callback on SSL context for certificate selection");
+    } else {
+        log::warn!("No certificates available for SNI callback - certificate selection by hostname will not work");
+    }
 
     let built = ctx.build();
 
@@ -380,6 +486,46 @@ pub fn prefer_h2<'a>(_ssl: &mut SslRef, alpn_in: &'a [u8]) -> Result<&'a [u8], A
 pub fn set_alpn_prefer_h2(tls_settings: &mut pingora_core::listeners::tls::TlsSettings) {
     use pingora_core::listeners::ALPN;
     tls_settings.set_alpn(ALPN::H2H1);
+}
+
+// Helper to create TlsSettings with SNI callback for certificate selection
+// This uses TlsSettings::with_callbacks() which allows us to provide a TlsAccept implementation
+// that handles dynamic certificate selection based on SNI (Server Name Indication)
+pub fn create_tls_settings_with_sni(
+    cert_path: &str,
+    key_path: &str,
+    grade: &str,
+    certificates: Option<Arc<Certificates>>,
+) -> Result<TlsSettings, Box<dyn std::error::Error>> {
+    // Get the certificates - use provided or fall back to global
+    let certs = certificates
+        .or_else(get_global_certificates)
+        .ok_or_else(|| "No certificates available for TLS configuration".to_string())?;
+
+    log::info!("Creating TlsSettings with callbacks for dynamic certificate selection");
+    log::info!("Default certificate: {} / {}", cert_path, key_path);
+    log::info!("Certificate mappings: {} upstreams, {} certificates",
+        certs.upstreams_cert_map.len(), certs.cert_name_map.len());
+
+    // Use TlsSettings::with_callbacks() instead of TlsSettings::intermediate()
+    // This allows us to provide our Certificates struct which implements TlsAccept
+    // The certificate_callback method will be called during TLS handshake to select
+    // the appropriate certificate based on the SNI hostname
+    //
+    // Note: with_callbacks expects a Box<dyn TlsAccept + Send + Sync>
+    // We clone the Certificates struct to create a new instance for the callback
+    let tls_accept: Box<dyn TlsAccept + Send + Sync> = Box::new((*certs).clone());
+    let mut tls_settings = TlsSettings::with_callbacks(tls_accept)
+        .map_err(|e| format!("Failed to create TlsSettings with callbacks: {}", e))?;
+
+    // Configure TLS grade and ALPN
+    set_tsl_grade(&mut tls_settings, grade);
+    set_alpn_prefer_h2(&mut tls_settings);
+
+    log::info!("Successfully created TlsSettings with SNI-based certificate selection");
+    log::info!("Certificate selection will work based on hostname from SNI");
+
+    Ok(tls_settings)
 }
 
 pub fn set_tsl_grade(tls_settings: &mut TlsSettings, grade: &str) {
