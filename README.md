@@ -31,13 +31,15 @@ Moat is a high-performance reverse proxy and firewall built with Rust, featuring
 - **Threat intelligence integration** with Arxignis API for real-time protection
 - **CAPTCHA protection** with support for hCaptcha, reCAPTCHA, and Cloudflare Turnstile
 - **Content scanning** with ClamAV integration for malware detection
-- **PROXY protocol support** for preserving client IP addresses through load balancers
+<!-- - **PROXY protocol support** for preserving client IP addresses through load balancers -->
 - **Health check endpoints** for monitoring and load balancer integration
 - **Redis-backed caching** for certificates, threat intelligence, and validation results
 - **Domain filtering** with whitelist support
 - **Wirefilter expressions** for advanced request filtering
 - **Unified event queue** with batched processing for logs, statistics, and events
 - **Flexible configuration** via YAML files, command line arguments, or environment variables
+- **Advanced upstream routing** with service discovery support (file, Consul, Kubernetes)
+- **Hot-reloadable upstreams configuration** for zero-downtime updates
 
 ## Modes
 
@@ -69,7 +71,7 @@ server:
 moat --upstream http://localhost:8080 --arxignis-api-key "your-key"
 ```
 
-### Standalone Agent Mode
+### Agent Mode
 
 Moat runs as a standalone agent focused on access rules enforcement without HTTP/HTTPS proxy functionality. This mode is ideal for network-level protection where you don't need request proxying.
 
@@ -84,7 +86,7 @@ Moat runs as a standalone agent focused on access rules enforcement without HTTP
 **Configuration:**
 ```yaml
 server:
-  disable_http_server: true  # Disable HTTP server, run as standalone agent
+  disable_http_server: true  # Disable HTTP server, run as agent
 ```
 
 **CLI:**
@@ -171,8 +173,170 @@ All configuration options can be overridden using environment variables with the
 export AX_SERVER_UPSTREAM="http://localhost:8080"
 export AX_SERVER_HTTP_ADDR="0.0.0.0:80"
 export AX_SERVER_TLS_ADDR="0.0.0.0:443"
+export AX_SERVER_DISABLE_HTTP_SERVER="false"
+
+# TLS configuration
+export AX_TLS_MODE="acme"
+export AX_TLS_ONLY="false"
+
+# ACME configuration
+export AX_ACME_DOMAINS="example.com,www.example.com"
+export AX_ACME_CONTACTS="admin@example.com"
+export AX_ACME_USE_PROD="true"
+
+# Redis configuration
+export AX_REDIS_URL="redis://127.0.0.1/0"
+export AX_REDIS_PREFIX="ax:moat"
+
+# Network configuration
+export AX_NETWORK_IFACE="eth0"
+export AX_NETWORK_DISABLE_XDP="false"
+
+# Arxignis configuration
+export AX_ARXIGNIS_API_KEY="your-api-key"
+export AX_ARXIGNIS_BASE_URL="https://api.arxignis.com/v1"
+export AX_ARXIGNIS_LOG_SENDING_ENABLED="true"
+export AX_ARXIGNIS_INCLUDE_RESPONSE_BODY="true"
+export AX_ARXIGNIS_MAX_BODY_SIZE="1048576"
+
+# CAPTCHA configuration
+export AX_CAPTCHA_SITE_KEY="your-site-key"
+export AX_CAPTCHA_SECRET_KEY="your-secret-key"
+export AX_CAPTCHA_JWT_SECRET="your-jwt-secret"
+export AX_CAPTCHA_PROVIDER="turnstile"
+
+# Content scanning
+export AX_CONTENT_SCANNING_ENABLED="true"
+export AX_CLAMAV_SERVER="localhost:3310"
+export AX_CONTENT_MAX_FILE_SIZE="10485760"
+export AX_CONTENT_SCAN_CONTENT_TYPES="text/html,application/x-www-form-urlencoded,multipart/form-data"
+export AX_CONTENT_SKIP_EXTENSIONS=".jpg,.png,.gif"
+
+# Domain filtering
+export AX_DOMAINS_WHITELIST="trusted.com,secure.example.com"
+
+# Health check configuration
+export AX_SERVER_HEALTH_CHECK_ENABLED="true"
+export AX_SERVER_HEALTH_CHECK_ENDPOINT="/health"
+export AX_SERVER_HEALTH_CHECK_PORT="0.0.0.0:8080"
+export AX_SERVER_HEALTH_CHECK_METHODS="GET,HEAD"
+export AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS="127.0.0.0/8,::1/128"
+
+# BPF Statistics
+export AX_BPF_STATS_ENABLED="true"
+export AX_BPF_STATS_LOG_INTERVAL="60"
+export AX_BPF_STATS_ENABLE_DROPPED_IP_EVENTS="true"
+export AX_BPF_STATS_DROPPED_IP_EVENTS_INTERVAL="30"
+
+# TCP Fingerprinting
+export AX_TCP_FINGERPRINT_ENABLED="true"
+export AX_TCP_FINGERPRINT_LOG_INTERVAL="60"
+export AX_TCP_FINGERPRINT_ENABLE_FINGERPRINT_EVENTS="true"
+export AX_TCP_FINGERPRINT_EVENTS_INTERVAL="30"
+export AX_TCP_FINGERPRINT_MIN_PACKET_COUNT="3"
+export AX_TCP_FINGERPRINT_MIN_CONNECTION_DURATION="1"
+
+# Daemon mode
+export AX_DAEMON_ENABLED="false"
+export AX_DAEMON_PID_FILE="/var/run/moat.pid"
+export AX_DAEMON_WORKING_DIRECTORY="/"
+export AX_DAEMON_STDOUT="/var/log/moat/access.log"
+export AX_DAEMON_STDERR="/var/log/moat/error.log"
+
+# Logging
+export AX_LOGGING_LEVEL="info"
 ```
-[You can find more here.](./docs/ENVIRONMNET_VARS.md)
+
+For a complete list of all available environment variables, see [ENVIRONMNET_VARS.md](./docs/ENVIRONMNET_VARS.md).
+
+### Upstreams Configuration
+
+Moat supports advanced upstream routing via a separate upstreams configuration file. This file supports hot-reloading - changes are applied immediately without restarting the service.
+
+**Features:**
+- **Multiple service discovery providers** - File-based, Consul, and Kubernetes service discovery
+- **Global configuration** - Sticky sessions, rate limits, and headers applied globally
+- **Arxignis paths** - Global paths that work across all hostnames (evaluated before hostname-specific routing)
+- **Per-path configuration** - Rate limits, headers, and HTTPS redirects per path
+- **Hot-reloading** - Configuration changes apply immediately without service restart
+
+**Configuration File:**
+
+The upstreams configuration file is specified in the main config file or via the Pingora configuration section. See [UPSTREAMS_CONFIG.md](./UPSTREAMS_CONFIG.md) for complete documentation.
+
+**Basic Example (File Provider):**
+
+```yaml
+provider: "file"
+config:
+  https_proxy_enabled: false
+  sticky_sessions: true
+  global_rate_limit: 100
+  global_headers:
+    - "Access-Control-Allow-Origin:*"
+    - "X-Proxy-From:Moat"
+
+arxignis_paths:
+  "/cgi-bin/captcha/verify":
+    rate_limit: 200
+    servers:
+      - "127.0.0.1:3001"
+
+upstreams:
+  example.com:
+    certificate: "example.com"
+    paths:
+      "/":
+        rate_limit: 200
+        servers:
+          - "127.0.0.1:8000"
+          - "127.0.0.1:8001"
+```
+
+**Kubernetes Service Discovery:**
+
+```yaml
+provider: "kubernetes"
+config:
+  sticky_sessions: true
+  global_rate_limit: 300
+
+kubernetes:
+  servers:
+    - "https://k8s-api.example.com:6443"
+  tokenpath: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  services:
+    - upstream: "http://my-service.default.svc.cluster.local:8080"
+      hostname: "api.example.com"
+      path: "/"
+      rate_limit: 500
+```
+
+**Consul Service Discovery:**
+
+```yaml
+provider: "consul"
+config:
+  sticky_sessions: true
+  global_rate_limit: 200
+
+consul:
+  servers:
+    - "consul1.example.com:8500"
+    - "consul2.example.com:8500"
+  token: "your-consul-token"
+  services:
+    - upstream: "http://service-name.service.consul:8080"
+      hostname: "api.example.com"
+      path: "/"
+      rate_limit: 500
+```
+
+**Example Files:**
+- [upstreams_example.yaml](./upstreams_example.yaml) - File provider with all options
+- [upstreams_example_kubernetes.yaml](./upstreams_example_kubernetes.yaml) - Kubernetes service discovery
+- [upstreams_example_consul.yaml](./upstreams_example_consul.yaml) - Consul service discovery
+
 ## Command Line Options
 
 ### Basic Usage
@@ -400,6 +564,7 @@ Comprehensive TLS support with multiple modes:
 - **HTTP Server** - Handles ACME challenges, HTTP traffic, and health checks
 - **TLS Server** - Manages HTTPS connections and certificate handling
 - **Reverse Proxy** - Forwards requests to upstream services
+- **Upstreams Manager** - Advanced routing with service discovery and hot-reloading
 - **Threat Intelligence** - Integrates with Arxignis API for real-time threat data
 - **Access Rules Engine** - Dynamic IP allow/block lists with periodic updates from Arxignis API
 - **BPF Statistics Collector** - Tracks packet processing, drops, and banned IP hits at kernel level
@@ -413,7 +578,7 @@ Comprehensive TLS support with multiple modes:
   - **JA4X** X.509 certificate fingerprinting
 - **CAPTCHA Engine** - Validates CAPTCHA responses from multiple providers
 - **Content Scanner** - ClamAV integration for malware detection
-- **PROXY Protocol Handler** - Preserves client IP addresses through load balancers
+<!-- - **PROXY Protocol Handler** - Preserves client IP addresses through load balancers -->
 - **Event Queue** - Unified batch processing for logs, statistics, and events
 - **Redis Cache** - Stores certificates, threat intelligence, CAPTCHA validation results, and content scan results
 
@@ -454,3 +619,10 @@ Comprehensive TLS support with multiple modes:
 - Health check endpoints can be configured for monitoring and load balancer integration
 - Access logs, statistics, and events are batched and sent to Arxignis API for analysis
 - Configuration priority: YAML file > Command line arguments > Environment variables
+- Upstreams configuration supports hot-reloading - changes apply immediately without restart
+- Service discovery providers: file (static), Consul, and Kubernetes
+- Arxignis paths are global paths that work across all hostnames and are evaluated before hostname-specific routing
+
+## Thank you!
+[Cloudflare](https://github.com/cloudflare) for Pingora and Wirefilter
+[Aralaz](https://github.com/sadoyan/aralez) for Aralez

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, env};
+use std::{path::PathBuf, env};
 
 use anyhow::Result;
 use clap::Parser;
@@ -31,20 +31,6 @@ pub struct Config {
     pub mode: String,
 
     // Global server options (moved from server section)
-    #[serde(default)]
-    pub http_addr: String,
-    #[serde(default)]
-    pub http_bind: Vec<String>,
-    #[serde(default)]
-    pub tls_addr: String,
-    #[serde(default)]
-    pub tls_bind: Vec<String>,
-    #[serde(default)]
-    pub upstream: String,
-    #[serde(default)]
-    pub proxy_protocol: ProxyProtocolConfig,
-    #[serde(default)]
-    pub health_check: HealthCheckConfig,
     #[serde(default)]
     pub redis: RedisConfig,
     #[serde(default)]
@@ -202,22 +188,6 @@ impl Config {
     pub fn default() -> Self {
         Self {
             mode: "proxy".to_string(),
-            http_addr: "0.0.0.0:80".to_string(),
-            http_bind: vec![],
-            tls_addr: "0.0.0.0:443".to_string(),
-            tls_bind: vec![],
-            upstream: "http://localhost:8080".to_string(),
-            proxy_protocol: ProxyProtocolConfig {
-                enabled: false,
-                timeout_ms: 1000,
-            },
-            health_check: HealthCheckConfig {
-                enabled: true,
-                endpoint: "/health".to_string(),
-                port: "0.0.0.0:8080".to_string(),
-                methods: vec!["GET".to_string(), "HEAD".to_string()],
-                allowed_cidrs: vec![],
-            },
             redis: RedisConfig {
                 url: "redis://127.0.0.1/0".to_string(),
                 prefix: "ax:moat".to_string(),
@@ -268,23 +238,12 @@ impl Config {
 
     pub fn merge_with_args(&mut self, args: &Args) {
         // Override config values with command line arguments if provided
-        if args.disable_http_server {
-            self.mode = "agent".to_string();
-        }
-        if !args.http_bind.is_empty() {
-            self.http_bind = args.http_bind.iter().map(|addr| addr.to_string()).collect();
-        }
-        if !args.tls_bind.is_empty() {
-            self.tls_bind = args.tls_bind.iter().map(|addr| addr.to_string()).collect();
-        }
+
         if !args.ifaces.is_empty() {
             self.network.ifaces = args.ifaces.clone();
         }
         if let Some(api_key) = &args.arxignis_api_key {
             self.arxignis.api_key = api_key.clone();
-        }
-        if let Some(upstream) = &args.upstream {
-            self.upstream = upstream.clone();
         }
         if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.arxignis.com/v1" {
             self.arxignis.base_url = args.arxignis_base_url.clone();
@@ -308,12 +267,12 @@ impl Config {
         }
 
         // Proxy protocol configuration overrides
-        if args.proxy_protocol_enabled {
-            self.proxy_protocol.enabled = true;
-        }
-        if args.proxy_protocol_timeout != 1000 {
-            self.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
-        }
+        // if args.proxy_protocol_enabled {
+        //     self.proxy_protocol.enabled = true;
+        // }
+        // if args.proxy_protocol_timeout != 1000 {
+        //     self.proxy_protocol.timeout_ms = args.proxy_protocol_timeout;
+        // }
 
         // Daemon configuration overrides
         if args.daemon {
@@ -348,15 +307,6 @@ impl Config {
     }
 
     pub fn validate_required_fields(&mut self, args: &Args) -> Result<()> {
-        // Check if server section is configured (has http_addr or upstream)
-        let server_configured = !self.http_addr.is_empty() || !self.upstream.is_empty();
-
-        // Check if upstream is provided either via CLI args or config file
-        // Skip this check if in agent mode or server section is not configured
-        if server_configured && self.mode != "agent" && args.upstream.is_none() && self.upstream.is_empty() {
-            return Err(anyhow::anyhow!("Upstream URL is required. Provide it via --upstream argument or in config file"));
-        }
-
         // Check if arxignis API key is provided - only warn if not provided
         // (to support old config format that doesn't have this field)
         if args.arxignis_api_key.is_none() && self.arxignis.api_key.is_empty() {
@@ -384,39 +334,6 @@ impl Config {
         if let Ok(val) = env::var("AX_MODE") {
             self.mode = val;
         }
-
-        // Server configuration overrides
-        if let Ok(val) = env::var("AX_SERVER_HTTP_ADDR") {
-            self.http_addr = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_TLS_ADDR") {
-            self.tls_addr = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_UPSTREAM") {
-            self.upstream = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HTTP_BIND") {
-            self.http_bind = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_TLS_BIND") {
-            self.tls_bind = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENABLED") {
-            self.health_check.enabled = val.parse().unwrap_or(true);
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ENDPOINT") {
-            self.health_check.endpoint = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_PORT") {
-            self.health_check.port = val;
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_METHODS") {
-            self.health_check.methods = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-        if let Ok(val) = env::var("AX_SERVER_HEALTH_CHECK_ALLOWED_CIDRS") {
-            self.health_check.allowed_cidrs = val.split(',').map(|s| s.trim().to_string()).collect();
-        }
-
 
         // Redis configuration overrides
         if let Ok(val) = env::var("AX_REDIS_URL") {
@@ -502,12 +419,12 @@ impl Config {
         }
 
         // Proxy protocol configuration overrides
-        if let Ok(val) = env::var("AX_PROXY_PROTOCOL_ENABLED") {
-            self.proxy_protocol.enabled = val.parse().unwrap_or(false);
-        }
-        if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
-            self.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
-        }
+        // if let Ok(val) = env::var("AX_PROXY_PROTOCOL_ENABLED") {
+        //     self.proxy_protocol.enabled = val.parse().unwrap_or(false);
+        // }
+        // if let Ok(val) = env::var("AX_PROXY_PROTOCOL_TIMEOUT") {
+        //     self.proxy_protocol.timeout_ms = val.parse().unwrap_or(1000);
+        // }
 
         // Daemon configuration overrides
         if let Ok(val) = env::var("AX_DAEMON_ENABLED") {
@@ -544,74 +461,7 @@ pub struct Args {
     #[arg(long, short = 'c')]
     pub config: Option<PathBuf>,
 
-    /// Disable HTTP server and run as standalone agent with access rules only
-    #[arg(long, default_value_t = false)]
-    pub disable_http_server: bool,
-
-    /// HTTP server bind address.
-    #[arg(long, default_value = "0.0.0.0:80")]
-    pub http_addr: SocketAddr,
-
-    /// Additional HTTP bind addresses (comma-separated). If set, overrides http_addr.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub http_bind: Vec<SocketAddr>,
-
-    /// HTTPS reverse-proxy bind address.
-    #[arg(long, default_value = "0.0.0.0:443")]
-    pub tls_addr: SocketAddr,
-
-    /// Additional HTTPS bind addresses (comma-separated). If set, overrides tls_addr.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub tls_bind: Vec<SocketAddr>,
-
-    /// TLS operating mode.
-    #[arg(long, value_enum, default_value_t = TlsMode::Disabled)]
-    pub tls_mode: TlsMode,
-
-    /// Require TLS for application traffic.
-    /// If enabled, plain HTTP requests (except ACME) will be rejected with 426.
-    #[arg(long, default_value_t = false)]
-    pub tls_only: bool,
-
-    /// Upstream origin URL (required unless TLS is disabled or config file provided).
-    #[arg(long)]
-    pub upstream: Option<String>,
-
-    /// Path to custom certificate (PEM) when using custom TLS mode.
-    #[arg(long)]
-    pub tls_cert_path: Option<PathBuf>,
-
-    /// Path to custom private key (PEM) when using custom TLS mode.
-    #[arg(long)]
-    pub tls_key_path: Option<PathBuf>,
-
-    /// Domains for ACME certificate issuance and domain whitelist (comma separated or repeated).
-    /// These domains will be used for SSL certificate generation and domain filtering.
-    /// Only requests to these domains (or matching wildcards) will be allowed.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub acme_domains: Vec<String>,
-
-    /// ACME contact addresses (mailto: optional, comma separated or repeated).
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
-    pub acme_contacts: Vec<String>,
-
-    /// Use Let's Encrypt production directory instead of staging.
-    #[arg(long)]
-    pub acme_use_prod: bool,
-
-    /// Override ACME directory URL (useful for Pebble or other test CAs).
-    #[arg(long)]
-    pub acme_directory: Option<String>,
-
-    /// Explicitly accept the ACME Terms of Service.
-    #[arg(long, default_value_t = false)]
-    pub acme_accept_tos: bool,
-
-    /// Custom CA bundle for the ACME directory (PEM file).
-    #[arg(long)]
-    pub acme_ca_root: Option<PathBuf>,
-
-    /// Redis connection URL for ACME cache storage.
+     /// Redis connection URL for ACME cache storage.
     #[arg(long, default_value = "redis://127.0.0.1/0")]
     pub redis_url: String,
 

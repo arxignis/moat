@@ -61,9 +61,6 @@ fn main() -> Result<()> {
 
     // Validate required arguments when no config file is provided
     if args.config.is_none() {
-        if args.upstream.is_none() {
-            return Err(anyhow::anyhow!("--upstream is required when no config file is provided"));
-        }
         if args.arxignis_api_key.is_none() {
             return Err(anyhow::anyhow!("--arxignis-api-key is required when no config file is provided"));
         }
@@ -279,13 +276,6 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
         std::thread::spawn(move || {
             http_proxy::start::run_with_config(Some(crate::cli::Config {
                 mode: "proxy".to_string(),
-                http_addr: Default::default(),
-                http_bind: Default::default(),
-                tls_addr: Default::default(),
-                tls_bind: Default::default(),
-                upstream: Default::default(),
-                proxy_protocol: Default::default(),
-                health_check: Default::default(),
                 redis: Default::default(),
                 network: network_config,
                 arxignis: arxignis_config,
