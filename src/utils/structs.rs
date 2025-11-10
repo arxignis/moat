@@ -143,6 +143,7 @@ pub struct AppConfig {
     pub local_server: Option<(String, u16)>,
     pub proxy_certificates: Option<String>,
     pub proxy_tls_grade: Option<String>,
+    pub default_certificate: Option<String>,
     pub file_server_address: Option<String>,
     pub file_server_folder: Option<String>,
     pub runuser: Option<String>,

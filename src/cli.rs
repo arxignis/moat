@@ -663,6 +663,8 @@ pub struct PingoraConfig {
     #[serde(default = "default_pingora_tls_grade")]
     pub proxy_tls_grade: String,
     #[serde(default)]
+    pub default_certificate: Option<String>,
+    #[serde(default)]
     pub upstreams_conf: String,
     #[serde(default)]
     pub config_address: String,
@@ -692,6 +694,7 @@ impl PingoraConfig {
         app_config.proxy_address_tls = self.proxy_address_tls.clone();
         app_config.proxy_certificates = self.proxy_certificates.clone();
         app_config.proxy_tls_grade = Some(self.proxy_tls_grade.clone());
+        app_config.default_certificate = self.default_certificate.clone();
         app_config.upstreams_conf = self.upstreams_conf.clone();
         app_config.config_address = self.config_address.clone();
         app_config.config_api_enabled = self.config_api_enabled;

@@ -20,12 +20,80 @@ impl GetHost for LB {
         }
 
         // Check arxignis_paths first - these paths work regardless of hostname
+        // Try exact match first
         if let Some(arxignis_path_entry) = self.arxignis_paths.get(path) {
             let (servers, index) = arxignis_path_entry.value();
             if !servers.is_empty() {
                 let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
                 debug!("Using Arxignis path {} -> {}", path, servers[idx].address);
                 return Some(servers[idx].clone());
+            }
+        }
+        // If no exact match, try prefix/wildcard matching - check if any configured path is a prefix of the request path
+        // Collect all matches and use the longest one (most specific match)
+        let mut best_match: Option<(String, InnerMap, usize)> = None;
+        for entry in self.arxignis_paths.iter() {
+            let pattern = entry.key();
+            // Handle wildcard patterns ending with /* - strip the /* for matching
+            let (pattern_prefix, is_wildcard) = if pattern.ends_with("/*") {
+                (pattern.strip_suffix("/*").unwrap_or(pattern.as_str()), true)
+            } else {
+                (pattern.as_str(), false)
+            };
+
+            // Check if the request path starts with the pattern prefix (prefix match)
+            if path.starts_with(pattern_prefix) {
+                // For wildcard patterns (ending with /*), match any path that starts with the prefix
+                // For non-wildcard patterns, ensure it's a proper path segment match
+                let is_valid_match = if is_wildcard {
+                    // Wildcard pattern: match if path starts with prefix (already checked above)
+                    true
+                } else if pattern_prefix.ends_with('/') {
+                    // Pattern ends with /, so it matches any path starting with it
+                    true
+                } else if path.len() == pattern_prefix.len() {
+                    // Exact match (already handled above, but keep for completeness)
+                    true
+                } else if let Some(next_char) = path.chars().skip(pattern_prefix.len()).next() {
+                    // Next character after prefix should be / for proper path segment match
+                    next_char == '/'
+                } else {
+                    false
+                };
+
+                if is_valid_match {
+                    let (servers, index) = entry.value();
+                    if !servers.is_empty() {
+                        let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
+                        let matched_server = servers[idx].clone();
+                        let prefix_len = pattern_prefix.len();
+                        // Keep the longest (most specific) match based on the prefix length
+                        if best_match.as_ref().map_or(true, |(_, _, best_len)| prefix_len > *best_len) {
+                            best_match = Some((pattern.clone(), matched_server, prefix_len));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((pattern, server, _)) = best_match {
+            debug!("Using Arxignis path pattern {} -> {} (matched path: {})", pattern, server.address, path);
+            return Some(server);
+        }
+        // If no prefix match, try progressively shorter paths (same logic as regular upstreams)
+        let mut current_path = path.to_string();
+        loop {
+            if let Some(arxignis_path_entry) = self.arxignis_paths.get(&current_path) {
+                let (servers, index) = arxignis_path_entry.value();
+                if !servers.is_empty() {
+                    let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
+                    debug!("Using Arxignis path {} -> {} (matched from {})", current_path, servers[idx].address, path);
+                    return Some(servers[idx].clone());
+                }
+            }
+            if let Some(pos) = current_path.rfind('/') {
+                current_path.truncate(pos);
+            } else {
+                break;
             }
         }
 

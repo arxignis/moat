@@ -135,6 +135,14 @@ impl BackgroundService for LB {
                                     }
                                 }
                             }
+
+                            // Update upstreams certificate mappings
+                            if let Some(certs_arc) = &self.certificates {
+                                if let Some(certs) = certs_arc.load().as_ref() {
+                                    certs.set_upstreams_cert_map(ss.certificates.clone());
+                                    info!("Updated upstreams certificate mappings: {} entries", ss.certificates.len());
+                                }
+                            }
                             // info!("Upstreams list is changed, updating to:");
                             // print_upstreams(&self.ump_full);
                         }

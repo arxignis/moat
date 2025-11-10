@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use serde::{Deserialize, Deserializer, Serialize};
-use tokio::sync::{RwLock, OnceCell};
+use tokio::sync::OnceCell;
+use pingora_memory_cache::MemoryCache;
 
 use crate::redis::RedisManager;
 use crate::http_client::get_global_reqwest_client;
@@ -77,13 +77,6 @@ pub struct GeoInfo {
     pub asn_iso_code: String,
 }
 
-/// Cached threat data with expiration
-#[derive(Debug, Clone)]
-pub struct CachedThreatData {
-    pub data: ThreatResponse,
-    pub expires_at: Instant,
-}
-
 /// WAF fields extracted from threat data
 #[derive(Debug, Clone)]
 pub struct WafFields {
@@ -108,11 +101,11 @@ impl From<&ThreatResponse> for WafFields {
     }
 }
 
-/// Threat intelligence client with L1 (in-memory) and L2 (Redis) caching
+/// Threat intelligence client with pingora-memory-cache and Redis caching
 pub struct ThreatClient {
     base_url: String,
     api_key: String,
-    l1_cache: Arc<RwLock<HashMap<String, CachedThreatData>>>,
+    pingora_cache: Arc<MemoryCache<String, ThreatResponse>>,
 }
 
 impl ThreatClient {
@@ -123,28 +116,26 @@ impl ThreatClient {
         Self {
             base_url,
             api_key,
-            l1_cache: Arc::new(RwLock::new(HashMap::new())),
+            pingora_cache: Arc::new(MemoryCache::new(10000)),
         }
     }
 
     /// Get threat intelligence for an IP address with caching
     pub async fn get_threat_intel(&self, ip: &str) -> Result<Option<ThreatResponse>> {
-        // Check L1 cache first (30 seconds TTL)
-        if let Some(cached) = self.get_l1_cache(ip).await {
-            if cached.expires_at > Instant::now() {
-                log::debug!("Threat data for {} found in L1 cache", ip);
-                return Ok(Some(cached.data));
-            } else {
-                // Remove expired entry
-                self.remove_l1_cache(ip).await;
+        // Check pingora-memory-cache
+        let (cached_data, status) = self.pingora_cache.get(ip);
+        if let Some(data) = cached_data {
+            if status.is_hit() {
+                log::debug!("Threat data for {} found in pingora-memory-cache", ip);
+                return Ok(Some(data));
             }
         }
 
         // Check L2 cache (Redis) with TTL from API response
         if let Some(cached) = self.get_l2_cache(ip).await? {
             log::debug!("Threat data for {} found in L2 cache", ip);
-            // Store in L1 cache for faster access
-            self.set_l1_cache(ip, &cached).await;
+            // Store in pingora-memory-cache for faster access
+            self.set_pingora_cache(ip, &cached).await;
             return Ok(Some(cached));
         }
 
@@ -153,8 +144,8 @@ impl ThreatClient {
             Ok(Some(threat_data)) => {
                 log::debug!("Threat data for {} fetched from API", ip);
 
-                // Store in both caches
-                self.set_l1_cache(ip, &threat_data).await;
+                // Store in caches
+                self.set_pingora_cache(ip, &threat_data).await;
                 if let Err(e) = self.set_l2_cache(ip, &threat_data).await {
                     log::warn!("Failed to store threat data in L2 cache: {}", e);
                 }
@@ -219,30 +210,6 @@ impl ThreatClient {
         Ok(Some(threat_data))
     }
 
-    /// Get data from L1 cache (in-memory)
-    async fn get_l1_cache(&self, ip: &str) -> Option<CachedThreatData> {
-        let cache = self.l1_cache.read().await;
-        cache.get(ip).cloned()
-    }
-
-    /// Set data in L1 cache (30 seconds TTL)
-    async fn set_l1_cache(&self, ip: &str, data: &ThreatResponse) {
-        let mut cache = self.l1_cache.write().await;
-        cache.insert(
-            ip.to_string(),
-            CachedThreatData {
-                data: data.clone(),
-                expires_at: Instant::now() + Duration::from_secs(30),
-            },
-        );
-    }
-
-    /// Remove expired data from L1 cache
-    async fn remove_l1_cache(&self, ip: &str) {
-        let mut cache = self.l1_cache.write().await;
-        cache.remove(ip);
-    }
-
     /// Get data from L2 cache (Redis)
     async fn get_l2_cache(&self, ip: &str) -> Result<Option<ThreatResponse>> {
         let redis_manager = match RedisManager::get() {
@@ -273,6 +240,12 @@ impl ThreatClient {
         }
     }
 
+    /// Set data in pingora-memory-cache with TTL from API response
+    async fn set_pingora_cache(&self, ip: &str, data: &ThreatResponse) {
+        let ttl = Duration::from_secs(data.ttl_s);
+        self.pingora_cache.put(ip, data.clone(), Some(ttl));
+    }
+
     /// Set data in L2 cache (Redis) with TTL from API response
     async fn set_l2_cache(&self, ip: &str, data: &ThreatResponse) -> Result<()> {
         let redis_manager = match RedisManager::get() {
@@ -292,13 +265,6 @@ impl ThreatClient {
             .context("Failed to store threat data in Redis")?;
 
         Ok(())
-    }
-
-    /// Clean up expired entries from L1 cache
-    pub async fn cleanup_l1_cache(&self) {
-        let mut cache = self.l1_cache.write().await;
-        let now = Instant::now();
-        cache.retain(|_, cached| cached.expires_at > now);
     }
 }
 
@@ -334,17 +300,4 @@ pub async fn get_waf_fields(ip: &str) -> Result<Option<WafFields>> {
         .ok_or_else(|| anyhow::anyhow!("Threat client not initialized"))?;
 
     client.get_waf_fields(ip).await
-}
-
-/// Start periodic L1 cache cleanup task
-pub async fn start_cache_cleanup_task() {
-    tokio::spawn(async {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            if let Some(client) = THREAT_CLIENT.get() {
-                client.cleanup_l1_cache().await;
-            }
-        }
-    });
 }

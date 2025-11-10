@@ -9,6 +9,32 @@ use crate::redis::RedisManager;
 use crate::utils::tls::{CertificateConfig, Certificates};
 use crate::worker::Worker;
 
+/// Calculate SHA256 hash of certificate files (fullchain + key)
+fn calculate_local_hash(cert_path: &std::path::Path, key_path: &std::path::Path) -> Result<String> {
+    use sha2::{Sha256, Digest};
+    use std::io::Read;
+
+    let mut hasher = Sha256::new();
+
+    // Read and hash certificate file
+    let mut cert_file = std::fs::File::open(cert_path)
+        .context(format!("Failed to open certificate file: {}", cert_path.display()))?;
+    let mut cert_data = Vec::new();
+    cert_file.read_to_end(&mut cert_data)
+        .context(format!("Failed to read certificate file: {}", cert_path.display()))?;
+    hasher.update(&cert_data);
+
+    // Read and hash key file
+    let mut key_file = std::fs::File::open(key_path)
+        .context(format!("Failed to open key file: {}", key_path.display()))?;
+    let mut key_data = Vec::new();
+    key_file.read_to_end(&mut key_data)
+        .context(format!("Failed to read key file: {}", key_path.display()))?;
+    hasher.update(&key_data);
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Normalize PEM certificate chain to ensure proper format
 /// - Ensures newline between certificates (END CERTIFICATE and BEGIN CERTIFICATE)
 /// - Ensures file ends with newline
@@ -46,9 +72,21 @@ struct DomainConfig {
 /// Global certificate store for Redis-loaded certificates
 static CERTIFICATE_STORE: once_cell::sync::OnceCell<Arc<tokio::sync::RwLock<Option<Arc<Certificates>>>>> = once_cell::sync::OnceCell::new();
 
+/// Global in-memory cache for certificate hashes (domain -> SHA256 hash)
+/// Using Arc<Mutex<HashMap>> instead of MemoryCache to avoid lifetime issues
+static CERTIFICATE_HASH_CACHE: once_cell::sync::OnceCell<Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>> = once_cell::sync::OnceCell::new();
+
 /// Get the global certificate store
 pub fn get_certificate_store() -> Arc<tokio::sync::RwLock<Option<Arc<Certificates>>>> {
     CERTIFICATE_STORE.get_or_init(|| Arc::new(tokio::sync::RwLock::new(None))).clone()
+}
+
+/// Get the global certificate hash cache
+/// Cache size: 1000 entries (should be enough for most deployments)
+fn get_certificate_hash_cache() -> Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>> {
+    CERTIFICATE_HASH_CACHE.get_or_init(|| {
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+    }).clone()
 }
 
 /// Certificate worker that fetches SSL certificates from Redis
@@ -154,7 +192,7 @@ async fn fetch_domains_from_redis() -> Result<Vec<String>> {
                 .map(|config| config.domain)
                 .collect();
 
-            log::info!("Found {} domains in ssl-storage:domains: {:?}", domain_names.len(), domain_names);
+            log::info!("Found {} unique domain(s) in ssl-storage:domains: {:?}", domain_names.len(), domain_names);
             domain_names
         }
         None => {
@@ -179,10 +217,13 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
         return Ok(());
     }
 
-    log::info!("Downloading certificates for {} domains from Redis", domains.len());
+    log::info!("Checking certificates for {} domain(s) from Redis (will skip download if hashes match)", domains.len());
 
     let mut connection = redis_manager.get_connection();
     let mut certificate_configs = Vec::new();
+    let mut skipped_count = 0;
+    let mut downloaded_count = 0;
+    let mut missing_count = 0;
     let cert_dir = std::path::Path::new(certificate_path);
 
     // Create certificate directory if it doesn't exist
@@ -198,6 +239,70 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
     for domain in &domains {
         // Normalize domain (remove wildcard prefix if present)
         let normalized_domain = domain.strip_prefix("*.").unwrap_or(domain);
+
+        // Check certificate hash from Redis before downloading
+        let hash_key = format!("ssl-storage:{}:metadata:certificate_hash", normalized_domain);
+        let remote_hash: Option<String> = redis::cmd("GET")
+            .arg(&hash_key)
+            .query_async(&mut connection)
+            .await
+            .context(format!("Failed to get certificate hash for domain: {}", domain))?;
+
+        // Check in-memory cache first for local hash
+        let hash_cache = get_certificate_hash_cache();
+        let local_hash = {
+            let cache = hash_cache.read().await;
+            cache.get(domain).cloned()
+        };
+
+        // If not in cache, calculate from files if they exist
+        let sanitized_domain = domain.replace('.', "_").replace('*', "_");
+        let cert_path = cert_dir.join(format!("{}.crt", sanitized_domain));
+        let key_path = cert_dir.join(format!("{}.key", sanitized_domain));
+
+        let local_hash = if let Some(cached_hash) = local_hash {
+            Some(cached_hash)
+        } else if cert_path.exists() && key_path.exists() {
+            // Calculate hash from files and store in cache
+            if let Ok(hash) = calculate_local_hash(&cert_path, &key_path) {
+                let mut cache = hash_cache.write().await;
+                cache.insert(domain.clone(), hash.clone());
+                Some(hash)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Skip download if hashes match, but still add existing certificates to config
+        if let (Some(remote), Some(local)) = (&remote_hash, &local_hash) {
+            if remote == local {
+                log::info!("Certificate hash matches for domain: {} (hash: {}), skipping download", domain, remote);
+
+                // Verify local certificate files exist and are valid
+                if cert_path.exists() && key_path.exists() {
+                    // Add existing certificate to config without re-downloading
+                    certificate_configs.push(CertificateConfig {
+                        cert_path: cert_path.to_string_lossy().to_string(),
+                        key_path: key_path.to_string_lossy().to_string(),
+                    });
+                    skipped_count += 1;
+                    log::debug!("Added existing certificate config for domain: {} -> cert: {}, key: {}",
+                        domain, cert_path.display(), key_path.display());
+                    continue; // Skip download, files already exist and are valid
+                } else {
+                    log::warn!("Hash matches but certificate files missing for domain: {}, will download", domain);
+                    // Fall through to download
+                }
+            } else {
+                log::info!("Certificate hash changed for domain: {} (remote: {}, local: {}), downloading new certificate", domain, remote, local);
+            }
+        } else if remote_hash.is_none() {
+            log::debug!("No certificate hash found in Redis for domain: {}, will check if certificate exists", domain);
+        } else if local_hash.is_none() {
+            log::info!("No local certificate found for domain: {}, downloading from Redis", domain);
+        }
 
         // Fetch fullchain and private key from Redis
         // ssl-storage stores certificates with keys:
@@ -280,6 +385,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                 key_file.sync_all()
                     .context(format!("Failed to sync key file for domain: {} at path: {}", domain, key_path.display()))?;
 
+                downloaded_count += 1;
                 log::info!("Successfully downloaded and saved certificate for domain: {} to {}", domain, cert_path.display());
 
                 // Verify files were written correctly
@@ -292,6 +398,16 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                     continue;
                 }
 
+                // Store local hash in memory cache after successful download
+                if let Some(hash) = &remote_hash {
+                    let domain_key = domain.clone();
+                    let hash_value = hash.clone();
+                    let hash_cache = get_certificate_hash_cache();
+                    let mut cache = hash_cache.write().await;
+                    cache.insert(domain_key, hash_value);
+                    log::debug!("Stored local hash in memory cache for domain: {} -> {}", domain, hash);
+                }
+
                 // Create certificate config entry
                 certificate_configs.push(CertificateConfig {
                     cert_path: cert_path.to_string_lossy().to_string(),
@@ -301,19 +417,33 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                     domain, cert_path.display(), key_path.display());
             }
             _ => {
+                missing_count += 1;
                 log::warn!("Certificate not found in Redis for domain: {}", domain);
             }
         }
     }
 
+    // Log summary
+    if skipped_count > 0 {
+        log::info!("Skipped {} certificate(s) due to hash matches (using existing files)", skipped_count);
+    }
+    if downloaded_count > 0 {
+        log::info!("Downloaded {} new/updated certificate(s) from Redis", downloaded_count);
+    }
+    if missing_count > 0 {
+        log::warn!("{} certificate(s) not found in Redis", missing_count);
+    }
+
     if !certificate_configs.is_empty() {
-        log::info!("Successfully fetched {} certificates from Redis", certificate_configs.len());
+        log::info!("Successfully processed {} certificate(s) ({} downloaded, {} skipped)",
+            certificate_configs.len(), downloaded_count, skipped_count);
         log::debug!("Certificate configs to load: {:?}",
             certificate_configs.iter().map(|c| format!("cert: {}, key: {}", c.cert_path, c.key_path)).collect::<Vec<_>>());
 
         // Update the certificate store
         // Use "medium" as default TLS grade (can be made configurable)
-        match Certificates::new(&certificate_configs, "medium") {
+        // Default certificate is None for worker (can be made configurable later)
+        match Certificates::new(&certificate_configs, "medium", None) {
             Some(certificates) => {
                 let store = get_certificate_store();
                 let mut guard = store.write().await;
@@ -329,7 +459,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
             }
         }
     } else {
-        log::warn!("No certificates were successfully downloaded. Check if certificates exist in Redis for the domains listed in ssl-storage:domains");
+        log::warn!("No certificates were processed. Check if certificates exist in Redis for the domains listed in ssl-storage:domains, or if all certificates were skipped due to hash matches but files are missing");
     }
 
     Ok(())
