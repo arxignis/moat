@@ -311,18 +311,24 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
 
     // Register certificate worker if Redis URL is provided (certificates loaded from Redis)
     if !config.redis.url.is_empty() {
-        // Parse proxy_certificates from config file
+        // Parse proxy_certificates from config file (under pingora section)
         let certificate_path = if let Some(config_path) = &_args.config {
             std::fs::read_to_string(config_path)
                 .ok()
                 .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
-                .and_then(|yaml| yaml.get("proxy_certificates")?.as_str().map(|s| s.to_string()))
+                .and_then(|yaml| {
+                    // Try pingora.proxy_certificates first, then fallback to root level
+                    yaml.get("pingora")
+                        .and_then(|pingora| pingora.get("proxy_certificates"))
+                        .or_else(|| yaml.get("proxy_certificates"))
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                })
                 .unwrap_or_else(|| "/tmp/moat-certs".to_string())
         } else {
             "/tmp/moat-certs".to_string()
         };
 
-        let refresh_interval = 300; // 5 minutes default refresh interval
+        let refresh_interval = 30; // 30 seconds default refresh interval
         let worker_config = worker::WorkerConfig {
             name: "certificate".to_string(),
             interval_secs: refresh_interval,
@@ -417,8 +423,6 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
             log::warn!("Failed to initialize threat client: {}", e);
         } else {
             log::info!("Threat intelligence client initialized");
-            // Start cache cleanup task
-            threat::start_cache_cleanup_task().await;
         }
 
         // Initialize captcha client if configuration is provided

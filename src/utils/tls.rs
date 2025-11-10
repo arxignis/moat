@@ -32,12 +32,16 @@ struct CertificateInfo {
 pub struct Certificates {
     configs: Vec<CertificateInfo>,
     name_map: DashMap<String, SslContext>,
+    // Map from certificate name (e.g., "arxignis.dev") to SSL context
+    cert_name_map: DashMap<String, SslContext>,
+    // Map from hostname (e.g., "david-playground3.arxignis.dev") to certificate name (e.g., "arxignis.dev")
+    upstreams_cert_map: DashMap<String, String>,
     pub default_cert_path: String,
     pub default_key_path: String,
 }
 
 impl Certificates {
-    pub fn new(configs: &Vec<CertificateConfig>, _grade: &str) -> Option<Self> {
+    pub fn new(configs: &Vec<CertificateConfig>, _grade: &str, default_certificate: Option<&String>) -> Option<Self> {
         if configs.is_empty() {
             warn!("No TLS certificates found, TLS will be disabled until certificates are added");
             return None;
@@ -72,50 +76,142 @@ impl Certificates {
             return None;
         }
 
-        // Use first valid certificate as default
-        let default_cert = &valid_configs[0];
+        // Find default certificate: use configured default_certificate if specified, otherwise use first valid certificate
+        let default_cert = if let Some(default_cert_name) = default_certificate {
+            // Try to find certificate by name (file stem without extension)
+            let found = valid_configs.iter().find(|config| {
+                if let Some(file_name) = std::path::Path::new(&config.cert_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                {
+                    file_name == default_cert_name.as_str()
+                } else {
+                    false
+                }
+            });
+            match found {
+                Some(cert) => {
+                    log::info!("Using configured default certificate: {}", default_cert_name);
+                    cert
+                }
+                None => {
+                    log::warn!("Configured default certificate '{}' not found, using first valid certificate", default_cert_name);
+                    &valid_configs[0]
+                }
+            }
+        } else {
+            // Use first valid certificate as default
+            &valid_configs[0]
+        };
+
+        // Build cert_name_map: map from certificate file name (without extension) to SSL context
+        let cert_name_map: DashMap<String, SslContext> = DashMap::new();
+        for (idx, config) in valid_configs.iter().enumerate() {
+            // Extract certificate name from path (e.g., "/path/to/arxignis.dev.crt" -> "arxignis.dev")
+            // Use file_stem() to get the filename without extension
+            if let Some(file_name) = std::path::Path::new(&config.cert_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            {
+                if let Some(cert_info) = cert_infos.get(idx) {
+                    let cert_name = file_name.to_string();
+                    cert_name_map.insert(cert_name.clone(), cert_info.ssl_context.clone());
+                    log::debug!("Mapped certificate name '{}' to SSL context (from path: {})", cert_name, config.cert_path);
+                }
+            } else {
+                log::warn!("Failed to extract certificate name from path: {}", config.cert_path);
+            }
+        }
+
+        log::info!("Built cert_name_map with {} entries", cert_name_map.len());
+
         Some(Self {
             name_map: name_map,
+            cert_name_map: cert_name_map,
+            upstreams_cert_map: DashMap::new(),
             configs: cert_infos,
             default_cert_path: default_cert.cert_path.clone(),
             default_key_path: default_cert.key_path.clone(),
         })
     }
 
+    /// Set upstreams certificate mappings (hostname -> certificate_name)
+    pub fn set_upstreams_cert_map(&self, mappings: DashMap<String, String>) {
+        self.upstreams_cert_map.clear();
+        for entry in mappings.iter() {
+            let hostname = entry.key().clone();
+            let cert_name = entry.value().clone();
+            self.upstreams_cert_map.insert(hostname.clone(), cert_name.clone());
+            log::info!("Mapped hostname '{}' to certificate '{}'", hostname, cert_name);
+        }
+        log::info!("Set upstreams certificate mappings: {} entries", self.upstreams_cert_map.len());
+    }
+
     fn find_ssl_context(&self, server_name: &str) -> Option<SslContext> {
+        log::debug!("Finding SSL context for server_name: {}", server_name);
+
+        // First, check if there's an upstreams mapping for this hostname
+        if let Some(cert_name) = self.upstreams_cert_map.get(server_name) {
+            let cert_name_str = cert_name.value();
+            log::debug!("Found upstreams mapping: {} -> {}", server_name, cert_name_str);
+            if let Some(ctx) = self.cert_name_map.get(cert_name_str) {
+                log::info!("Using certificate '{}' for hostname '{}' via upstreams mapping", cert_name_str, server_name);
+                return Some(ctx.clone());
+            } else {
+                log::warn!("Certificate '{}' specified in upstreams config for hostname '{}' not found in cert_name_map", cert_name_str, server_name);
+            }
+        } else {
+            log::debug!("No upstreams mapping found for hostname: {}", server_name);
+        }
+
+        // Then, try exact match in name_map (from certificate CN/SAN)
         if let Some(ctx) = self.name_map.get(server_name) {
+            log::debug!("Found certificate via CN/SAN exact match for: {}", server_name);
             return Some(ctx.clone());
         }
+
+        // Try wildcard match from certificate CN/SAN
         for config in &self.configs {
             for name in &config.common_names {
                 if name.starts_with("*.") && server_name.ends_with(&name[1..]) {
+                    log::debug!("Found certificate via CN wildcard match: {} matches {}", server_name, name);
                     return Some(config.ssl_context.clone());
                 }
             }
             for name in &config.alt_names {
                 if name.starts_with("*.") && server_name.ends_with(&name[1..]) {
+                    log::debug!("Found certificate via SAN wildcard match: {} matches {}", server_name, name);
                     return Some(config.ssl_context.clone());
                 }
             }
         }
+
+        log::warn!("No matching certificate found for hostname: {}, will use default certificate", server_name);
         None
     }
 
-    pub fn server_name_callback(&self, ssl_ref: &mut SslRef, ssl_alert: &mut SslAlert) -> Result<(), SniError> {
-        let server_name = ssl_ref.servername(NameType::HOST_NAME);
-        log::debug!("TLS connect: server_name = {:?}, ssl_ref = {:?}, ssl_alert = {:?}", server_name, ssl_ref, ssl_alert);
-        // let start_time = Instant::now();
-        if let Some(name) = server_name {
-            match self.find_ssl_context(name) {
+    pub fn server_name_callback(&self, ssl_ref: &mut SslRef, _ssl_alert: &mut SslAlert) -> Result<(), SniError> {
+        let server_name_opt = ssl_ref.servername(NameType::HOST_NAME);
+        log::info!("TLS server_name_callback invoked: server_name = {:?}", server_name_opt);
+        if let Some(name) = server_name_opt {
+            let name_str = name.to_string();
+            match self.find_ssl_context(&name_str) {
                 Some(ctx) => {
-                    ssl_ref.set_ssl_context(&*ctx).map_err(|_| SniError::ALERT_FATAL)?;
+                    log::info!("Setting SSL context for hostname: {}", name_str);
+                    ssl_ref.set_ssl_context(&*ctx).map_err(|e| {
+                        log::error!("Failed to set SSL context for hostname {}: {:?}", name_str, e);
+                        SniError::ALERT_FATAL
+                    })?;
+                    log::info!("Successfully set SSL context for hostname: {}", name_str);
                 }
                 None => {
-                    log::debug!("No matching server name found");
+                    log::warn!("No matching certificate found for hostname: {}, using default certificate", name_str);
+                    // Don't set a context - let it use the default
                 }
             }
+        } else {
+            log::debug!("No server name (SNI) provided in TLS handshake");
         }
-        // println!("Context  ==> {:?} <==", start_time.elapsed());
         Ok(())
     }
 
@@ -234,6 +330,10 @@ fn create_ssl_context(cert_path: &str, key_path: &str) -> Result<SslContext, Box
         .map_err(|e| format!("Failed to set private key file '{}': {}", key_path, e))?;
 
     ctx.set_alpn_select_callback(prefer_h2);
+
+    // Note: Server name callback needs to be set on the SSL context
+    // However, we need access to the Certificates struct which is not available here
+    // The callback will be set at the TlsSettings level or through a different mechanism
 
     let built = ctx.build();
 

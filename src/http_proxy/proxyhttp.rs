@@ -35,6 +35,7 @@ pub struct LB {
     pub config: Arc<AppConfig>,
     pub extraparams: Arc<ArcSwap<Extraparams>>,
     pub tcp_fingerprint_collector: Option<Arc<crate::utils::tcp_fingerprint::TcpFingerprintCollector>>,
+    pub certificates: Option<Arc<ArcSwap<Option<Arc<crate::utils::tls::Certificates>>>>>,
 }
 
 pub struct Context {

@@ -60,6 +60,8 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
 
     let cfg = Arc::new(maincfg);
 
+    let certificates_arc: Arc<ArcSwap<Option<Arc<tls::Certificates>>>> = Arc::new(ArcSwap::from_pointee(None));
+
     let lb = LB {
         ump_upst: uf_config,
         ump_full: ff_config,
@@ -69,6 +71,7 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
         headers: hh_config,
         extraparams: ec_config,
         tcp_fingerprint_collector: None, // TODO: Pass from main.rs if available
+        certificates: Some(certificates_arc.clone()),
     };
 
     let grade = cfg.proxy_tls_grade.clone().unwrap_or("medium".to_string());
@@ -90,12 +93,10 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
                 crate::utils::tools::watch_folder(certs_path, tx).unwrap();
             });
             let certificate_configs = rx.recv().unwrap();
-            let certificates: Arc<ArcSwap<Option<Arc<tls::Certificates>>>> = Arc::new(ArcSwap::from_pointee(None));
 
-            if let Some(first_set) = tls::Certificates::new(&certificate_configs, grade.as_str()) {
+            if let Some(first_set) = tls::Certificates::new(&certificate_configs, grade.as_str(), cfg.default_certificate.as_ref()) {
                 let first_set_arc: Arc<tls::Certificates> = Arc::new(first_set);
-                certificates.store(Arc::new(Some(first_set_arc.clone()) as Option<Arc<tls::Certificates>>));
-                let _certs_for_callback = certificates.clone();
+                certificates_arc.store(Arc::new(Some(first_set_arc.clone()) as Option<Arc<tls::Certificates>>));
 
                 let default_cert_path = first_set_arc.default_cert_path.clone();
                 let default_key_path = first_set_arc.default_key_path.clone();
@@ -104,10 +105,10 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
                     TlsSettings::intermediate(&default_cert_path, &default_key_path).expect("unable to load or parse cert/key");
 
                 tls::set_tsl_grade(&mut tls_settings, grade.as_str());
-                // Set servername callback through TlsAcceptCallbacks
-                // Note: This requires implementing TlsAccept trait
-                // For now, we'll use the certificate callback mechanism
-                // TODO: Implement proper servername callback through TlsAcceptCallbacks
+                // Set servername callback to use upstreams certificate mappings
+                // The callback is registered through the SSL context in create_ssl_context
+                // We need to ensure certificates are accessible during TLS handshake
+                // For now, the certificate selection will use upstreams mappings via find_ssl_context
                 tls::set_alpn_prefer_h2(&mut tls_settings);
 
                 // Register ClientHello callback to generate fingerprints
@@ -140,10 +141,11 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
                 info!("TLS listener disabled: no certificates found in directory. TLS will be enabled when certificates are added.");
             }
 
-            let certs_for_watcher = certificates.clone();
+            let certs_for_watcher = certificates_arc.clone();
+            let default_cert_for_watcher = cfg.default_certificate.clone();
             thread::spawn(move || {
                 while let Ok(new_configs) = rx.recv() {
-                    let new_certs = tls::Certificates::new(&new_configs, grade.as_str());
+                    let new_certs = tls::Certificates::new(&new_configs, grade.as_str(), default_cert_for_watcher.as_ref());
                     match new_certs {
                         Some(new_certs) => {
                             certs_for_watcher.store(Arc::new(Some(Arc::new(new_certs))));

@@ -89,6 +89,7 @@ pingora-core = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e
 pingora-proxy = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
 pingora-limits = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
 pingora-http = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-memory-cache = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
 mimalloc = { version = "0.1.48", default-features = false }
 dashmap = "7.0.0-rc2"
 ctrlc = "3.5.0"
