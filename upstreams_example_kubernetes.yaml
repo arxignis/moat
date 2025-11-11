@@ -9,7 +9,7 @@ provider: "kubernetes"
 # Global configuration section (new format)
 config:
   # Enable HTTPS proxy redirects globally
-  https_proxy_enabled: false
+  force_https: false
 
   # Enable sticky sessions (session affinity) globally
   sticky_sessions: true
@@ -30,7 +30,7 @@ arxignis_paths:
   # Example: Captcha verification (handled by dedicated service)
   "/cgi-bin/captcha/verify":
     rate_limit: 200
-    https_proxy_enabled: false
+    force_https: false
     ssl_enabled: false
     servers:
       - "127.0.0.1:3001"
@@ -52,7 +52,7 @@ kubernetes:
     - upstream: "http://my-service.default.svc.cluster.local:8080"
       hostname: "api.example.com"
       path: "/"
-      https_proxy_enabled: false
+      force_https: false
       rate_limit: 500
       headers:
         - "X-K8s-Service:my-service"
@@ -62,7 +62,7 @@ kubernetes:
     - upstream: "http://web-service.production.svc.cluster.local:80"
       hostname: "web.example.com"
       path: "/"
-      https_proxy_enabled: true
+      force_https: true
       rate_limit: 1000
       headers:
         - "X-K8s-Service:web-service"

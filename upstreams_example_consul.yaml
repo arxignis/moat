@@ -9,7 +9,7 @@ provider: "consul"
 # Global configuration section (new format)
 config:
   # Enable HTTPS proxy redirects globally
-  https_proxy_enabled: false
+  force_https: false
 
   # Enable sticky sessions (session affinity) globally
   sticky_sessions: true
@@ -29,7 +29,7 @@ arxignis_paths:
   # Example: Captcha verification endpoint
   "/cgi-bin/captcha/verify":
     rate_limit: 200
-    https_proxy_enabled: false
+    force_https: false
     ssl_enabled: false
     servers:
       - "127.0.0.1:3001"
@@ -51,7 +51,7 @@ consul:
     - upstream: "http://service-name.service.consul:8080"
       hostname: "api.example.com"
       path: "/"
-      https_proxy_enabled: false
+      force_https: false
       rate_limit: 500
       headers:
         - "X-Service-Name:api"
@@ -60,7 +60,7 @@ consul:
     - upstream: "http://web-service.service.consul:80"
       hostname: "web.example.com"
       path: "/"
-      https_proxy_enabled: true
+      force_https: true
       rate_limit: 1000
       headers:
         - "X-Service-Name:web"

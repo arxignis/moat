@@ -40,8 +40,6 @@ pub struct LB {
 
 pub struct Context {
     backend_id: String,
-    https_proxy_enabled: bool,
-    redirect_to: String,
     start_time: Instant,
     upstream_start_time: Option<Instant>,
     hostname: Option<String>,
@@ -62,8 +60,6 @@ impl ProxyHttp for LB {
     fn new_ctx(&self) -> Self::CTX {
         Context {
             backend_id: String::new(),
-            https_proxy_enabled: false,
-            redirect_to: String::new(),
             start_time: Instant::now(),
             upstream_start_time: None,
             hostname: None,
@@ -306,6 +302,23 @@ impl ProxyHttp for LB {
                 match optioninnermap {
                     None => return Ok(false),
                     Some(ref innermap) => {
+                        // Check for HTTPS redirect before rate limiting
+                        if ep.https_proxy_enabled.unwrap_or(false) || innermap.https_proxy_enabled {
+                            if let Some(stream) = session.stream() {
+                                if stream.get_ssl().is_none() {
+                                    // HTTP request - redirect to HTTPS
+                                    let uri = session.req_header().uri.path_and_query().map_or("/", |pq| pq.as_str());
+                                    let port = self.config.proxy_port_tls.unwrap_or(403);
+                                    let redirect_url = format!("https://{}:{}{}", host, port, uri);
+                                    let mut redirect_response = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
+                                    redirect_response.insert_header("Location", redirect_url)?;
+                                    redirect_response.insert_header("Content-Length", "0")?;
+                                    session.set_keepalive(None);
+                                    session.write_response_header(Box::new(redirect_response), false).await?;
+                                    return Ok(true);
+                                }
+                            }
+                        }
                         if let Some(rate) = innermap.rate_limit.or(ep.rate_limit) {
                             // let rate_key = session.client_addr().and_then(|addr| addr.as_inet()).map(|inet| inet.ip().to_string()).unwrap_or_else(|| host.to_string());
                             let rate_key = session.client_addr().and_then(|addr| addr.as_inet()).map(|inet| inet.ip());
@@ -405,20 +418,6 @@ impl ProxyHttp for LB {
                             peer.sni = hostname.clone();
                             peer.options.verify_cert = false;
                             peer.options.verify_hostname = false;
-                        }
-                        if ctx.https_proxy_enabled || innermap.https_proxy_enabled {
-                            if let Some(stream) = session.stream() {
-                                if stream.get_ssl().is_none() {
-                                    if let Some(addr) = session.server_addr() {
-                                        if let Some((host, _)) = addr.to_string().split_once(':') {
-                                            let uri = session.req_header().uri.path_and_query().map_or("/", |pq| pq.as_str());
-                                            let port = self.config.proxy_port_tls.unwrap_or(403);
-                                            ctx.https_proxy_enabled = true;
-                                            ctx.redirect_to = format!("https://{}:{}{}", host, port, uri);
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         ctx.backend_id = format!("{}:{}:{}", innermap.address.clone(), innermap.port.clone(), innermap.ssl_enabled);
@@ -576,12 +575,6 @@ impl ProxyHttp for LB {
             if let Some(bid) = self.ump_byid.get(&backend_id) {
                 let _ = _upstream_response.insert_header("set-cookie", format!("backend_id={}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax", bid.address));
             }
-        }
-        if ctx.https_proxy_enabled {
-            let mut redirect_response = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
-            redirect_response.insert_header("Location", ctx.redirect_to.clone())?;
-            redirect_response.insert_header("Content-Length", "0")?;
-            session.write_response_header(Box::new(redirect_response), false).await?;
         }
         match ctx.hostname.as_ref() {
             Some(host) => {
