@@ -91,6 +91,22 @@ pub struct RedisConfig {
     pub url: String,
     #[serde(default)]
     pub prefix: String,
+    /// Redis SSL/TLS configuration
+    #[serde(default)]
+    pub ssl: Option<RedisSslConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisSslConfig {
+    /// Path to CA certificate file (PEM format)
+    pub ca_cert_path: Option<String>,
+    /// Path to client certificate file (PEM format, optional)
+    pub client_cert_path: Option<String>,
+    /// Path to client private key file (PEM format, optional)
+    pub client_key_path: Option<String>,
+    /// Skip certificate verification (for testing with self-signed certs)
+    #[serde(default)]
+    pub insecure: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -191,6 +207,7 @@ impl Config {
             redis: RedisConfig {
                 url: "redis://127.0.0.1/0".to_string(),
                 prefix: "ax:moat".to_string(),
+                ssl: None,
             },
             network: NetworkConfig {
                 iface: "eth0".to_string(),
@@ -341,6 +358,56 @@ impl Config {
         }
         if let Ok(val) = env::var("AX_REDIS_PREFIX") {
             self.redis.prefix = val;
+        }
+
+        // Redis SSL configuration overrides
+        if let Ok(val) = env::var("AX_REDIS_SSL_CA_CERT_PATH") {
+            if self.redis.ssl.is_none() {
+                self.redis.ssl = Some(RedisSslConfig {
+                    ca_cert_path: Some(val),
+                    client_cert_path: None,
+                    client_key_path: None,
+                    insecure: false,
+                });
+            } else {
+                self.redis.ssl.as_mut().unwrap().ca_cert_path = Some(val);
+            }
+        }
+        if let Ok(val) = env::var("AX_REDIS_SSL_CLIENT_CERT_PATH") {
+            if self.redis.ssl.is_none() {
+                self.redis.ssl = Some(RedisSslConfig {
+                    ca_cert_path: None,
+                    client_cert_path: Some(val),
+                    client_key_path: None,
+                    insecure: false,
+                });
+            } else {
+                self.redis.ssl.as_mut().unwrap().client_cert_path = Some(val);
+            }
+        }
+        if let Ok(val) = env::var("AX_REDIS_SSL_CLIENT_KEY_PATH") {
+            if self.redis.ssl.is_none() {
+                self.redis.ssl = Some(RedisSslConfig {
+                    ca_cert_path: None,
+                    client_cert_path: None,
+                    client_key_path: Some(val),
+                    insecure: false,
+                });
+            } else {
+                self.redis.ssl.as_mut().unwrap().client_key_path = Some(val);
+            }
+        }
+        if let Ok(val) = env::var("AX_REDIS_SSL_INSECURE") {
+            if self.redis.ssl.is_none() {
+                self.redis.ssl = Some(RedisSslConfig {
+                    ca_cert_path: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                    insecure: val.parse().unwrap_or(false),
+                });
+            } else {
+                self.redis.ssl.as_mut().unwrap().insecure = val.parse().unwrap_or(false);
+            }
         }
 
         // Network configuration overrides
@@ -719,5 +786,186 @@ impl PingoraConfig {
         }
 
         app_config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_redis_ssl_config_deserialize() {
+        let yaml = r#"
+ca_cert_path: "/path/to/ca.crt"
+client_cert_path: "/path/to/client.crt"
+client_key_path: "/path/to/client.key"
+insecure: true
+"#;
+        let config: RedisSslConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.ca_cert_path, Some("/path/to/ca.crt".to_string()));
+        assert_eq!(config.client_cert_path, Some("/path/to/client.crt".to_string()));
+        assert_eq!(config.client_key_path, Some("/path/to/client.key".to_string()));
+        assert!(config.insecure);
+    }
+
+    #[test]
+    fn test_redis_ssl_config_deserialize_minimal() {
+        let yaml = r#"
+insecure: false
+"#;
+        let config: RedisSslConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.ca_cert_path, None);
+        assert_eq!(config.client_cert_path, None);
+        assert_eq!(config.client_key_path, None);
+        assert!(!config.insecure);
+    }
+
+    #[test]
+    fn test_redis_config_with_ssl() {
+        let yaml = r#"
+url: "rediss://localhost:6379"
+prefix: "test:prefix"
+ssl:
+  ca_cert_path: "/path/to/ca.crt"
+  insecure: false
+"#;
+        let config: RedisConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.url, "rediss://localhost:6379");
+        assert_eq!(config.prefix, "test:prefix");
+        assert!(config.ssl.is_some());
+        let ssl = config.ssl.unwrap();
+        assert_eq!(ssl.ca_cert_path, Some("/path/to/ca.crt".to_string()));
+        assert!(!ssl.insecure);
+    }
+
+    #[test]
+    fn test_redis_config_without_ssl() {
+        let yaml = r#"
+url: "redis://localhost:6379"
+prefix: "test:prefix"
+"#;
+        let config: RedisConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.url, "redis://localhost:6379");
+        assert_eq!(config.prefix, "test:prefix");
+        assert!(config.ssl.is_none());
+    }
+
+    #[test]
+    fn test_redis_config_default() {
+        let config = RedisConfig::default();
+        assert_eq!(config.url, "");
+        assert_eq!(config.prefix, "");
+        assert!(config.ssl.is_none());
+    }
+
+    #[test]
+    fn test_apply_env_overrides_redis_ssl_ca_cert() {
+        let mut config = Config::default();
+        unsafe {
+            env::set_var("AX_REDIS_SSL_CA_CERT_PATH", "/test/ca.crt");
+        }
+
+        config.apply_env_overrides();
+
+        assert!(config.redis.ssl.is_some());
+        assert_eq!(config.redis.ssl.as_ref().unwrap().ca_cert_path, Some("/test/ca.crt".to_string()));
+
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_CA_CERT_PATH");
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_redis_ssl_client_cert() {
+        let mut config = Config::default();
+        unsafe {
+            env::set_var("AX_REDIS_SSL_CLIENT_CERT_PATH", "/test/client.crt");
+            env::set_var("AX_REDIS_SSL_CLIENT_KEY_PATH", "/test/client.key");
+        }
+
+        config.apply_env_overrides();
+
+        assert!(config.redis.ssl.is_some());
+        let ssl = config.redis.ssl.as_ref().unwrap();
+        assert_eq!(ssl.client_cert_path, Some("/test/client.crt".to_string()));
+        assert_eq!(ssl.client_key_path, Some("/test/client.key".to_string()));
+
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_CLIENT_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_KEY_PATH");
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_redis_ssl_insecure() {
+        let mut config = Config::default();
+        unsafe {
+            env::set_var("AX_REDIS_SSL_INSECURE", "true");
+        }
+
+        config.apply_env_overrides();
+
+        assert!(config.redis.ssl.is_some());
+        assert!(config.redis.ssl.as_ref().unwrap().insecure);
+
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_INSECURE");
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_redis_ssl_insecure_false() {
+        let mut config = Config::default();
+        unsafe {
+            env::set_var("AX_REDIS_SSL_INSECURE", "false");
+        }
+
+        config.apply_env_overrides();
+
+        assert!(config.redis.ssl.is_some());
+        assert!(!config.redis.ssl.as_ref().unwrap().insecure);
+
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_INSECURE");
+        }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_redis_ssl_combined() {
+        let mut config = Config::default();
+        unsafe {
+            env::set_var("AX_REDIS_SSL_CA_CERT_PATH", "/test/ca.crt");
+            env::set_var("AX_REDIS_SSL_CLIENT_CERT_PATH", "/test/client.crt");
+            env::set_var("AX_REDIS_SSL_CLIENT_KEY_PATH", "/test/client.key");
+            env::set_var("AX_REDIS_SSL_INSECURE", "true");
+        }
+
+        config.apply_env_overrides();
+
+        assert!(config.redis.ssl.is_some());
+        let ssl = config.redis.ssl.as_ref().unwrap();
+        assert_eq!(ssl.ca_cert_path, Some("/test/ca.crt".to_string()));
+        assert_eq!(ssl.client_cert_path, Some("/test/client.crt".to_string()));
+        assert_eq!(ssl.client_key_path, Some("/test/client.key".to_string()));
+        assert!(ssl.insecure);
+
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_CA_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_KEY_PATH");
+            env::remove_var("AX_REDIS_SSL_INSECURE");
+        }
+    }
+
+    #[test]
+    fn test_redis_ssl_config_default_insecure() {
+        let config = RedisSslConfig {
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+            insecure: false,
+        };
+        assert!(!config.insecure);
     }
 }
