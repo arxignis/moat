@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "moat"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "arc-swap",
