@@ -29,6 +29,17 @@ redis:
   # Namespace prefix for Redis ACME cache entries
   prefix: "ax:moat"
 
+  # Redis SSL/TLS configuration (optional)
+  # ssl:
+  #   # Path to CA certificate file (PEM format)
+  #   ca_cert_path: "/path/to/ca.crt"
+  #   # Path to client certificate file (PEM format, optional, for mutual TLS)
+  #   client_cert_path: "/path/to/client.crt"
+  #   # Path to client private key file (PEM format, optional, for mutual TLS)
+  #   client_key_path: "/path/to/client.key"
+  #   # Skip certificate verification (for testing with self-signed certs)
+  #   insecure: false
+
 # Network Configuration
 network:
   # The network interface to attach the XDP program to

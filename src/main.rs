@@ -297,7 +297,7 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     log::info!("Checking Redis configuration: url is_empty={}", config.redis.url.is_empty());
     if !config.redis.url.is_empty() {
         log::info!("Initializing Redis manager with URL: {} (prefix: {})", config.redis.url, config.redis.prefix);
-        if let Err(e) = redis::RedisManager::init(&config.redis.url, config.redis.prefix.clone()).await {
+        if let Err(e) = redis::RedisManager::init(&config.redis.url, config.redis.prefix.clone(), config.redis.ssl.as_ref()).await {
             log::warn!("Failed to initialize Redis manager: {}", e);
         } else {
             log::info!("Redis manager initialized successfully");
