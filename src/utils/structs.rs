@@ -14,7 +14,7 @@ pub struct ServiceMapping {
     pub hostname: String,
     pub path: Option<String>,
     #[serde(default)]
-    pub https_proxy_enabled: Option<bool>,
+    pub force_https: Option<bool>,
     pub rate_limit: Option<isize>,
     pub headers: Option<Vec<String>>,
 }
@@ -98,7 +98,7 @@ pub struct HostConfig {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PathConfig {
     pub servers: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "force_https")]
     pub https_proxy_enabled: Option<bool>,
     #[serde(default)]
     pub ssl_enabled: Option<bool>,

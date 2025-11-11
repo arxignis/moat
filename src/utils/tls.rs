@@ -98,7 +98,7 @@ impl TlsAccept for Certificates {
             if let Err(e) = ssl.set_ssl_context(&*ctx) {
                 log::error!("TlsAccept: Failed to set default SSL context: {:?}", e);
             } else {
-                log::info!("TlsAccept: Using default certificate");
+                log::debug!("TlsAccept: Using default certificate");
             }
         } else {
             log::error!("TlsAccept: No certificates available!");

@@ -10,7 +10,7 @@ provider: "file"
 # Global configuration section (new format)
 config:
   # Enable HTTPS proxy redirects globally
-  https_proxy_enabled: false
+  force_https: false
 
   # Enable sticky sessions (session affinity) globally
   sticky_sessions: false
@@ -41,14 +41,14 @@ arxignis_paths:
   # Example: Captcha verification endpoint (handled by dedicated service)
   "/cgi-bin/captcha/verify":
     rate_limit: 200
-    https_proxy_enabled: false
+    force_https: false
     ssl_enabled: false
     servers:
       - "127.0.0.1:3001"
 
   "/.well-known/acme-challenge/":
     rate_limit: 200
-    https_proxy_enabled: false
+    force_https: false
     ssl_enabled: false
     servers:
       - "127.0.0.1:3001"
@@ -67,7 +67,7 @@ upstreams:
         rate_limit: 200
 
         # Enable HTTPS redirect for this path (overrides global setting)
-        https_proxy_enabled: false
+        force_https: false
         ssl_enabled: true
         http2_enabled: true
 
@@ -90,7 +90,7 @@ upstreams:
       # API root path
       "/":
         rate_limit: 500
-        https_proxy_enabled: true
+        force_https: true
         headers:
           - "X-API-Version:v1"
         servers:
@@ -100,7 +100,7 @@ upstreams:
       # Health check endpoint (no rate limit)
       "/health":
         rate_limit: 1000
-        https_proxy_enabled: false
+        force_https: false
         headers:
           - "Cache-Control:no-cache"
         servers:
@@ -109,7 +109,7 @@ upstreams:
       # Admin endpoint with higher rate limit
       "/admin":
         rate_limit: 50
-        https_proxy_enabled: true
+        force_https: true
         headers:
           - "X-Admin-Access:true"
         servers:
@@ -120,7 +120,7 @@ upstreams:
     paths:
       "/":
         rate_limit: 100
-        https_proxy_enabled: false
+        force_https: false
         # Enable health checks for this path
         healthcheck: true
         headers:
@@ -137,7 +137,7 @@ upstreams:
     paths:
       "/":
         # Path inherits host-level rate limit (1000)
-        https_proxy_enabled: true
+        force_https: true
         headers:
           - "X-High-Traffic:true"
         servers:
@@ -148,7 +148,7 @@ upstreams:
       "/static":
         # Override host-level rate limit for static content
         rate_limit: 2000
-        https_proxy_enabled: true
+        force_https: true
         headers:
           - "Cache-Control:public, max-age=31536000"
         servers:
