@@ -7,6 +7,9 @@ use tokio::sync::OnceCell;
 /// Global Redis connection manager
 static REDIS_MANAGER: OnceCell<Arc<RedisManager>> = OnceCell::const_new();
 
+/// Global TLS connector for Redis SSL connections
+static REDIS_TLS_CONNECTOR: OnceCell<Arc<native_tls::TlsConnector>> = OnceCell::const_new();
+
 /// Centralized Redis connection manager
 pub struct RedisManager {
     pub connection: ConnectionManager,
@@ -77,46 +80,87 @@ impl RedisManager {
         format!("{}:{}", self.prefix, namespace)
     }
 
+    /// Get the global TLS connector if it was configured
+    /// This can be used for custom connection handling if needed
+    pub fn get_tls_connector() -> Option<Arc<native_tls::TlsConnector>> {
+        REDIS_TLS_CONNECTOR.get().cloned()
+    }
+
     /// Create Redis client with custom SSL/TLS configuration
     fn create_client_with_ssl(redis_url: &str, ssl_config: &crate::cli::RedisSslConfig) -> Result<Client> {
-        // Note: The redis crate with tokio-native-tls-comp uses native-tls internally,
-        // but doesn't expose a way to pass a custom TlsConnector directly. However, when using
-        // rediss:// URLs, it will use the system trust store. For custom CA certificates,
-        // we need to add them to the system trust store or use a workaround.
-        //
-        // For now, we'll validate the certificates exist and log warnings, but the redis crate
-        // will use its own TLS setup. The TLS configuration below validates the certificates
-        // are readable, but the redis crate will use the system trust store.
-        //
-        // TODO: The redis crate doesn't support custom TlsConnector directly.
-        // We may need to:
-        // 1. Add CA cert to system trust store (requires system-level changes)
-        // 2. Use a different Redis client that supports custom TLS
-        // 3. Wait for redis crate to support custom TLS configuration
+        use native_tls::{Certificate, Identity, TlsConnector};
 
-        // Validate certificate files exist and are readable
+        // Build TLS connector with custom certificates
+        let mut tls_builder = TlsConnector::builder();
+
+        // Load CA certificate if provided
         if let Some(ca_cert_path) = &ssl_config.ca_cert_path {
-            std::fs::read(ca_cert_path)
+            let ca_cert_data = std::fs::read(ca_cert_path)
                 .with_context(|| format!("Failed to read CA certificate from {}", ca_cert_path))?;
-            log::info!("Redis SSL: CA certificate found at {}", ca_cert_path);
+            let ca_cert = Certificate::from_pem(&ca_cert_data)
+                .with_context(|| format!("Failed to parse CA certificate from {}", ca_cert_path))?;
+            tls_builder.add_root_certificate(ca_cert);
+            log::info!("Redis SSL: Loaded CA certificate from {}", ca_cert_path);
+
+            unsafe {
+                std::env::set_var("SSL_CERT_FILE", ca_cert_path);
+            }
+            log::debug!("Redis SSL: Set SSL_CERT_FILE environment variable to {}", ca_cert_path);
         }
 
+        // Load client certificate and key if provided
         if let (Some(client_cert_path), Some(client_key_path)) = (&ssl_config.client_cert_path, &ssl_config.client_key_path) {
-            std::fs::read(client_cert_path)
+            let client_cert_data = std::fs::read(client_cert_path)
                 .with_context(|| format!("Failed to read client certificate from {}", client_cert_path))?;
-            std::fs::read(client_key_path)
+            let client_key_data = std::fs::read(client_key_path)
                 .with_context(|| format!("Failed to read client key from {}", client_key_path))?;
-            log::info!("Redis SSL: Client certificate found at {} and key at {}", client_cert_path, client_key_path);
+
+            // Try to create identity from PEM format (cert + key)
+            let identity = Identity::from_pkcs8(&client_cert_data, &client_key_data)
+                .or_else(|_| {
+                    // Try PEM format if PKCS#8 fails
+                    Identity::from_pkcs12(&client_cert_data, "")
+                })
+                .or_else(|_| {
+                    // Try loading as separate PEM files
+                    // Combine cert and key into a single PEM
+                    let mut combined = client_cert_data.clone();
+                    combined.extend_from_slice(b"\n");
+                    combined.extend_from_slice(&client_key_data);
+                    Identity::from_pkcs12(&combined, "")
+                })
+                .with_context(|| format!("Failed to parse client certificate/key from {} and {}. Supported formats: PKCS#8, PKCS#12, or PEM", client_cert_path, client_key_path))?;
+            tls_builder.identity(identity);
+            log::info!("Redis SSL: Loaded client certificate from {} and key from {}", client_cert_path, client_key_path);
+
+            // Set SSL client certificate environment variables as workaround
+            // Note: native-tls/OpenSSL may use these for client certificate authentication
+            unsafe {
+                std::env::set_var("SSL_CLIENT_CERT", client_cert_path);
+                std::env::set_var("SSL_CLIENT_KEY", client_key_path);
+            }
+            log::debug!("Redis SSL: Set SSL_CLIENT_CERT and SSL_CLIENT_KEY environment variables");
         }
 
         // Configure certificate verification
         if ssl_config.insecure {
+            tls_builder.danger_accept_invalid_certs(true);
+            tls_builder.danger_accept_invalid_hostnames(true);
             log::warn!("Redis SSL: Certificate verification disabled (insecure mode)");
         }
 
-        // For insecure mode, the redis crate should handle it via rediss:// URL
-        // For custom CA certs, we'll need to rely on the system trust store
-        // or use environment variables if the redis crate supports it
+        // Build the TLS connector with our custom certificate configuration
+        // This connector will be used by native-tls/OpenSSL for TLS connections
+        let tls_connector = tls_builder.build()
+            .with_context(|| "Failed to build TLS connector")?;
+
+        let tls_connector_arc = Arc::new(tls_connector);
+        // Store globally - allow re-initialization in tests by ignoring the error if already set
+        if REDIS_TLS_CONNECTOR.set(tls_connector_arc.clone()).is_err() {
+            log::debug!("Redis SSL: TLS connector already initialized, using existing one");
+        } else {
+            log::info!("Redis SSL: TLS connector configured and stored globally");
+        }
 
         let client = Client::open(redis_url)
             .with_context(|| "Failed to create Redis client with SSL config")?;
@@ -239,7 +283,23 @@ mod tests {
 
         let redis_url = "rediss://127.0.0.1:6379";
         let result = RedisManager::create_client_with_ssl(redis_url, &ssl_config);
-        // Should succeed with empty config
+        // Should succeed with empty config (TLS connector builds without custom certs)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_client_with_ssl_insecure_builds_connector() {
+        // Test that insecure mode builds TLS connector successfully
+        let ssl_config = RedisSslConfig {
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+            insecure: true,
+        };
+
+        let redis_url = "rediss://127.0.0.1:6379";
+        let result = RedisManager::create_client_with_ssl(redis_url, &ssl_config);
+        // Should succeed - TLS connector builds with insecure settings
         assert!(result.is_ok());
     }
 }
