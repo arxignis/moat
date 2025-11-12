@@ -183,3 +183,42 @@ daemon:
   # Change ownership of PID file to daemon user/group
   chown_pid_file: true
 
+# Pingora Proxy System Configuration (old proxy system for upstreams)
+# These settings enable the pingora-based proxy with multiple upstreams
+pingora:
+  # Pingora HTTP proxy bind address
+  proxy_address_http: "0.0.0.0:80"
+
+  # Optional: Pingora TLS proxy bind address
+  proxy_address_tls: "0.0.0.0:443"
+
+  # Mandatory if proxy_address_tls is set (cert files: {NAME}.crt, {NAME}.key)
+  proxy_certificates: "/root/moat/certs"
+
+  # TLS suite grade (high, medium, unsafe)
+  proxy_tls_grade: "medium"
+
+  # Default fallback SSL certificate name (file stem without extension, e.g., "default" for default.crt)
+  # If not specified, the first valid certificate will be used as default
+  default_certificate: "default"
+
+  # Path to upstreams configuration file
+  upstreams_conf: "/root/moat/upstreams.yaml"
+
+  # HTTP API address for remote config updates
+  config_address: "0.0.0.0:3000"
+
+  # Enable remote config push capability
+  config_api_enabled: false
+
+  # Master key for API access
+  master_key: "00000000-0000-0000-0000-000000000000"
+
+  # Log level for old proxy system
+  log_level: "info"
+
+  # Health check method (HEAD, GET, POST)
+  healthcheck_method: "HEAD"
+
+  # Health check interval in seconds
+  healthcheck_interval: 2

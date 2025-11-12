@@ -1,0 +1,52 @@
+provider: "file"
+config:
+  https_proxy_enabled: false
+  sticky_sessions: false
+  global_rate_limit: 100
+  global_headers: []
+
+arxignis_paths:
+  "/cgi-bin/captcha/verify":
+    rate_limit: 200
+    https_proxy_enabled: false
+    ssl_enabled: false
+    servers:
+      - "127.0.0.1:3001"
+
+  "/.well-known/acme-challenge/*":
+    rate_limit: 200
+    https_proxy_enabled: false
+    ssl_enabled: false
+    servers:
+      - "127.0.0.1:8888"
+
+upstreams:
+  vhid.developnet.hu:
+    certificate: "developnet.hu"
+    paths:
+      "/":
+        rate_limit: 200
+        https_proxy_enabled: false
+        ssl_enabled: false
+        servers:
+          - "127.0.0.1:8080"
+
+  doktorszekelyagnes.hu:
+    certificate: "doktorszekelyagnes.hu"
+    paths:
+      "/":
+        rate_limit: 200
+        https_proxy_enabled: false
+        ssl_enabled: true
+        servers:
+          - "127.0.0.1:8080"
+
+  konferencia.vhid.hu:
+    certificate: "konferencia.vhid.hu"
+    paths:
+      "/":
+        rate_limit: 200
+        https_proxy_enabled: false
+        ssl_enabled: true
+        servers:
+          - "127.0.0.1:8080"

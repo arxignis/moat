@@ -39,7 +39,9 @@ mkdir -p /var/log/moat /var/run/moat /var/lib/moat /etc/moat
 # Create config file
 echo "Creating config file..."
 curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/config_example.yaml -o /etc/moat/config.yaml
-chmod 644 /etc/moat/config.yaml
+chmod 640 /etc/moat/config.yaml
+curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/${BRANCH}/upstreams_example.yaml -o /etc/moat/upstreams.yaml
+chmod 644 /etc/moat/upstreams.yaml
 
 # Enable and start service
 echo "Enabling and starting service..."
