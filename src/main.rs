@@ -264,34 +264,99 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     });
     info!("Captcha verification server started on 127.0.0.1:3001");
 
+    // Create shutdown channel early so it can be used by both Pingora and native server
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Start the old Pingora proxy system in a separate thread (non-blocking)
     // Only start if mode is "proxy" (disabled in agent mode)
     if config.mode == "proxy" {
-        let bpf_stats_config = config.bpf_stats.clone();
-        let logging_config = config.logging.clone();
-        let arxignis_config = config.arxignis.clone();
-        let network_config = config.network.clone();
-        let tcp_fingerprint_config = config.tcp_fingerprint.clone();
-        let pingora_config = config.pingora.clone();
-        std::thread::spawn(move || {
-            http_proxy::start::run_with_config(Some(crate::cli::Config {
-                mode: "proxy".to_string(),
-                redis: Default::default(),
-                network: network_config,
-                arxignis: arxignis_config,
-                content_scanning: Default::default(),
-                logging: logging_config,
-                bpf_stats: bpf_stats_config,
-                tcp_fingerprint: tcp_fingerprint_config,
-                daemon: Default::default(),
-                pingora: pingora_config,
-            }));
-        });
+        // Check if we should use Pingora or native HTTP server
+        if !config.pingora.proxy_address_http.is_empty() {
+            // Start Pingora proxy
+            let bpf_stats_config = config.bpf_stats.clone();
+            let logging_config = config.logging.clone();
+            let arxignis_config = config.arxignis.clone();
+            let network_config = config.network.clone();
+            let tcp_fingerprint_config = config.tcp_fingerprint.clone();
+            let pingora_config = config.pingora.clone();
+            std::thread::spawn(move || {
+                http_proxy::start::run_with_config(Some(crate::cli::Config {
+                    mode: "proxy".to_string(),
+                    redis: Default::default(),
+                    network: network_config,
+                    arxignis: arxignis_config,
+                    content_scanning: Default::default(),
+                    logging: logging_config,
+                    bpf_stats: bpf_stats_config,
+                    tcp_fingerprint: tcp_fingerprint_config,
+                    daemon: Default::default(),
+                    pingora: pingora_config,
+                }));
+            });
+        } else if !config.pingora.native_http_bind.is_empty() && !config.pingora.native_http_upstream.is_empty() {
+            // Start native HTTP server with PROXY protocol support
+            log::info!("Starting native HTTP server on {} -> {}", config.pingora.native_http_bind, config.pingora.native_http_upstream);
+            log::info!("Native HTTP server PROXY protocol: {}", if config.pingora.proxy_protocol_enabled { "enabled" } else { "disabled" });
+            
+            let bind_addr = config.pingora.native_http_bind.clone();
+            let upstream = config.pingora.native_http_upstream.clone();
+            let proxy_protocol_enabled = config.pingora.proxy_protocol_enabled;
+            let skels_clone = state.skels.clone();
+            let tcp_collector = state.tcp_fingerprint_collector.clone();
+            
+            tokio::spawn(async move {
+                use crate::http::{run_http_proxy, ProxyContext};
+                use hyper::client::HttpConnector;
+                use hyper::body::Bytes;
+                use http_body_util::Full;
+                use hyper_util::client::legacy::Client;
+                
+                // Parse upstream URI
+                let upstream_uri: hyper::Uri = match upstream.parse() {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        log::error!("Failed to parse upstream URI '{}': {}", upstream, e);
+                        return;
+                    }
+                };
+                
+                // Create HTTP client
+                let client: Client<HttpConnector, Full<Bytes>> = Client::builder(hyper_util::rt::TokioExecutor::new()).build_http();
+                
+                // Create proxy context
+                let ctx = std::sync::Arc::new(ProxyContext {
+                    client,
+                    upstream: upstream_uri,
+                    domain_filter: crate::domain_filter::DomainFilter::new(vec![]),
+                    tls_only: false,
+                    proxy_protocol_enabled,
+                    proxy_protocol_timeout_ms: 5000,
+                    tcp_fingerprint_collector: tcp_collector,
+                });
+                
+                // Bind TCP listener
+                let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("Failed to bind native HTTP server to {}: {}", bind_addr, e);
+                        return;
+                    }
+                };
+                
+                log::info!("Native HTTP server listening on {}", bind_addr);
+                
+                // Run the server
+                if let Err(e) = run_http_proxy(listener, ctx, skels_clone, shutdown_rx.clone()).await {
+                    log::error!("Native HTTP server error: {}", e);
+                }
+            });
+        } else {
+            log::warn!("Proxy mode enabled but neither Pingora nor native HTTP server is configured");
+            log::warn!("Set pingora.proxy_address_http for Pingora or pingora.native_http_bind + pingora.native_http_upstream for native server");
+        }
     } else {
         log::info!("Pingora proxy system disabled (mode: {})", config.mode);
     }
-
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Initialize Redis manager if Redis URL is provided
     log::info!("Checking Redis configuration: url is_empty={}", config.redis.url.is_empty());
