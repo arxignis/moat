@@ -745,7 +745,16 @@ pub struct PingoraConfig {
     pub healthcheck_method: String,
     #[serde(default = "default_pingora_healthcheck_interval")]
     pub healthcheck_interval: u16,
+    // Native HTTP server configuration (used when proxy_address_http is empty)
+    #[serde(default)]
+    pub native_http_bind: String,
+    #[serde(default)]
+    pub native_http_upstream: String,
+    #[serde(default = "default_proxy_protocol_enabled")]
+    pub proxy_protocol_enabled: bool,
 }
+
+fn default_proxy_protocol_enabled() -> bool { true }
 
 fn default_pingora_tls_grade() -> String { "medium".to_string() }
 fn default_pingora_config_api_enabled() -> bool { true }
