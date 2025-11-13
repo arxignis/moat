@@ -252,9 +252,8 @@ async fn handle_proxy_protocol_connection(
     peer_addr: std::net::SocketAddr,
     lb: LB,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use pingora_proxy::Session;
-    use pingora_core::protocols::http::v1::server::HttpSession;
-    use pingora_core::protocols::http::ServerSession;
+    use pingora_proxy::{Session, ProxyHttp};
+    use pingora_core::Result as PingoraResult;
     
     // Convert tokio TcpStream to Pingora Stream
     let mut stream: Stream = tcp_stream.into();
@@ -264,18 +263,57 @@ async fn handle_proxy_protocol_connection(
     
     info!("Processing HTTP request from {} (via {})", real_client_addr, peer_addr);
     
-    // Create HTTP/1.1 session from the cleaned stream
-    // The stream now has the PROXY header consumed, ready for HTTP parsing
-    let http_stream = Box::new(HttpSession::new(stream));
-    let server_session = ServerSession::new_http1(http_stream);
+    // Create a Pingora Session from the cleaned stream
+    // The stream now has the PROXY header consumed and is ready for HTTP parsing
+    let mut session = Session::new_h1(stream);
     
-    // Create a Pingora session with the real client address
-    let mut session = Session::new_http1(server_session, real_client_addr);
+    // Override the client address with the real address from PROXY header
+    // This ensures logging and security features use the correct client IP
+    session.set_client_addr(real_client_addr);
     
-    // Process the request through Pingora's ProxyHttp handler
-    match pingora_proxy::proxy_http_handler(&lb, &mut session).await {
+    // Create context for the request
+    let mut ctx = lb.new_ctx();
+    
+    // Process the request through ProxyHttp trait methods
+    let result: PingoraResult<bool> = async {
+        // Handle the request phases
+        if lb.request_filter(&mut session, &mut ctx).await? {
+            return Ok(true); // Early return if request_filter says to stop
+        }
+        
+        // Get upstream peer
+        let peer = lb.upstream_peer(&mut session, &mut ctx).await?;
+        
+        // Connect to upstream
+        let mut upstream_session = lb.connect_to_upstream(&mut session, &peer, &mut ctx).await?;
+        
+        // Handle upstream request
+        lb.upstream_request_filter(&mut session, &mut upstream_session, &mut ctx).await?;
+        
+        // Send request to upstream
+        session.write_upstream_request_header(&mut upstream_session, true).await?;
+        
+        // Handle request body if present
+        lb.request_body_filter(&mut session, &mut None, true, &mut ctx).await?;
+        
+        // Read upstream response
+        lb.upstream_response_filter(&mut session, &mut upstream_session, &mut ctx).await?;
+        
+        // Send response to client
+        session.write_response_header_to_client(&mut upstream_session).await?;
+        
+        // Handle response body
+        lb.response_body_filter(&mut session, &mut None, true, &mut ctx).await?;
+        
+        // Finish request
+        lb.logging(&mut session, &upstream_session, &mut ctx).await;
+        
+        Ok(false)
+    }.await;
+    
+    match result {
         Ok(_) => debug!("Request processed successfully for {}", real_client_addr),
-        Err(e) => warn!("Error processing request for {}: {}", real_client_addr, e),
+        Err(e) => warn!("Error processing request for {}: {:?}", real_client_addr, e),
     }
     
     Ok(())
