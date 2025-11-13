@@ -11,13 +11,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
-/// Start the captcha verification server on port 3001
+/// Start the captcha verification server on port 9181
 pub async fn start_captcha_server() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/cgi-bin/captcha/verify", post(handle_captcha_verification))
         .route("/health", get(health_check));
 
-    let addr = "127.0.0.1:3001";
+    let addr = "127.0.0.1:9181";
     let listener = TcpListener::bind(addr).await?;
     info!("Starting captcha verification server on: {}", addr);
 

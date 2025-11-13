@@ -39,7 +39,7 @@ impl RedisManager {
             Self::create_client_with_ssl(&redis_url, ssl_config)?
         } else {
             // Use default client (will handle rediss:// URLs automatically)
-            Client::open(&redis_url)
+            Client::open(redis_url)
                 .context("Failed to create Redis client")?
         };
 

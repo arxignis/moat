@@ -35,10 +35,11 @@ pub mod bpf_stats;
 pub mod ja4_plus;
 pub mod utils;
 pub mod worker;
+pub mod acme;
 
 use tokio::signal;
 use tokio::sync::watch;
-use log::{error, info};
+use log::{error, info, warn};
 
 use crate::app_state::AppState;
 use crate::bpf_stats::BpfStatsCollector;
@@ -56,6 +57,10 @@ use crate::http_client::init_global_client;
 use crate::waf::actions::captcha::{CaptchaConfig, CaptchaProvider, init_captcha_client, start_cache_cleanup_task};
 
 fn main() -> Result<()> {
+    // Initialize rustls crypto provider early (must be done before any rustls operations)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|e| anyhow::anyhow!("Failed to install rustls crypto provider: {:?}", e))?;
 
     let args = Args::parse();
 
@@ -262,7 +267,97 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
             error!("Captcha server error: {}", e);
         }
     });
-    info!("Captcha verification server started on 127.0.0.1:3001");
+    info!("Captcha verification server started on 127.0.0.1:9181");
+
+    // Start embedded ACME server if enabled
+    if config.acme.enabled {
+        let acme_config = config.acme.clone();
+        let pingora_config = config.pingora.clone();
+        let redis_config = config.redis.clone();
+
+        tokio::spawn(async move {
+            use crate::acme::embedded::{EmbeddedAcmeServer, EmbeddedAcmeConfig};
+            use std::path::PathBuf;
+
+            // Use upstreams path from pingora configuration
+            let upstreams_path = PathBuf::from(&pingora_config.upstreams_conf);
+
+            // Determine email
+            let email = acme_config.email
+                .unwrap_or_else(|| "admin@example.com".to_string());
+
+            // Determine Redis URL
+            let redis_url = acme_config.redis_url
+                .or_else(|| if redis_config.url.is_empty() { None } else { Some(redis_config.url) });
+
+            // Create Redis SSL config if available
+            let redis_ssl = redis_config.ssl.map(|ssl| crate::acme::config::RedisSslConfig {
+                ca_cert_path: ssl.ca_cert_path,
+                client_cert_path: ssl.client_cert_path,
+                client_key_path: ssl.client_key_path,
+                insecure: ssl.insecure,
+            });
+
+            // Log storage configuration for debugging
+            if let Some(ref st) = acme_config.storage_type {
+                info!("ACME storage_type from config: '{}'", st);
+            } else {
+                warn!("ACME storage_type not set in config, will auto-detect from redis_url");
+            }
+            if let Some(ref ru) = redis_url {
+                info!("ACME redis_url: '{}'", ru);
+            } else {
+                warn!("ACME redis_url not set");
+            }
+
+            let embedded_acme_config = EmbeddedAcmeConfig {
+                port: acme_config.port,
+                bind_ip: "127.0.0.1".to_string(),
+                upstreams_path,
+                email,
+                storage_path: PathBuf::from(&acme_config.storage_path),
+                storage_type: acme_config.storage_type.clone(),
+                development: acme_config.development,
+                redis_url,
+                redis_ssl,
+            };
+
+            // Clone config for HTTP server before moving it
+            let http_server_config = embedded_acme_config.clone();
+
+            let acme_server = EmbeddedAcmeServer::new(embedded_acme_config);
+
+            // Initialize domain reader
+            if let Err(e) = acme_server.init_domain_reader().await {
+                error!("Failed to initialize ACME domain reader: {}", e);
+                return;
+            }
+
+            // Start the HTTP server first (in background) so endpoint checks can succeed
+            tokio::spawn(async move {
+                let http_server = EmbeddedAcmeServer::new(http_server_config);
+                // Initialize domain reader for the HTTP server
+                if let Err(e) = http_server.init_domain_reader().await {
+                    error!("Failed to initialize domain reader for HTTP server: {}", e);
+                    return;
+                }
+                if let Err(e) = http_server.start_server().await {
+                    error!("ACME server error: {}", e);
+                }
+            });
+
+            // Give the server a moment to start before processing certificates
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Process certificates initially (endpoint check will retry if server not ready)
+            if let Err(e) = acme_server.process_certificates().await {
+                warn!("Failed to process initial certificates: {}", e);
+            }
+        });
+        info!("Embedded ACME server started on 127.0.0.1:{}", config.acme.port);
+    } else {
+        log::info!("Embedded ACME server disabled (acme.enabled: false)");
+    }
 
     // Start the old Pingora proxy system in a separate thread (non-blocking)
     // Only start if mode is "proxy" (disabled in agent mode)
@@ -285,6 +380,7 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
                 tcp_fingerprint: tcp_fingerprint_config,
                 daemon: Default::default(),
                 pingora: pingora_config,
+                acme: Default::default(),
             }));
         });
     } else {
@@ -318,6 +414,9 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     // Initialize worker manager
     let (mut worker_manager, _worker_shutdown_rx) = worker::WorkerManager::new();
 
+    // Set ACME config for certificate worker to use
+    worker::certificate::set_acme_config(config.acme.clone());
+
     // Register certificate worker only if Redis was successfully initialized
     if redis_initialized {
         // Parse proxy_certificates from config file (under pingora section)
@@ -337,6 +436,9 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
             "/tmp/moat-certs".to_string()
         };
 
+        // Set proxy_certificates path for ACME certificate saving
+        crate::acme::set_proxy_certificates_path(Some(certificate_path.clone()));
+
         let refresh_interval = 30; // 30 seconds default refresh interval
         let worker_config = worker::WorkerConfig {
             name: "certificate".to_string(),
@@ -344,7 +446,12 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
             enabled: true,
         };
 
-        let certificate_worker = worker::certificate::CertificateWorker::new(certificate_path.clone(), refresh_interval);
+        let upstreams_path = config.pingora.upstreams_conf.clone();
+        let certificate_worker = worker::certificate::CertificateWorker::new(
+            certificate_path.clone(),
+            upstreams_path,
+            refresh_interval
+        );
 
         if let Err(e) = worker_manager.register_worker(worker_config, certificate_worker) {
             log::error!("Failed to register certificate worker: {}", e);
