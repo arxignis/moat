@@ -294,23 +294,32 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Initialize Redis manager if Redis URL is provided
-    log::info!("Checking Redis configuration: url is_empty={}", config.redis.url.is_empty());
-    if !config.redis.url.is_empty() {
-        log::info!("Initializing Redis manager with URL: {} (prefix: {})", config.redis.url, config.redis.prefix);
-        if let Err(e) = redis::RedisManager::init(&config.redis.url, config.redis.prefix.clone(), config.redis.ssl.as_ref()).await {
-            log::warn!("Failed to initialize Redis manager: {}", e);
+    let redis_initialized = {
+        log::info!("Checking Redis configuration: url is_empty={}", config.redis.url.is_empty());
+        if !config.redis.url.is_empty() {
+            log::info!("Initializing Redis manager with URL: {} (prefix: {})", config.redis.url, config.redis.prefix);
+            match redis::RedisManager::init(&config.redis.url, config.redis.prefix.clone(), config.redis.ssl.as_ref()).await {
+                Ok(_) => {
+                    log::info!("Redis manager initialized successfully");
+                    true
+                }
+                Err(e) => {
+                    log::error!("Failed to initialize Redis manager: {}", e);
+                    log::error!("Certificate worker will not be started due to Redis initialization failure");
+                    false
+                }
+            }
         } else {
-            log::info!("Redis manager initialized successfully");
+            log::warn!("Redis URL is empty, skipping Redis manager initialization");
+            false
         }
-    } else {
-        log::warn!("Redis URL is empty, skipping Redis manager initialization");
-    }
+    };
 
     // Initialize worker manager
     let (mut worker_manager, _worker_shutdown_rx) = worker::WorkerManager::new();
 
-    // Register certificate worker if Redis URL is provided (certificates loaded from Redis)
-    if !config.redis.url.is_empty() {
+    // Register certificate worker only if Redis was successfully initialized
+    if redis_initialized {
         // Parse proxy_certificates from config file (under pingora section)
         let certificate_path = if let Some(config_path) = &_args.config {
             std::fs::read_to_string(config_path)
