@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION=0.1.5
+VERSION=0.1.6
 BRANCH=main
 
 # Install dependencies
