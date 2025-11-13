@@ -11,9 +11,11 @@ use log::{debug, info, warn};
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::prelude::{background_service, Opt};
 use pingora_core::server::Server;
+use pingora_core::protocols::l4::stream::Stream;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
+use tokio::net::TcpListener;
 pub fn run() {
     run_with_config(None)
 }
@@ -169,7 +171,36 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
         None => {}
     }
     info!("Running HTTP listener on :{}", bind_address_http.as_str());
-    proxy.add_tcp(bind_address_http.as_str());
+    
+    // Check if PROXY protocol should be enabled (based on environment variable or config)
+    let proxy_protocol_enabled = std::env::var("PROXY_PROTOCOL_ENABLED")
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(false);
+    
+    if proxy_protocol_enabled {
+        info!("PROXY protocol support enabled - using custom accept loop");
+        
+        // Clone data needed for the custom accept loop
+        let bind_addr_http = bind_address_http.clone();
+        let lb_clone = lb.clone();
+        
+        // Spawn custom accept loop for HTTP with PROXY protocol support
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                if let Err(e) = run_proxy_protocol_listener(bind_addr_http, lb_clone).await {
+                    warn!("PROXY protocol listener error: {}", e);
+                }
+            });
+        });
+        
+        // Still add TLS normally if configured (TLS can use standard Pingora path)
+        // PROXY protocol on TLS would require similar treatment but is less common
+    } else {
+        // Standard Pingora TCP listener (no PROXY protocol)
+        proxy.add_tcp(bind_address_http.as_str());
+    }
+    
     server.add_service(proxy);
     server.add_service(bg_srvc);
 
@@ -183,4 +214,113 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
     ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel.")).expect("Error setting Ctrl-C handler");
     rx.recv().expect("Could not receive from channel.");
     info!("Signal received ! Exiting...");
+}
+
+/// Run a custom TCP listener that handles PROXY protocol before HTTP parsing
+/// This is necessary because Pingora's high-level API doesn't expose raw streams before HTTP parsing
+async fn run_proxy_protocol_listener(
+    bind_addr: String,
+    _lb: LB,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting PROXY protocol listener on {}", bind_addr);
+    let listener = TcpListener::bind(&bind_addr).await?;
+    
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+        
+        debug!("New connection from: {}", peer_addr);
+        
+        // Spawn a task to handle this connection
+        tokio::spawn(async move {
+            if let Err(e) = handle_proxy_protocol_connection(tcp_stream, peer_addr).await {
+                warn!("Connection handling error for {}: {}", peer_addr, e);
+            }
+        });
+    }
+}
+
+/// Handle a single connection with PROXY protocol support
+async fn handle_proxy_protocol_connection(
+    tcp_stream: tokio::net::TcpStream,
+    peer_addr: std::net::SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Convert tokio TcpStream to Pingora Stream
+    let mut stream: Stream = tcp_stream.into();
+    
+    // Consume PROXY protocol header if present
+    let real_client_addr = consume_proxy_header_from_stream(&mut stream, peer_addr).await?;
+    
+    info!("Processing HTTP request from {} (via {})", real_client_addr, peer_addr);
+    
+    // At this point, we have:
+    // 1. A clean stream with PROXY header removed (if it was present)
+    // 2. The real client address
+    // 
+    // TODO: Feed this stream to Pingora's HTTP handling logic
+    // This requires deeper integration with Pingora's Session/ProxyHttp architecture
+    // For now, we've demonstrated the PROXY header consumption
+    
+    warn!("PROXY protocol connection handling not fully implemented - Pingora Session integration required");
+    Ok(())
+}
+
+/// Consume PROXY protocol header from a Pingora stream if present
+/// Returns the real client address if PROXY header was found, otherwise returns the peer address
+async fn consume_proxy_header_from_stream(
+    stream: &mut Stream,
+    peer_addr: std::net::SocketAddr,
+) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+    // Try to consume PROXY header using Pingora's implementation
+    match pingora_core::protocols::proxy_protocol::consume_proxy_header(stream).await {
+        Ok(Some(header)) => {
+            // Extract source address from PROXY header
+            let real_addr = match header {
+                pingora_core::protocols::proxy_protocol::ProxyHeader::Version1 { addresses } => {
+                    match addresses {
+                        proxy_protocol::version1::ProxyAddresses::Ipv4 { source, .. } => {
+                            Some(std::net::SocketAddr::V4(source))
+                        }
+                        proxy_protocol::version1::ProxyAddresses::Ipv6 { source, .. } => {
+                            Some(std::net::SocketAddr::V6(source))
+                        }
+                        _ => None,
+                    }
+                }
+                pingora_core::protocols::proxy_protocol::ProxyHeader::Version2 { addresses, .. } => {
+                    match addresses {
+                        proxy_protocol::version2::ProxyAddresses::Ipv4 { source, .. } => {
+                            Some(std::net::SocketAddr::V4(source))
+                        }
+                        proxy_protocol::version2::ProxyAddresses::Ipv6 { source, .. } => {
+                            Some(std::net::SocketAddr::V6(source))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            
+            if let Some(addr) = real_addr {
+                info!("PROXY protocol header detected: real client {} (proxy: {})", addr, peer_addr);
+                Ok(addr)
+            } else {
+                debug!("PROXY protocol header detected but no valid address, using peer address");
+                Ok(peer_addr)
+            }
+        }
+        Ok(None) => {
+            debug!("No PROXY protocol header detected, using peer address: {}", peer_addr);
+            Ok(peer_addr)
+        }
+        Err(e) => {
+            warn!("Error parsing PROXY protocol header: {}, dropping connection", e);
+            Err(e.into())
+        }
+    }
 }
