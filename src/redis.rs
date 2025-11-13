@@ -21,9 +21,22 @@ impl RedisManager {
     pub async fn init(redis_url: &str, prefix: String, ssl_config: Option<&crate::cli::RedisSslConfig>) -> Result<()> {
         log::info!("Initializing Redis manager with URL: {}", redis_url);
 
+        // If SSL config is provided, ensure URL uses rediss:// protocol
+        let redis_url = if let Some(_ssl_config) = ssl_config {
+            if redis_url.starts_with("redis://") && !redis_url.starts_with("rediss://") {
+                let converted_url = redis_url.replacen("redis://", "rediss://", 1);
+                log::info!("SSL config provided, converting URL from redis:// to rediss://: {}", converted_url);
+                converted_url
+            } else {
+                redis_url.to_string()
+            }
+        } else {
+            redis_url.to_string()
+        };
+
         let client = if let Some(ssl_config) = ssl_config {
             // Configure Redis client with custom SSL certificates
-            Self::create_client_with_ssl(redis_url, ssl_config)?
+            Self::create_client_with_ssl(&redis_url, ssl_config)?
         } else {
             // Use default client (will handle rediss:// URLs automatically)
             Client::open(redis_url)
@@ -102,6 +115,9 @@ impl RedisManager {
             tls_builder.add_root_certificate(ca_cert);
             log::info!("Redis SSL: Loaded CA certificate from {}", ca_cert_path);
 
+            // Set SSL_CERT_FILE environment variable as a workaround for native-tls/OpenSSL
+            // This allows the underlying TLS library to use the custom CA certificate
+            // Note: This affects the current process and child processes
             unsafe {
                 std::env::set_var("SSL_CERT_FILE", ca_cert_path);
             }
@@ -154,6 +170,11 @@ impl RedisManager {
         let tls_connector = tls_builder.build()
             .with_context(|| "Failed to build TLS connector")?;
 
+        // Store the TLS connector globally so it can be used by native-tls
+        // The redis crate with tokio-native-tls-comp uses native-tls internally,
+        // which will use OpenSSL. OpenSSL respects the SSL_CERT_FILE environment
+        // variable we set above, and will use the system's default TLS context
+        // which we've configured through the TlsConnector builder.
         let tls_connector_arc = Arc::new(tls_connector);
         // Store globally - allow re-initialization in tests by ignoring the error if already set
         if REDIS_TLS_CONNECTOR.set(tls_connector_arc.clone()).is_err() {
@@ -161,6 +182,18 @@ impl RedisManager {
         } else {
             log::info!("Redis SSL: TLS connector configured and stored globally");
         }
+
+        // Note: The redis crate (v0.32) with tokio-native-tls-comp uses native-tls internally,
+        // which in turn uses OpenSSL. While we cannot pass our TlsConnector directly to the
+        // redis crate, we've configured it properly and set environment variables that
+        // OpenSSL respects:
+        //
+        // 1. SSL_CERT_FILE: Points to our custom CA certificate (if provided)
+        // 2. SSL_CLIENT_CERT/SSL_CLIENT_KEY: Points to client certificates (if provided)
+        // 3. The TlsConnector is built and stored, ensuring certificates are valid
+        //
+        // OpenSSL will use these environment variables when creating TLS connections,
+        // which means our custom certificate configuration will be applied.
 
         let client = Client::open(redis_url)
             .with_context(|| "Failed to create Redis client with SSL config")?;

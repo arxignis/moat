@@ -69,7 +69,8 @@ impl TlsAccept for Certificates {
 
             // Find the matching SSL context for this hostname
             if let Some(ctx) = self.find_ssl_context(&name_str) {
-                log::info!("TlsAccept: Found matching certificate for hostname: {}", name_str);
+                // Log which certificate was found (will be logged in find_ssl_context)
+                log::info!("TlsAccept: Found matching certificate for hostname: {} (see details above)", name_str);
 
                 // Get the certificate and key from the SSL context
                 // We need to extract them from the context to use with ssl_use_certificate
@@ -92,16 +93,33 @@ impl TlsAccept for Certificates {
             log::debug!("TlsAccept: No SNI provided, using default certificate");
         }
 
-        // Use default certificate - try to find it in cert_name_map or use first available
-        if let Some(default_ctx) = self.cert_name_map.iter().next() {
+        // Use default certificate - get it by name from default_cert_path
+        let default_cert_name = std::path::Path::new(&self.default_cert_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default");
+
+        if let Some(default_ctx) = self.cert_name_map.get(default_cert_name) {
             let ctx = default_ctx.value();
+            log::info!("TlsAccept: Using configured default certificate: {}", default_cert_name);
             if let Err(e) = ssl.set_ssl_context(&*ctx) {
                 log::error!("TlsAccept: Failed to set default SSL context: {:?}", e);
             } else {
-                log::debug!("TlsAccept: Using default certificate");
+                log::debug!("TlsAccept: Successfully set default certificate");
+            }
+        } else {
+            // Fallback to first available certificate if default not found
+            log::warn!("TlsAccept: Default certificate '{}' not found in cert_name_map, using first available", default_cert_name);
+            if let Some(default_ctx) = self.cert_name_map.iter().next() {
+                let ctx = default_ctx.value();
+                if let Err(e) = ssl.set_ssl_context(&*ctx) {
+                    log::error!("TlsAccept: Failed to set fallback SSL context: {:?}", e);
+                } else {
+                    log::debug!("TlsAccept: Using fallback certificate");
             }
         } else {
             log::error!("TlsAccept: No certificates available!");
+            }
         }
     }
 }
@@ -201,7 +219,7 @@ impl Certificates {
             }
         }
 
-        log::info!("Built cert_name_map with {} entries", cert_name_map.len());
+        log::debug!("Built cert_name_map with {} entries", cert_name_map.len());
 
         Some(Self {
             name_map: name_map,
@@ -231,34 +249,48 @@ impl Certificates {
         // First, check if there's an upstreams mapping for this hostname
         if let Some(cert_name) = self.upstreams_cert_map.get(server_name) {
             let cert_name_str = cert_name.value();
-            log::debug!("Found upstreams mapping: {} -> {}", server_name, cert_name_str);
+            log::info!("Found upstreams mapping: {} -> {}", server_name, cert_name_str);
             if let Some(ctx) = self.cert_name_map.get(cert_name_str) {
                 log::info!("Using certificate '{}' for hostname '{}' via upstreams mapping", cert_name_str, server_name);
                 return Some(ctx.clone());
             } else {
-                log::warn!("Certificate '{}' specified in upstreams config for hostname '{}' not found in cert_name_map", cert_name_str, server_name);
+                // Certificate specified in upstreams.yaml but doesn't exist - use default instead of searching further
+                log::warn!("Certificate '{}' specified in upstreams config for hostname '{}' not found in cert_name_map. Will use default certificate (NOT searching for wildcards).", cert_name_str, server_name);
+                return None; // Return None to use default certificate - DO NOT continue searching
             }
         } else {
-            log::debug!("No upstreams mapping found for hostname: {}", server_name);
+            log::debug!("No upstreams mapping found for hostname: {}, will search for exact/wildcard matches", server_name);
         }
 
         // Then, try exact match in name_map (from certificate CN/SAN)
         if let Some(ctx) = self.name_map.get(server_name) {
-            log::debug!("Found certificate via CN/SAN exact match for: {}", server_name);
+            log::info!("Found certificate via CN/SAN exact match for: {}", server_name);
             return Some(ctx.clone());
         }
 
-        // Try wildcard match from certificate CN/SAN
+        // Check if default certificate is configured - if so, prefer it over wildcards
+        let default_cert_name = std::path::Path::new(&self.default_cert_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default");
+
+        // If default certificate exists and is configured, use it instead of wildcards
+        if self.cert_name_map.contains_key(default_cert_name) {
+            log::info!("Default certificate '{}' is configured. Skipping wildcard matching for '{}' to use default instead.", default_cert_name, server_name);
+            return None; // Return None to use default certificate instead of wildcard
+        }
+
+        // Try wildcard match from certificate CN/SAN (only if no default is configured)
         for config in &self.configs {
             for name in &config.common_names {
                 if name.starts_with("*.") && server_name.ends_with(&name[1..]) {
-                    log::debug!("Found certificate via CN wildcard match: {} matches {}", server_name, name);
+                    log::info!("Found certificate via CN wildcard match: {} matches {}", server_name, name);
                     return Some(config.ssl_context.clone());
                 }
             }
             for name in &config.alt_names {
                 if name.starts_with("*.") && server_name.ends_with(&name[1..]) {
-                    log::debug!("Found certificate via SAN wildcard match: {} matches {}", server_name, name);
+                    log::info!("Found certificate via SAN wildcard match: {} matches {}", server_name, name);
                     return Some(config.ssl_context.clone());
                 }
             }
@@ -438,7 +470,12 @@ fn create_ssl_context_with_sni_callback(
         });
         log::debug!("Set SNI callback on SSL context for certificate selection");
     } else {
-        log::warn!("No certificates available for SNI callback - certificate selection by hostname will not work");
+        // Certificates may not be loaded yet (e.g., during startup before Redis certificates are fetched)
+        // This is expected during initialization, so use debug level instead of warn
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::debug!("No certificates available for SNI callback yet - certificates will be loaded asynchronously. Certificate selection by hostname will work once certificates are loaded.");
+        });
     }
 
     let built = ctx.build();

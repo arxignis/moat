@@ -3,14 +3,16 @@ use crate::utils::parceyaml::load_configuration;
 use crate::utils::structs::Configuration;
 use crate::utils::healthcheck;
 use crate::http_proxy::proxyhttp::LB;
+use crate::worker::certificate::{request_certificate_from_acme, get_acme_config};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{error, info, warn};
 use pingora_core::server::ShutdownWatch;
 use pingora_core::services::background::BackgroundService;
 use std::sync::Arc;
+use crate::redis::RedisManager;
 
 #[async_trait]
 impl BackgroundService for LB {
@@ -143,6 +145,10 @@ impl BackgroundService for LB {
                                     info!("Updated upstreams certificate mappings: {} entries", ss.certificates.len());
                                 }
                             }
+
+                            // Check and request certificates for new/updated domains
+                            check_and_request_certificates_for_upstreams(&ss.upstreams).await;
+
                             // info!("Upstreams list is changed, updating to:");
                             // print_upstreams(&self.ump_full);
                         }
@@ -150,6 +156,67 @@ impl BackgroundService for LB {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Check certificates for domains in upstreams and request from ACME if missing
+async fn check_and_request_certificates_for_upstreams(upstreams: &crate::utils::structs::UpstreamsDashMap) {
+    // Check if ACME is enabled
+    let _acme_config = match get_acme_config().await {
+        Some(config) if config.enabled => config,
+        _ => {
+            // ACME not enabled, skip certificate checking
+            return;
+        }
+    };
+
+    // Get Redis manager to check for existing certificates
+    let redis_manager = match RedisManager::get() {
+        Ok(rm) => rm,
+        Err(e) => {
+            warn!("Redis manager not available, skipping certificate check for upstreams: {}", e);
+            return;
+        }
+    };
+
+    let mut connection = redis_manager.get_connection();
+
+    // Iterate through all domains in upstreams (outer key is the hostname)
+    for entry in upstreams.iter() {
+        let domain = entry.key();
+        let normalized_domain = domain.strip_prefix("*.").unwrap_or(domain);
+
+               // Check if certificate exists in Redis
+               // Get prefix from RedisManager
+               let prefix = RedisManager::get()
+                   .map(|rm| rm.get_prefix().to_string())
+                   .unwrap_or_else(|_| "ssl-storage".to_string());
+               let fullchain_key = format!("{}:{}:live:fullchain", prefix, normalized_domain);
+        let cert_exists: u32 = match redis::cmd("EXISTS")
+            .arg(&fullchain_key)
+            .query_async(&mut connection)
+            .await
+        {
+            Ok(exists) => exists,
+            Err(e) => {
+                warn!("Failed to check certificate existence for domain {}: {}", domain, e);
+                continue;
+            }
+        };
+
+        // Certificate doesn't exist, request from ACME
+        if cert_exists == 0 {
+            info!("Certificate not found in Redis for domain: {}, requesting from ACME", domain);
+            // Use a placeholder certificate path (will be stored in Redis)
+            let certificate_path = format!("/tmp/moat-certs/{}", normalized_domain.replace('.', "_"));
+            if let Err(e) = request_certificate_from_acme(domain, normalized_domain, &certificate_path).await {
+                warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
+            } else {
+                info!("Successfully requested certificate from ACME for domain: {}", domain);
+            }
+        } else {
+            info!("Certificate already exists in Redis for domain: {}", domain);
         }
     }
 }

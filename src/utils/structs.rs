@@ -93,6 +93,8 @@ pub struct HostConfig {
     pub rate_limit: Option<isize>,
     #[serde(default)]
     pub certificate: Option<String>,
+    #[serde(default)]
+    pub acme: Option<crate::acme::upstreams_reader::UpstreamsAcmeConfig>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

@@ -222,3 +222,34 @@ pingora:
 
   # Health check interval in seconds
   healthcheck_interval: 2
+
+# ACME Configuration (Let's Encrypt certificate management)
+acme:
+  # Enable embedded ACME server for automatic certificate management
+  enabled: false
+
+  # Port for ACME server (for HTTP-01 challenges)
+  # The server always binds to 127.0.0.1 (localhost only) for security
+  port: 9180
+
+  # Email address for Let's Encrypt account registration
+  # Required for certificate issuance
+  email: null
+
+  # Storage type: "file" or "redis"
+  # If not set, defaults to "file" or "redis" (if redis_url is set)
+  storage_type: null
+
+  # Storage path for certificates and ACME challenge files
+  # Certificates will be stored in subdirectories per domain
+  storage_path: "/var/lib/moat/acme"
+
+  # Use Let's Encrypt staging server (for testing)
+  # Set to true for testing to avoid rate limits
+  development: false
+
+  # Redis URL for certificate storage (optional)
+  # If not set, uses the global redis.url configuration
+  # If set, overrides the global Redis URL for ACME storage
+  redis_url: null
+

@@ -64,7 +64,6 @@ tokio-test = "0.4"
 x509-parser = "0.18"
 gethostname = "1.1.0"
 local-ip-address = "0.6.5"
-wirefilter-engine = { git = "https://github.com/arxignis/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
 flate2 = "1.0"
 log = "0.4.28"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
@@ -73,7 +72,6 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 url = "2.5"
 clamav-tcp = "0.2"
 multer = "3.0"
-proxy-protocol = { git = "https://github.com/arxignis/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}
 rand = "0.9"
 regex = "1.0"
 daemonize = "0.5.0"
@@ -91,6 +89,9 @@ pingora-proxy = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1
 pingora-limits = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
 pingora-http = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
 pingora-memory-cache = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+proxy-protocol = { git = "https://github.com/arxignis/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}
+wirefilter-engine = { git = "https://github.com/arxignis/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
+
 mimalloc = { version = "0.1.48", default-features = false }
 dashmap = "7.0.0-rc2"
 ctrlc = "3.5.0"
@@ -105,3 +106,9 @@ port_check = "0.3.0"
 notify = "8.2.0"
 privdrop = "0.5.6"
 base16ct = { version = "0.3.0", features = ["alloc"] }
+actix-web = "4.7"
+actix-files = "0.6"
+instant-acme = "0.8"
+trust-dns-resolver = "0.23.2"
+tracing = "0.1"
+tracing-subscriber = "0.3"

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -58,17 +57,6 @@ fn normalize_pem_chain(chain: &str) -> String {
     normalized
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DomainConfig {
-    domain: String,
-    #[serde(default)]
-    email: Option<String>,
-    #[serde(default)]
-    dns: bool,
-    #[serde(default)]
-    wildcard: bool,
-}
-
 /// Global certificate store for Redis-loaded certificates
 static CERTIFICATE_STORE: once_cell::sync::OnceCell<Arc<tokio::sync::RwLock<Option<Arc<Certificates>>>>> = once_cell::sync::OnceCell::new();
 
@@ -90,15 +78,18 @@ fn get_certificate_hash_cache() -> Arc<tokio::sync::RwLock<std::collections::Has
 }
 
 /// Certificate worker that fetches SSL certificates from Redis
+/// Uses upstreams.yaml as the source of truth for domains
 pub struct CertificateWorker {
     certificate_path: String,
+    upstreams_path: String,
     refresh_interval_secs: u64,
 }
 
 impl CertificateWorker {
-    pub fn new(certificate_path: String, refresh_interval_secs: u64) -> Self {
+    pub fn new(certificate_path: String, upstreams_path: String, refresh_interval_secs: u64) -> Self {
         Self {
             certificate_path,
+            upstreams_path,
             refresh_interval_secs,
         }
     }
@@ -111,13 +102,17 @@ impl Worker for CertificateWorker {
 
     fn run(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         let certificate_path = self.certificate_path.clone();
+        let upstreams_path = self.upstreams_path.clone();
         let refresh_interval_secs = self.refresh_interval_secs;
         let worker_name = self.name().to_string();
 
         tokio::spawn(async move {
+            // Store upstreams_path globally for ACME requests
+            set_upstreams_path(upstreams_path.clone());
+
             // Initial fetch on startup - download all certificates immediately
             log::info!("[{}] Starting certificate download from Redis on service startup...", worker_name);
-            match fetch_certificates_from_redis(&certificate_path).await {
+            match fetch_certificates_from_redis(&certificate_path, &upstreams_path).await {
                 Ok(_) => {
                     log::info!("[{}] Successfully downloaded all certificates from Redis on startup", worker_name);
                 }
@@ -128,9 +123,15 @@ impl Worker for CertificateWorker {
             }
 
             // Set up periodic refresh interval
-            let mut interval = interval(Duration::from_secs(refresh_interval_secs));
+            let mut refresh_interval = interval(Duration::from_secs(refresh_interval_secs));
             // Skip the first tick since we already fetched on startup
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            // Set up periodic expiration check (every 6 hours)
+            let mut expiration_check_interval = interval(Duration::from_secs(6 * 60 * 60)); // 6 hours
+            expiration_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Skip the first tick - we'll check after the first certificate fetch
+            let mut first_expiration_check = true;
 
             loop {
                 tokio::select! {
@@ -139,10 +140,24 @@ impl Worker for CertificateWorker {
                             break;
                         }
                     }
-                    _ = interval.tick() => {
+                    _ = refresh_interval.tick() => {
                         log::debug!("[{}] Periodic certificate refresh triggered", worker_name);
-                        if let Err(e) = fetch_certificates_from_redis(&certificate_path).await {
+                        // Update upstreams_path in case it changed
+                        set_upstreams_path(upstreams_path.clone());
+                        if let Err(e) = fetch_certificates_from_redis(&certificate_path, &upstreams_path).await {
                             log::warn!("[{}] Failed to fetch certificates from Redis: {}", worker_name, e);
+                        }
+                    }
+                    _ = expiration_check_interval.tick() => {
+                        if first_expiration_check {
+                            first_expiration_check = false;
+                            continue; // Skip first check, wait for next interval
+                        }
+                        log::info!("[{}] Periodic certificate expiration check triggered", worker_name);
+                        // Update upstreams_path in case it changed
+                        set_upstreams_path(upstreams_path.clone());
+                        if let Err(e) = check_and_renew_expiring_certificates(&upstreams_path).await {
+                            log::warn!("[{}] Failed to check certificate expiration: {}", worker_name, e);
                         }
                     }
                 }
@@ -157,67 +172,71 @@ impl Worker for CertificateWorker {
 /// This is kept for backward compatibility
 pub fn start_certificate_fetcher(
     certificate_path: String,
+    upstreams_path: String,
     refresh_interval_secs: u64,
     shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    let worker = CertificateWorker::new(certificate_path, refresh_interval_secs);
+    let worker = CertificateWorker::new(certificate_path, upstreams_path, refresh_interval_secs);
     worker.run(shutdown)
 }
 
-/// Fetch domains from ssl-storage:domains key in Redis
-async fn fetch_domains_from_redis() -> Result<Vec<String>> {
-    let redis_manager = RedisManager::get()
-        .context("Redis manager not initialized")?;
+/// Fetch domains from upstreams.yaml file (source of truth)
+async fn fetch_domains_from_upstreams(upstreams_path: &str) -> Result<Vec<String>> {
+    use serde_yaml;
+    use std::path::PathBuf;
 
-    let mut connection = redis_manager.get_connection();
+    let path = PathBuf::from(upstreams_path);
 
-    // Fetch domains list from ssl-storage:domains key
-    let domains_key = "ssl-storage:domains";
-    log::debug!("Fetching domains from Redis key: {}", domains_key);
-
-    let domains_json: Option<String> = redis::cmd("GET")
-        .arg(domains_key)
-        .query_async(&mut connection)
+    // Read and parse upstreams.yaml
+    let yaml_content = tokio::fs::read_to_string(&path)
         .await
-        .context("Failed to get domains from Redis")?;
+        .with_context(|| format!("Failed to read upstreams file: {:?}", path))?;
 
-    let domains = match domains_json {
-        Some(json_str) => {
-            log::debug!("Received domains JSON from Redis: {}", json_str);
-            let domain_configs: Vec<DomainConfig> = serde_json::from_str(&json_str)
-                .context(format!("Failed to parse domains JSON from Redis. JSON: {}", json_str))?;
+    let parsed: crate::utils::structs::Config = serde_yaml::from_str(&yaml_content)
+        .with_context(|| format!("Failed to parse upstreams YAML: {:?}", path))?;
 
-            let domain_names: Vec<String> = domain_configs
-                .into_iter()
-                .map(|config| config.domain)
-                .collect();
+    let mut domains = Vec::new();
 
-            log::info!("Found {} unique domain(s) in ssl-storage:domains: {:?}", domain_names.len(), domain_names);
-            domain_names
+    if let Some(upstreams) = &parsed.upstreams {
+        for (hostname, _host_config) in upstreams {
+            domains.push(hostname.clone());
         }
-        None => {
-            log::warn!("No domains found in ssl-storage:domains key (key does not exist or is empty)");
-            Vec::new()
-        }
-    };
+    }
 
+    log::info!("Found {} domain(s) in upstreams.yaml: {:?}", domains.len(), domains);
     Ok(domains)
 }
 
-/// Fetch SSL certificates from Redis for domains listed in ssl-storage:domains
-async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
+/// Fetch SSL certificates from Redis for domains listed in upstreams.yaml
+async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &str) -> Result<()> {
     let redis_manager = RedisManager::get()
         .context("Redis manager not initialized")?;
 
-    // First, get the list of domains from ssl-storage:domains
-    let domains = fetch_domains_from_redis().await?;
+    // Parse upstreams.yaml to get domains and their certificate mappings
+    use serde_yaml;
+    use std::path::PathBuf;
+    let path = PathBuf::from(upstreams_path);
+    let yaml_content = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("Failed to read upstreams file: {:?}", path))?;
+    let parsed: crate::utils::structs::Config = serde_yaml::from_str(&yaml_content)
+        .with_context(|| format!("Failed to parse upstreams YAML: {:?}", path))?;
 
-    if domains.is_empty() {
-        log::warn!("No domains found in ssl-storage:domains key, skipping certificate fetch");
+    // Build mapping of domain -> certificate_name (or None if not specified)
+    let mut domain_cert_map: Vec<(String, Option<String>)> = Vec::new();
+    if let Some(upstreams) = &parsed.upstreams {
+        for (hostname, host_config) in upstreams {
+            let cert_name = host_config.certificate.clone();
+            domain_cert_map.push((hostname.clone(), cert_name));
+        }
+    }
+
+    if domain_cert_map.is_empty() {
+        log::warn!("No domains found in upstreams.yaml, skipping certificate fetch");
         return Ok(());
     }
 
-    log::info!("Checking certificates for {} domain(s) from Redis (will skip download if hashes match)", domains.len());
+    log::info!("Checking certificates for {} domain(s) from Redis (will skip download if hashes match)", domain_cert_map.len());
 
     let mut connection = redis_manager.get_connection();
     let mut certificate_configs = Vec::new();
@@ -236,12 +255,18 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
         log::debug!("Certificate directory already exists: {}", certificate_path);
     }
 
-    for domain in &domains {
-        // Normalize domain (remove wildcard prefix if present)
-        let normalized_domain = domain.strip_prefix("*.").unwrap_or(domain);
+    for (domain, cert_name_opt) in &domain_cert_map {
+        // Use certificate name if specified, otherwise use domain name
+        let cert_name = cert_name_opt.as_ref().unwrap_or(domain);
+        // Normalize certificate name (remove wildcard prefix if present)
+        let normalized_cert_name = cert_name.strip_prefix("*.").unwrap_or(cert_name);
 
         // Check certificate hash from Redis before downloading
-        let hash_key = format!("ssl-storage:{}:metadata:certificate_hash", normalized_domain);
+        // Get prefix from RedisManager
+        let prefix = RedisManager::get()
+            .map(|rm| rm.get_prefix().to_string())
+            .unwrap_or_else(|_| "ssl-storage".to_string());
+        let hash_key = format!("{}:{}:metadata:certificate_hash", prefix, normalized_cert_name);
         let remote_hash: Option<String> = redis::cmd("GET")
             .arg(&hash_key)
             .query_async(&mut connection)
@@ -250,38 +275,71 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
 
         // Check in-memory cache first for local hash
         let hash_cache = get_certificate_hash_cache();
-        let local_hash = {
-            let cache = hash_cache.read().await;
-            cache.get(domain).cloned()
-        };
 
-        // If not in cache, calculate from files if they exist
-        let sanitized_domain = domain.replace('.', "_").replace('*', "_");
-        let cert_path = cert_dir.join(format!("{}.crt", sanitized_domain));
-        let key_path = cert_dir.join(format!("{}.key", sanitized_domain));
+        // Get file paths first - use certificate name for file naming
+        let sanitized_cert_name = cert_name.replace('.', "_").replace('*', "_");
+        let cert_path = cert_dir.join(format!("{}.crt", sanitized_cert_name));
+        let key_path = cert_dir.join(format!("{}.key", sanitized_cert_name));
 
-        let local_hash = if let Some(cached_hash) = local_hash {
+        // Determine local hash for comparison
+        // IMPORTANT: We use the Redis hash (remote_hash) as the source of truth when available
+        // because Redis calculates hash from raw bytes, while files are normalized (whitespace changes)
+        // If we have a Redis hash, we trust it. If not, we check cache or recalculate from files.
+        let local_hash = if remote_hash.is_some() {
+            // We have a Redis hash - check if we have it cached locally
+            let cached_hash = {
+                let cache = hash_cache.read().await;
+                cache.get(cert_name).cloned()
+            };
+
+            if let Some(cached_hash) = cached_hash {
+                // We have a cached hash - verify files exist
+                if cert_path.exists() && key_path.exists() {
+                    // Files exist and we have cached hash - use cached hash (which should match Redis)
             Some(cached_hash)
-        } else if cert_path.exists() && key_path.exists() {
-            // Calculate hash from files and store in cache
-            if let Ok(hash) = calculate_local_hash(&cert_path, &key_path) {
+                } else {
+                    // Files don't exist - clear cache
                 let mut cache = hash_cache.write().await;
-                cache.insert(domain.clone(), hash.clone());
-                Some(hash)
+                    cache.remove(cert_name);
+                    None
+                }
             } else {
+                // No cached hash - if files exist, we'll download and cache the hash
+                // For now, return None to trigger download (hash will be cached after download)
                 None
             }
         } else {
-            None
+            // No Redis hash - check files and calculate hash if needed
+            if cert_path.exists() && key_path.exists() {
+                let cached_hash = {
+                    let cache = hash_cache.read().await;
+                    cache.get(domain).cloned()
+                };
+
+                if let Some(cached_hash) = cached_hash {
+                    Some(cached_hash)
+                } else if let Ok(calculated_hash) = calculate_local_hash(&cert_path, &key_path) {
+                    // Calculate from files and cache it
+                    let mut cache = hash_cache.write().await;
+                    cache.insert(domain.clone(), calculated_hash.clone());
+                    Some(calculated_hash)
+                } else {
+                    None
+                }
+            } else {
+                // Files don't exist - clear cache
+                let mut cache = hash_cache.write().await;
+                cache.remove(domain);
+                None
+            }
         };
 
-        // Skip download if hashes match, but still add existing certificates to config
-        if let (Some(remote), Some(local)) = (&remote_hash, &local_hash) {
+        // Determine if we need to download
+        let should_download = if let (Some(remote), Some(local)) = (&remote_hash, &local_hash) {
             if remote == local {
-                log::info!("Certificate hash matches for domain: {} (hash: {}), skipping download", domain, remote);
-
-                // Verify local certificate files exist and are valid
+                // Hashes match - check if files actually exist
                 if cert_path.exists() && key_path.exists() {
+                    log::debug!("Certificate hash matches for domain: {} (hash: {}), files exist, skipping download", domain, remote);
                     // Add existing certificate to config without re-downloading
                     certificate_configs.push(CertificateConfig {
                         cert_path: cert_path.to_string_lossy().to_string(),
@@ -290,29 +348,45 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                     skipped_count += 1;
                     log::debug!("Added existing certificate config for domain: {} -> cert: {}, key: {}",
                         domain, cert_path.display(), key_path.display());
-                    continue; // Skip download, files already exist and are valid
+                    false // Don't download
                 } else {
-                    log::warn!("Hash matches but certificate files missing for domain: {}, will download", domain);
-                    // Fall through to download
+                    log::warn!("Hash matches but certificate files missing for domain: {} (cert: {}, key: {}), will download",
+                        domain, cert_path.display(), key_path.display());
+                    true // Download - files are missing
                 }
             } else {
-                log::info!("Certificate hash changed for domain: {} (remote: {}, local: {}), downloading new certificate", domain, remote, local);
+                log::debug!("Certificate hash mismatch for domain: {} (remote: {}, local: {}), downloading new certificate", domain, remote, local);
+                true // Download - hash changed
             }
         } else if remote_hash.is_none() {
-            log::debug!("No certificate hash found in Redis for domain: {}, will check if certificate exists", domain);
+            log::debug!("No certificate hash found in Redis for domain: {}, will check if certificate exists in Redis", domain);
+            true // Download - check if certificate exists
         } else if local_hash.is_none() {
-            log::info!("No local certificate found for domain: {}, downloading from Redis", domain);
+            log::debug!("No local certificate found for domain: {} (files don't exist or hash not calculated), downloading from Redis", domain);
+            true // Download - no local certificate
+        } else {
+            log::debug!("Unexpected state for domain: {} (remote_hash: {:?}, local_hash: {:?}), defaulting to download", domain, remote_hash, local_hash);
+            true // Default to downloading
+        };
+
+        // Skip download if not needed
+        if !should_download {
+            continue;
         }
 
         // Fetch fullchain and private key from Redis
-        // ssl-storage stores certificates with keys:
-        // - ssl-storage:{domain}:live:fullchain
-        // - ssl-storage:{domain}:live:privkey
-        let fullchain_key = format!("ssl-storage:{}:live:fullchain", normalized_domain);
-        let privkey_key = format!("ssl-storage:{}:live:privkey", normalized_domain);
+        // Get prefix from RedisManager
+        let prefix = RedisManager::get()
+            .map(|rm| rm.get_prefix().to_string())
+            .unwrap_or_else(|_| "ssl-storage".to_string());
+        // Redis stores certificates with keys:
+        // - {prefix}:{cert_name}:live:fullchain
+        // - {prefix}:{cert_name}:live:privkey
+        let fullchain_key = format!("{}:{}:live:fullchain", prefix, normalized_cert_name);
+        let privkey_key = format!("{}:{}:live:privkey", prefix, normalized_cert_name);
 
-        log::debug!("Fetching certificate for domain: {} (normalized: {})", domain, normalized_domain);
-        log::debug!("Fullchain key: {}, Privkey key: {}", fullchain_key, privkey_key);
+        log::info!("Fetching certificate for domain: {} (using cert: {}, normalized: {}, prefix: {})", domain, cert_name, normalized_cert_name, prefix);
+        log::info!("Fullchain key: '{}', Privkey key: '{}'", fullchain_key, privkey_key);
 
         let fullchain: Option<Vec<u8>> = redis::cmd("GET")
             .arg(&fullchain_key)
@@ -325,6 +399,12 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
             .query_async(&mut connection)
             .await
             .context(format!("Failed to get private key for domain: {}", domain))?;
+
+        log::info!("Redis GET results for domain {}: fullchain={}, privkey={}",
+            domain,
+            if fullchain.is_some() { "Some" } else { "None" },
+            if privkey.is_some() { "Some" } else { "None" }
+        );
 
         match (fullchain, privkey) {
             (Some(fullchain_bytes), Some(privkey_bytes)) => {
@@ -355,11 +435,8 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                 }
 
                 // Write certificates to certificate directory
-                // Use sanitized original domain name for file names (not normalized)
-                // This ensures wildcard domains get unique filenames
-                let sanitized_domain = domain.replace('.', "_").replace('*', "_");
-                let cert_path = cert_dir.join(format!("{}.crt", sanitized_domain));
-                let key_path = cert_dir.join(format!("{}.key", sanitized_domain));
+                // Use sanitized certificate name for file names (already set above)
+                // cert_path and key_path are already set using cert_name
 
                 log::debug!("Writing certificate to: {} and key to: {}", cert_path.display(), key_path.display());
 
@@ -385,6 +462,15 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                 key_file.sync_all()
                     .context(format!("Failed to sync key file for domain: {} at path: {}", domain, key_path.display()))?;
 
+                // Calculate hash from raw bytes (before normalization) to match Redis hash calculation
+                // Redis calculates hash from: fullchain (raw bytes) + key (raw bytes)
+                // We need to match this exactly, not from normalized files
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(&fullchain_bytes);
+                hasher.update(&privkey_bytes);
+                let calculated_hash = format!("{:x}", hasher.finalize());
+
                 downloaded_count += 1;
                 log::info!("Successfully downloaded and saved certificate for domain: {} to {}", domain, cert_path.display());
 
@@ -399,13 +485,21 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                 }
 
                 // Store local hash in memory cache after successful download
-                if let Some(hash) = &remote_hash {
-                    let domain_key = domain.clone();
-                    let hash_value = hash.clone();
+                // Use the hash calculated from raw bytes (matching Redis calculation)
+                    let cert_key = cert_name.to_string();
                     let hash_cache = get_certificate_hash_cache();
                     let mut cache = hash_cache.write().await;
-                    cache.insert(domain_key, hash_value);
-                    log::debug!("Stored local hash in memory cache for domain: {} -> {}", domain, hash);
+                cache.insert(cert_key, calculated_hash.clone());
+                log::debug!("Stored local hash in memory cache for domain: {} -> {} (calculated from raw bytes, matching Redis)", domain, calculated_hash);
+
+                // Verify hash matches Redis hash
+                if let Some(remote_hash) = &remote_hash {
+                    if calculated_hash != *remote_hash {
+                        log::warn!("Hash mismatch after download for domain {}: calculated={}, redis={}. This should not happen!",
+                            domain, calculated_hash, remote_hash);
+                    } else {
+                        log::debug!("Hash verified: calculated hash matches Redis hash for domain: {}", domain);
+                    }
                 }
 
                 // Create certificate config entry
@@ -416,16 +510,77 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                 log::debug!("Added certificate config for domain: {} -> cert: {}, key: {}",
                     domain, cert_path.display(), key_path.display());
             }
-            _ => {
+            (Some(_), None) => {
                 missing_count += 1;
-                log::warn!("Certificate not found in Redis for domain: {}", domain);
+                log::warn!("Certificate fullchain found but private key missing in Redis for domain: {} (cert: {}, key: {})", domain, cert_name, privkey_key);
+                // Only request certificate if no certificate name is specified (i.e., use domain name)
+                if cert_name_opt.is_none() {
+                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, &certificate_path).await {
+                        log::warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
+                    } else {
+                        log::debug!("Successfully requested certificate from ACME for domain: {}", domain);
+                    }
+                } else {
+                    log::debug!("Certificate name '{}' is specified for domain '{}', not requesting new certificate (certificate may be shared)", cert_name, domain);
+                }
+            }
+            (None, Some(_)) => {
+                missing_count += 1;
+                log::warn!("Certificate private key found but fullchain missing in Redis for domain: {} (cert: {}, key: {})", domain, cert_name, fullchain_key);
+                // Only request certificate if no certificate name is specified (i.e., use domain name)
+                if cert_name_opt.is_none() {
+                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, &certificate_path).await {
+                        log::warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
+                    } else {
+                        log::debug!("Successfully requested certificate from ACME for domain: {}", domain);
+                    }
+                } else {
+                    log::debug!("Certificate name '{}' is specified for domain '{}', not requesting new certificate (certificate may be shared)", cert_name, domain);
+                }
+            }
+            (None, None) => {
+                missing_count += 1;
+                log::warn!("Certificate not found in Redis for domain: {} (cert: {}, checked keys: fullchain='{}', privkey='{}')",
+                    domain, cert_name, fullchain_key, privkey_key);
+
+                // Only request certificate if no certificate name is specified (i.e., use domain name)
+                // If a certificate name is specified, it means we should use an existing shared certificate
+                if cert_name_opt.is_none() {
+                    // Try to list matching keys to help debug
+                    let pattern = format!("{}:{}:*", prefix, normalized_cert_name);
+                let keys_result: Result<Vec<String>, _> = redis::cmd("KEYS")
+                    .arg(&pattern)
+                    .query_async(&mut connection)
+                    .await;
+                match keys_result {
+                    Ok(keys) => {
+                        if !keys.is_empty() {
+                            log::debug!("Found {} matching keys for pattern '{}': {:?}", keys.len(), pattern, keys);
+                        } else {
+                            log::warn!("No keys found matching pattern '{}'", pattern);
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to list keys with pattern '{}': {}", pattern, e);
+                    }
+                }
+
+                    // Request certificate from ACME server if enabled
+                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, &certificate_path).await {
+                        log::warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
+                    } else {
+                        log::debug!("Successfully requested certificate from ACME for domain: {}", domain);
+                    }
+                } else {
+                    log::debug!("Certificate name '{}' is specified for domain '{}', not requesting new certificate (certificate may be shared)", cert_name, domain);
+                }
             }
         }
     }
 
     // Log summary
     if skipped_count > 0 {
-        log::info!("Skipped {} certificate(s) due to hash matches (using existing files)", skipped_count);
+        log::debug!("Skipped {} certificate(s) due to hash matches (using existing files)", skipped_count);
     }
     if downloaded_count > 0 {
         log::info!("Downloaded {} new/updated certificate(s) from Redis", downloaded_count);
@@ -435,7 +590,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
     }
 
     if !certificate_configs.is_empty() {
-        log::info!("Successfully processed {} certificate(s) ({} downloaded, {} skipped)",
+        log::debug!("Successfully processed {} certificate(s) ({} downloaded, {} skipped)",
             certificate_configs.len(), downloaded_count, skipped_count);
         log::debug!("Certificate configs to load: {:?}",
             certificate_configs.iter().map(|c| format!("cert: {}, key: {}", c.cert_path, c.key_path)).collect::<Vec<_>>());
@@ -448,7 +603,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
                 let store = get_certificate_store();
                 let mut guard = store.write().await;
                 *guard = Some(Arc::new(certificates));
-                log::info!("Updated certificate store with {} certificates", certificate_configs.len());
+                log::debug!("Updated certificate store with {} certificates", certificate_configs.len());
             }
             None => {
                 log::error!("Failed to create Certificates object from fetched configs. This usually means one or more certificate files are invalid or cannot be loaded.");
@@ -459,8 +614,329 @@ async fn fetch_certificates_from_redis(certificate_path: &str) -> Result<()> {
             }
         }
     } else {
-        log::warn!("No certificates were processed. Check if certificates exist in Redis for the domains listed in ssl-storage:domains, or if all certificates were skipped due to hash matches but files are missing");
+        log::warn!("No certificates were processed. Check if certificates exist in Redis for the domains listed in upstreams.yaml, or if all certificates were skipped due to hash matches but files are missing");
     }
+
+    Ok(())
+}
+
+/// Global ACME config store
+static ACME_CONFIG: once_cell::sync::OnceCell<Arc<std::sync::RwLock<Option<crate::cli::AcmeConfig>>>> = once_cell::sync::OnceCell::new();
+
+/// Global upstreams path store
+static UPSTREAMS_PATH: once_cell::sync::OnceCell<Arc<std::sync::RwLock<Option<String>>>> = once_cell::sync::OnceCell::new();
+
+/// Set the global ACME config (called from main.rs)
+pub fn set_acme_config(config: crate::cli::AcmeConfig) {
+    let store = ACME_CONFIG.get_or_init(|| Arc::new(std::sync::RwLock::new(None)));
+    let mut guard = store.write().unwrap();
+    *guard = Some(config);
+}
+
+/// Set the global upstreams path (called from certificate worker)
+fn set_upstreams_path(path: String) {
+    let store = UPSTREAMS_PATH.get_or_init(|| Arc::new(std::sync::RwLock::new(None)));
+    let mut guard = store.write().unwrap();
+    *guard = Some(path);
+}
+
+/// Get the global ACME config
+pub async fn get_acme_config() -> Option<crate::cli::AcmeConfig> {
+    let store = ACME_CONFIG.get()?;
+    let guard = tokio::task::spawn_blocking({
+        let store = Arc::clone(store);
+        move || store.read().unwrap().clone()
+    }).await.ok()?;
+    guard
+}
+
+/// Get the global upstreams path
+async fn get_upstreams_path() -> Option<String> {
+    let store = UPSTREAMS_PATH.get()?;
+    let guard = tokio::task::spawn_blocking({
+        let store = Arc::clone(store);
+        move || store.read().unwrap().clone()
+    }).await.ok()?;
+    guard
+}
+
+/// Request a certificate from ACME server for a domain
+pub async fn request_certificate_from_acme(
+    domain: &str,
+    normalized_domain: &str,
+    _certificate_path: &str,
+) -> Result<()> {
+    use crate::acme::{Config, ConfigOpts, request_cert};
+    use std::path::PathBuf;
+
+    // Check if ACME is enabled
+    let acme_config = match get_acme_config().await {
+        Some(config) if config.enabled => config,
+        Some(_) => {
+            log::debug!("ACME is disabled, skipping certificate request for domain: {}", domain);
+            return Ok(());
+        }
+        None => {
+            log::debug!("ACME config not available, skipping certificate request for domain: {}", domain);
+            return Ok(());
+        }
+    };
+
+    // Get email - use from config or default
+    let email = acme_config.email
+        .unwrap_or_else(|| "admin@example.com".to_string());
+
+    // Get Redis URL from RedisManager if available
+    let redis_url = crate::redis::RedisManager::get()
+        .ok()
+        .and_then(|_| {
+            // Use ACME config Redis URL, or try to get from RedisManager
+            acme_config.redis_url.clone()
+                .or_else(|| std::env::var("REDIS_URL").ok())
+        });
+
+    // Read challenge type from upstreams.yaml
+    // Get upstreams path from global store (set by certificate worker) or use default
+    let upstreams_path = get_upstreams_path().await
+        .unwrap_or_else(|| "/root/moat/upstreams.yaml".to_string());
+
+    let (use_dns, domain_email) = {
+
+        // Try to read challenge type from upstreams.yaml
+        if let Ok(yaml_content) = tokio::fs::read_to_string(&upstreams_path).await {
+            if let Ok(parsed) = serde_yaml::from_str::<crate::utils::structs::Config>(&yaml_content) {
+                if let Some(upstreams) = &parsed.upstreams {
+                    if let Some(host_config) = upstreams.get(domain) {
+                        // Get challenge type from ACME config in upstreams
+                        let challenge_type = if let Some(acme_cfg) = &host_config.acme {
+                            acme_cfg.challenge_type.clone()
+                        } else {
+                            // Auto-detect: DNS-01 for wildcard, HTTP-01 otherwise
+                            if domain.starts_with("*.") {
+                                "dns-01".to_string()
+                            } else {
+                                "http-01".to_string()
+                            }
+                        };
+
+                        let use_dns = challenge_type == "dns-01";
+                        let domain_email = host_config.acme.as_ref()
+                            .and_then(|a| a.email.clone())
+                            .or_else(|| Some(email.clone()));
+
+                        log::debug!("Using challenge type '{}' for domain {} (from upstreams.yaml)", challenge_type, domain);
+                        (use_dns, domain_email)
+                    } else {
+                        // Domain not found in upstreams, auto-detect
+                        let is_wildcard = domain.starts_with("*.");
+                        log::info!("Domain {} not found in upstreams.yaml, auto-detecting challenge type (wildcard: {})", domain, is_wildcard);
+                        (is_wildcard, Some(email.clone()))
+                    }
+                } else {
+                    // No upstreams, auto-detect
+                    let is_wildcard = domain.starts_with("*.");
+                    (is_wildcard, Some(email.clone()))
+                }
+            } else {
+                // Failed to parse, auto-detect
+                let is_wildcard = domain.starts_with("*.");
+                (is_wildcard, Some(email.clone()))
+            }
+        } else {
+            // Failed to read, auto-detect
+            let is_wildcard = domain.starts_with("*.");
+            (is_wildcard, Some(email.clone()))
+        }
+    };
+
+    // Create domain config for ACME
+    let mut domain_storage_path = PathBuf::from(&acme_config.storage_path);
+    domain_storage_path.push(normalized_domain);
+
+    let mut cert_path = domain_storage_path.clone();
+    cert_path.push("cert.pem");
+    let mut key_path = domain_storage_path.clone();
+    key_path.push("key.pem");
+    let static_path = domain_storage_path.clone();
+
+    // Determine if this is a wildcard domain
+    let is_wildcard = domain.starts_with("*.");
+
+    // Get Redis SSL config if available
+    let redis_ssl = crate::redis::RedisManager::get()
+        .ok()
+        .and_then(|_| {
+            // Try to get SSL config from global config if available
+            // For now, we'll use None and let it use defaults
+            None
+        });
+
+    let acme_config_internal = Config {
+        https_path: domain_storage_path,
+        cert_path,
+        key_path,
+        static_path,
+        opts: ConfigOpts {
+            ip: "127.0.0.1".to_string(),
+            port: acme_config.port,
+            domain: domain.to_string(),
+            email: domain_email,
+            https_dns: use_dns,
+            development: acme_config.development,
+            dns_lookup_max_attempts: Some(100),
+            dns_lookup_delay_seconds: Some(10),
+                storage_type: {
+                    // Always use Redis (storage_type option is kept for compatibility but always uses Redis)
+                    Some("redis".to_string())
+                },
+            redis_url,
+            lock_ttl_seconds: Some(900),
+            redis_ssl,
+            challenge_max_ttl_seconds: Some(3600),
+        },
+    };
+
+    // Request certificate from ACME
+    log::debug!("Requesting certificate from ACME for domain: {} (wildcard: {}, dns: {})",
+        domain, is_wildcard, use_dns);
+
+    request_cert(&acme_config_internal).await
+        .context(format!("Failed to request certificate from ACME for domain: {}", domain))?;
+
+    log::debug!("Certificate requested successfully from ACME for domain: {}. It will be available in Redis after processing.", domain);
+
+    // After requesting, the certificate should be in Redis (if using Redis storage)
+    // The next refresh cycle will pick it up automatically
+
+    Ok(())
+}
+
+/// Check certificates for expiration and renew if expiring within 60 days
+async fn check_and_renew_expiring_certificates(upstreams_path: &str) -> Result<()> {
+    use x509_parser::prelude::*;
+    use x509_parser::nom::Err as NomErr;
+    use rustls_pemfile::read_one;
+    use std::io::BufReader;
+
+    // Get the list of domains from upstreams.yaml
+    let domains = fetch_domains_from_upstreams(upstreams_path).await?;
+
+    if domains.is_empty() {
+        log::debug!("No domains found in upstreams.yaml, skipping expiration check");
+        return Ok(());
+    }
+
+    log::info!("Checking certificate expiration for {} domain(s)", domains.len());
+
+    let redis_manager = RedisManager::get()
+        .context("Redis manager not initialized")?;
+
+    let mut connection = redis_manager.get_connection();
+    let mut renewed_count = 0;
+    let mut checked_count = 0;
+
+    for domain in &domains {
+        let normalized_domain = domain.strip_prefix("*.").unwrap_or(domain);
+
+        // Check if certificate exists in Redis
+        // Get prefix from RedisManager
+        let prefix = RedisManager::get()
+            .map(|rm| rm.get_prefix().to_string())
+            .unwrap_or_else(|_| "ssl-storage".to_string());
+        let fullchain_key = format!("{}:{}:live:fullchain", prefix, normalized_domain);
+        let fullchain: Option<Vec<u8>> = redis::cmd("GET")
+            .arg(&fullchain_key)
+            .query_async(&mut connection)
+            .await
+            .context(format!("Failed to get fullchain for domain: {}", domain))?;
+
+        let fullchain_bytes = match fullchain {
+            Some(bytes) => bytes,
+            None => {
+                log::debug!("Certificate not found in Redis for domain: {}, skipping expiration check", domain);
+                continue;
+            }
+        };
+
+        // Parse the certificate to get expiration date
+        let fullchain_str = match String::from_utf8(fullchain_bytes.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                log::warn!("Fullchain for domain {} is not valid UTF-8, skipping expiration check", domain);
+                continue;
+            }
+        };
+
+        // Parse PEM to get the first certificate (domain cert)
+        let mut reader = BufReader::new(fullchain_str.as_bytes());
+        let cert_der = match read_one(&mut reader) {
+            Ok(Some(rustls_pemfile::Item::X509Certificate(cert))) => cert,
+            Ok(_) => {
+                log::warn!("No X509 certificate found in fullchain for domain: {}", domain);
+                continue;
+            }
+            Err(e) => {
+                log::warn!("Failed to parse certificate for domain {}: {:?}", domain, e);
+                continue;
+            }
+        };
+
+        // Parse the DER certificate
+        let (_, x509_cert) = match X509Certificate::from_der(&cert_der) {
+            Ok(cert) => cert,
+            Err(NomErr::Error(e)) | Err(NomErr::Failure(e)) => {
+                log::warn!("Failed to parse X509 certificate for domain {}: {:?}", domain, e);
+                continue;
+            }
+            Err(_) => {
+                log::warn!("Unknown error parsing X509 certificate for domain: {}", domain);
+                continue;
+            }
+        };
+
+        // Get expiration date
+        let validity = x509_cert.validity();
+        let not_after_offset = validity.not_after.to_datetime();
+        let now = chrono::Utc::now();
+
+        // Convert OffsetDateTime to chrono::DateTime<Utc>
+        let not_after = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            not_after_offset.unix_timestamp(),
+            0
+        ).unwrap_or_else(|| {
+            log::warn!("Failed to convert certificate expiration date for domain: {}", domain);
+            now + chrono::Duration::days(90) // Fallback to 90 days from now
+        });
+
+        // Calculate days until expiration
+        let expires_in = not_after - now;
+        let days_until_expiration = expires_in.num_days();
+
+        checked_count += 1;
+
+        log::debug!("Certificate for domain {} expires in {} days (expires at: {})",
+            domain, days_until_expiration, not_after);
+
+        // Check if certificate expires in less than 60 days
+        if days_until_expiration < 60 {
+            log::info!("Certificate for domain {} expires in {} days (< 60 days), starting renewal process",
+                domain, days_until_expiration);
+
+            // Request renewal from ACME
+            let certificate_path = "/tmp/moat-certs"; // Placeholder, will be stored in Redis
+            if let Err(e) = request_certificate_from_acme(domain, normalized_domain, certificate_path).await {
+                log::warn!("Failed to renew certificate for domain {}: {}", domain, e);
+            } else {
+                log::info!("Successfully initiated certificate renewal for domain: {}", domain);
+                renewed_count += 1;
+            }
+        } else {
+            log::debug!("Certificate for domain {} is still valid (expires in {} days)",
+                domain, days_until_expiration);
+        }
+    }
+
+    log::info!("Certificate expiration check completed: {} checked, {} renewed", checked_count, renewed_count);
 
     Ok(())
 }

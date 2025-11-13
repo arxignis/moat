@@ -49,6 +49,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub pingora: PingoraConfig,
+    #[serde(default)]
+    pub acme: AcmeConfig,
 }
 
 fn default_mode() -> String { "proxy".to_string() }
@@ -250,6 +252,7 @@ impl Config {
             tcp_fingerprint: TcpFingerprintConfig::default(),
             daemon: DaemonConfig::default(),
             pingora: PingoraConfig::default(),
+            acme: AcmeConfig::default(),
         }
     }
 
@@ -752,6 +755,46 @@ fn default_pingora_config_api_enabled() -> bool { true }
 fn default_pingora_log_level() -> String { "debug".to_string() }
 fn default_pingora_healthcheck_method() -> String { "HEAD".to_string() }
 fn default_pingora_healthcheck_interval() -> u16 { 2 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeConfig {
+    /// Enable embedded ACME server
+    #[serde(default = "default_acme_enabled")]
+    pub enabled: bool,
+    /// Port for ACME server (e.g., 9180)
+    #[serde(default = "default_acme_port")]
+    pub port: u16,
+    /// Email for ACME account
+    pub email: Option<String>,
+    /// Storage path for certificates
+    #[serde(default = "default_acme_storage_path")]
+    pub storage_path: String,
+    /// Storage type: "file" or "redis" (defaults to "file", or "redis" if redis_url is set)
+    pub storage_type: Option<String>,
+    /// Use development/staging ACME server
+    #[serde(default)]
+    pub development: bool,
+    /// Redis URL for storage (optional, uses global redis.url if not set)
+    pub redis_url: Option<String>,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_acme_enabled(),
+            port: default_acme_port(),
+            email: None,
+            storage_path: default_acme_storage_path(),
+            storage_type: None,
+            development: false,
+            redis_url: None,
+        }
+    }
+}
+
+fn default_acme_enabled() -> bool { false }
+fn default_acme_port() -> u16 { 9180 }
+fn default_acme_storage_path() -> String { "/tmp/moat-acme".to_string() }
 
 impl PingoraConfig {
     /// Convert PingoraConfig to AppConfig for compatibility with old proxy system

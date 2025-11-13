@@ -12,7 +12,7 @@ use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::prelude::{background_service, Opt};
 use pingora_core::server::Server;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 pub fn run() {
     run_with_config(None)
@@ -173,14 +173,41 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
     server.add_service(proxy);
     server.add_service(bg_srvc);
 
-    thread::spawn(move || server.run_forever());
+    // Spawn server in a thread - it will run until process exits
+    thread::spawn(move || {
+        // Run server - it will block until process exits
+        server.run_forever();
+    });
 
     if let (Some(user), Some(group)) = (cfg.rungroup.clone(), cfg.runuser.clone()) {
         crate::utils::tools::drop_priv(user, group, cfg.proxy_address_http.clone(), cfg.proxy_address_tls.clone());
     }
 
     let (tx, rx) = channel();
-    ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel.")).expect("Error setting Ctrl-C handler");
-    rx.recv().expect("Could not receive from channel.");
-    info!("Signal received ! Exiting...");
+    let tx_shared = Arc::new(Mutex::new(Some(tx)));
+    let tx_handler = Arc::clone(&tx_shared);
+
+    ctrlc::set_handler(move || {
+        // Try to send signal - if it fails, log but don't panic
+        if let Ok(tx_guard) = tx_handler.lock() {
+            if let Some(ref tx) = *tx_guard {
+                if let Err(e) = tx.send(()) {
+                    warn!("Failed to send Ctrl-C signal: {}. Program may already be shutting down.", e);
+                }
+            }
+        }
+    }).expect("Error setting Ctrl-C handler");
+
+    // Wait for Ctrl-C signal
+    match rx.recv() {
+        Ok(_) => {
+            info!("Signal received ! Exiting...");
+            // Exit the process - this will terminate all spawned threads including the server
+            std::process::exit(0);
+        }
+        Err(e) => {
+            warn!("Error receiving signal: {}. Exiting anyway.", e);
+            std::process::exit(1);
+        }
+    }
 }

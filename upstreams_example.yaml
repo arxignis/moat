@@ -3,6 +3,13 @@
 #
 # Schema Version: New format with nested config: section
 # This file demonstrates all available configuration options
+#
+# ACME Certificate Management:
+# - If a certificate is not found in Redis for a domain, it will be automatically
+#   requested from the embedded ACME server (if enabled in config.yaml)
+# - Challenge types: "http-01" (default) or "dns-01" (for wildcard domains)
+# - Wildcard domains (*.example.com) automatically use DNS-01 challenge
+# - Configure challenge type per domain using the "acme" section below
 
 # Provider type: "file", "consul", or "kubernetes"
 provider: "file"
@@ -46,12 +53,15 @@ arxignis_paths:
     servers:
       - "127.0.0.1:3001"
 
-  "/.well-known/acme-challenge/":
+  # ACME challenge endpoint - routes to embedded ACME server
+  # The embedded ACME server listens on a separate internal port (default: 127.0.0.1:8088)
+  "/.well-known/acme-challenge/*":
     rate_limit: 200
     force_https: false
     ssl_enabled: false
     servers:
-      - "127.0.0.1:3001"
+      - "127.0.0.1:8088"  # Embedded ACME server internal port
+
 # Upstream servers configuration
 # Format: hostname -> paths -> servers
 upstreams:
@@ -60,6 +70,15 @@ upstreams:
     # Certificate name (without .crt/.key extension) in the certificate directory
     # If not specified, no TLS certificate will be used for this hostname
     certificate: "example.com"
+
+    # ACME certificate configuration (optional)
+    # If certificate is missing in Redis, it will be automatically requested from ACME server
+    acme:
+      # Challenge type: "http-01" or "dns-01"
+      # Default: "http-01" for regular domains, "dns-01" for wildcard domains (*.example.com)
+      challenge_type: "http-01"
+      # Email for ACME account (optional, uses global ACME email if not set)
+      email: "admin@example.com"
 
     paths:
       "/":
@@ -85,6 +104,11 @@ upstreams:
   # Example 2: Multi-path service with different configurations
   api.example.com:
     certificate: "api_example_com"
+
+    # ACME configuration with DNS-01 challenge (for wildcard or manual DNS setup)
+    acme:
+      challenge_type: "dns-01"
+      email: "admin@example.com"
 
     paths:
       # API root path
@@ -115,7 +139,25 @@ upstreams:
         servers:
           - "127.0.0.1:9002"
 
-  # Example 3: Service without certificate (HTTP only)
+  # Example 3: Wildcard domain (automatically uses DNS-01 challenge)
+  "*.example.com":
+    certificate: "wildcard_example_com"
+
+    # ACME configuration for wildcard domain
+    # Note: Wildcard domains require DNS-01 challenge
+    acme:
+      challenge_type: "dns-01"  # Required for wildcard domains
+      email: "admin@example.com"
+      wildcard: true
+
+    paths:
+      "/":
+        rate_limit: 200
+        force_https: true
+        servers:
+          - "127.0.0.1:8000"
+
+  # Example 4: Service without certificate (HTTP only)
   localhost:
     paths:
       "/":
@@ -128,11 +170,16 @@ upstreams:
         servers:
           - "127.0.0.1:8080"
 
-  # Example 4: Service with host-level rate limit
+  # Example 5: Service with host-level rate limit
   high-traffic.example.com:
     # Host-level rate limit (applies to all paths unless overridden)
     rate_limit: 1000
     certificate: "high_traffic_example_com"
+
+    # ACME configuration (optional - will auto-detect if not specified)
+    # If omitted, uses "http-01" for regular domains, "dns-01" for wildcard domains
+    acme:
+      challenge_type: "http-01"
 
     paths:
       "/":
