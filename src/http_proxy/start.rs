@@ -237,8 +237,9 @@ async fn run_proxy_protocol_listener(
         debug!("New connection from: {}", peer_addr);
         
         // Spawn a task to handle this connection
+        let lb_for_task = _lb.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_proxy_protocol_connection(tcp_stream, peer_addr).await {
+            if let Err(e) = handle_proxy_protocol_connection(tcp_stream, peer_addr, lb_for_task).await {
                 warn!("Connection handling error for {}: {}", peer_addr, e);
             }
         });
@@ -249,7 +250,12 @@ async fn run_proxy_protocol_listener(
 async fn handle_proxy_protocol_connection(
     tcp_stream: tokio::net::TcpStream,
     peer_addr: std::net::SocketAddr,
+    lb: LB,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use pingora_proxy::Session;
+    use pingora_core::protocols::http::v1::server::HttpSession;
+    use pingora_core::protocols::http::ServerSession;
+    
     // Convert tokio TcpStream to Pingora Stream
     let mut stream: Stream = tcp_stream.into();
     
@@ -258,15 +264,20 @@ async fn handle_proxy_protocol_connection(
     
     info!("Processing HTTP request from {} (via {})", real_client_addr, peer_addr);
     
-    // At this point, we have:
-    // 1. A clean stream with PROXY header removed (if it was present)
-    // 2. The real client address
-    // 
-    // TODO: Feed this stream to Pingora's HTTP handling logic
-    // This requires deeper integration with Pingora's Session/ProxyHttp architecture
-    // For now, we've demonstrated the PROXY header consumption
+    // Create HTTP/1.1 session from the cleaned stream
+    // The stream now has the PROXY header consumed, ready for HTTP parsing
+    let http_stream = Box::new(HttpSession::new(stream));
+    let server_session = ServerSession::new_http1(http_stream);
     
-    warn!("PROXY protocol connection handling not fully implemented - Pingora Session integration required");
+    // Create a Pingora session with the real client address
+    let mut session = Session::new_http1(server_session, real_client_addr);
+    
+    // Process the request through Pingora's ProxyHttp handler
+    match pingora_proxy::proxy_http_handler(&lb, &mut session).await {
+        Ok(_) => debug!("Request processed successfully for {}", real_client_addr),
+        Err(e) => warn!("Error processing request for {}: {}", real_client_addr, e),
+    }
+    
     Ok(())
 }
 
