@@ -1,13 +1,13 @@
 services:
 
-  # moat:
+  # synapse:
   #   build:
   #     context: .
   #     dockerfile: Dockerfile
   #   depends_on:
   #     - redis
   #     - clamav
-  #   container_name: moat
+  #   container_name: synapse
   #   privileged: true
   #   network_mode: host
   #   cap_add:
@@ -22,13 +22,13 @@ services:
 
   # redis:
   #   image: redis:7-alpine
-  #   container_name: moat-redis
+  #   container_name: synapse-redis
   #   ports:
   #     - "127.0.0.1:6379:6379"
   #   volumes:
   #     - redis-data:/data
   #   networks:
-  #     - moat-network
+  #     - synapse-network
   #   healthcheck:
   #     test: ["CMD", "redis-cli", "ping"]
   #     interval: 5s
@@ -38,11 +38,11 @@ services:
 
   demo-app:
     image: containous/whoami:latest
-    container_name: moat-demo-app
+    container_name: synapse-demo-app
     ports:
       - "8000:80"
     networks:
-      - moat-network
+      - synapse-network
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.demo.rule=PathPrefix(`/`)"
@@ -51,7 +51,7 @@ services:
 
   # traefik:
   #   image: traefik:v3.5
-  #   container_name: moat-traefik
+  #   container_name: synapse-traefik
   #   command:
   #     - "--api.insecure=true"
   #     - "--providers.docker=true"
@@ -65,7 +65,7 @@ services:
   #   volumes:
   #     - /var/run/docker.sock:/var/run/docker.sock:ro
   #   networks:
-  #     - moat-network
+  #     - synapse-network
   #   depends_on:
   #     - demo-app
   #   restart: unless-stopped
@@ -77,13 +77,13 @@ services:
 
   # clamav:
   #   image: clamav/clamav:latest
-  #   container_name: moat-clamav
+  #   container_name: synapse-clamav
   #   ports:
   #     - "3310"
   #   volumes:
   #     - clamav-data:/data
   #   networks:
-  #     - moat-network
+  #     - synapse-network
   #   restart: unless-stopped
   #   healthcheck:
   #     test: ["CMD", "clamscan", "--version"]
@@ -92,7 +92,7 @@ services:
   #     retries: 3
 
 networks:
-  moat-network:
+  synapse-network:
 
 volumes:
   redis-data:

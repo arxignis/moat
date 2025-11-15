@@ -1,4 +1,4 @@
-name: Moat Build
+name: Synapse Build
 on:
   pull_request:
       branches:
@@ -17,8 +17,8 @@ jobs:
             ~/.cargo/git/
             ~/.cargo/registry/
             target/
-          key: ${{ runner.os }}-moat-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-moat
+          key: ${{ runner.os }}-synapse-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-synapse
       - name: Install package
         run: |
           sudo apt-get update && sudo apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \
@@ -44,8 +44,8 @@ jobs:
             ~/.cargo/git/
             ~/.cargo/registry/
             target/
-          key: ${{ runner.os }}-moat-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-moat
+          key: ${{ runner.os }}-synapse-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-synapse
       - name: Install package
         run: |
           sudo apt-get update && sudo apt-get install -y git build-essential clang llvm libelf-dev libssl-dev \

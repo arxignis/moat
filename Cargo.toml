@@ -1,9 +1,9 @@
 [package]
-name = "moat"
-authors = ["Arxignis <support@arxignis.com>"]
+name = "synapse"
+authors = ["Gen0Sec <support@gen0sec.com>"]
 license = "ELv2"
-homepage = "https://arxignis.com"
-repository = "https://github.com/arxignis/moat"
+homepage = "https://gen0sec.com"
+repository = "https://github.com/gen0sec/synapse"
 version = "0.1.6"
 edition = "2024"
 keywords = ["bpf", "firewall", "reverse-proxy", "tls", "proxy", "proxy-protocol", "content-scanning", "threat-intelligence", "captcha", "hcaptcha", "recaptcha", "cloudflare-turnstile", "runtime"]
@@ -83,14 +83,14 @@ daemonize = "0.5.0"
 #pingora-http = { path = "../pingora/pingora-http" }
 
 
-pingora = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca", features = ["lb", "openssl"] }
-pingora-core = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-proxy = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-limits = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-http = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-memory-cache = { git = "https://github.com/arxignis/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-proxy-protocol = { git = "https://github.com/arxignis/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}
-wirefilter-engine = { git = "https://github.com/arxignis/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
+pingora = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca", features = ["lb", "openssl"] }
+pingora-core = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-proxy = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-limits = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-http = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+pingora-memory-cache = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
+proxy-protocol = { git = "https://github.com/gen0sec/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}
+wirefilter-engine = { git = "https://github.com/gen0sec/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
 
 mimalloc = { version = "0.1.48", default-features = false }
 dashmap = "7.0.0-rc2"

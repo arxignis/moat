@@ -1,10 +1,10 @@
 # Daemon Mode Implementation
 
-This document describes the daemon mode implementation for Moat.
+This document describes the daemon mode implementation for Synapse.
 
 ## Overview
 
-Moat now supports running as a daemon (background process) using the [daemonize](https://docs.rs/daemonize/latest/daemonize/) crate. This allows Moat to run as a system service with proper privilege dropping and process management.
+Synapse now supports running as a daemon (background process) using the [daemonize](https://docs.rs/daemonize/latest/daemonize/) crate. This allows Synapse to run as a system service with proper privilege dropping and process management.
 
 ## Features
 
@@ -22,10 +22,10 @@ Moat now supports running as a daemon (background process) using the [daemonize]
 ```yaml
 daemon:
   enabled: false                        # Enable daemon mode
-  pid_file: "/var/run/moat.pid"       # PID file path
+  pid_file: "/var/run/synapse.pid"       # PID file path
   working_directory: "/"               # Working directory
-  stdout: "/var/log/moat.out"         # Stdout log file
-  stderr: "/var/log/moat.err"         # Stderr log file
+  stdout: "/var/log/synapse.out"         # Stdout log file
+  stderr: "/var/log/synapse.err"         # Stderr log file
   user: "nobody"                       # User to run as (optional)
   group: "daemon"                      # Group to run as (optional)
   chown_pid_file: true                # Change PID file ownership to user/group
@@ -34,10 +34,10 @@ daemon:
 ### Command Line Arguments
 
 - `--daemon`, `-d` - Run as daemon in background
-- `--daemon-pid-file <PATH>` - PID file path (default: `/var/run/moat.pid`)
+- `--daemon-pid-file <PATH>` - PID file path (default: `/var/run/synapse.pid`)
 - `--daemon-working-dir <PATH>` - Working directory (default: `/`)
-- `--daemon-stdout <PATH>` - Stdout log file (default: `/var/log/moat.out`)
-- `--daemon-stderr <PATH>` - Stderr log file (default: `/var/log/moat.err`)
+- `--daemon-stdout <PATH>` - Stdout log file (default: `/var/log/synapse.out`)
+- `--daemon-stderr <PATH>` - Stderr log file (default: `/var/log/synapse.err`)
 - `--daemon-user <USER>` - User to run as (e.g., `nobody`)
 - `--daemon-group <GROUP>` - Group to run as (e.g., `daemon`)
 
@@ -57,17 +57,17 @@ daemon:
 ### Basic Daemon Mode
 
 ```bash
-moat --daemon --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
+synapse --daemon --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
 ```
 
 ### Custom Daemon Settings
 
 ```bash
-moat --daemon \
-  --daemon-pid-file /var/run/moat.pid \
+synapse --daemon \
+  --daemon-pid-file /var/run/synapse.pid \
   --daemon-working-dir / \
-  --daemon-stdout /var/log/moat.out \
-  --daemon-stderr /var/log/moat.err \
+  --daemon-stdout /var/log/synapse.out \
+  --daemon-stderr /var/log/synapse.err \
   --daemon-user nobody \
   --daemon-group daemon \
   --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
@@ -79,27 +79,27 @@ moat --daemon \
 # config.yaml
 daemon:
   enabled: true
-  pid_file: "/var/run/moat.pid"
+  pid_file: "/var/run/synapse.pid"
   working_directory: "/"
-  stdout: "/var/log/moat.out"
-  stderr: "/var/log/moat.err"
+  stdout: "/var/log/synapse.out"
+  stderr: "/var/log/synapse.err"
   user: "nobody"
   group: "daemon"
   chown_pid_file: true
 
 # Run with config file
-moat --config config.yaml
+synapse --config config.yaml
 ```
 
 ### With Environment Variables
 
 ```bash
 export AX_DAEMON_ENABLED="true"
-export AX_DAEMON_PID_FILE="/var/run/moat.pid"
+export AX_DAEMON_PID_FILE="/var/run/synapse.pid"
 export AX_DAEMON_USER="nobody"
 export AX_DAEMON_GROUP="daemon"
 
-moat --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
+synapse --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
 ```
 
 ## Process Management
@@ -107,56 +107,56 @@ moat --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-ke
 ### Starting the Daemon
 
 ```bash
-moat --daemon --config /etc/moat/config.yaml
+synapse --daemon --config /etc/synapse/config.yaml
 ```
 
 ### Stopping the Daemon
 
 ```bash
 # Using PID file
-kill $(cat /var/run/moat.pid)
+kill $(cat /var/run/synapse.pid)
 
 # Or send SIGTERM
-kill -TERM $(cat /var/run/moat.pid)
+kill -TERM $(cat /var/run/synapse.pid)
 
 # Graceful shutdown with SIGINT
-kill -INT $(cat /var/run/moat.pid)
+kill -INT $(cat /var/run/synapse.pid)
 ```
 
 ### Checking Status
 
 ```bash
 # Check if process is running
-ps aux | grep moat
+ps aux | grep synapse
 
 # Or check PID file
-if [ -f /var/run/moat.pid ]; then
-    pid=$(cat /var/run/moat.pid)
+if [ -f /var/run/synapse.pid ]; then
+    pid=$(cat /var/run/synapse.pid)
     if ps -p $pid > /dev/null; then
-        echo "Moat is running (PID: $pid)"
+        echo "Synapse is running (PID: $pid)"
     else
-        echo "Moat is not running (stale PID file)"
+        echo "Synapse is not running (stale PID file)"
     fi
 else
-    echo "Moat is not running"
+    echo "Synapse is not running"
 fi
 ```
 
 ### Viewing Logs
 
 In daemon mode, logs are split:
-- **stdout** (`/var/log/moat.out`) - Application logs (info, debug, warn, error from the logger)
-- **stderr** (`/var/log/moat.err`) - Panic messages and other stderr output
+- **stdout** (`/var/log/synapse.out`) - Application logs (info, debug, warn, error from the logger)
+- **stderr** (`/var/log/synapse.err`) - Panic messages and other stderr output
 
 ```bash
 # Tail application logs (primary log file)
-tail -f /var/log/moat.out
+tail -f /var/log/synapse.out
 
 # Tail error output (panics, system errors)
-tail -f /var/log/moat.err
+tail -f /var/log/synapse.err
 
 # View both logs simultaneously
-tail -f /var/log/moat.out /var/log/moat.err
+tail -f /var/log/synapse.out /var/log/synapse.err
 ```
 
 **Note**: When running in daemon mode, the application logger writes to stdout for better log organization. In non-daemon mode, logs go to stderr (standard behavior).
@@ -168,7 +168,7 @@ tail -f /var/log/moat.out /var/log/moat.err
 When running as daemon with a privileged user (e.g., root) to bind to ports < 1024 or attach XDP programs, it's recommended to drop privileges after initialization:
 
 ```bash
-moat --daemon \
+synapse --daemon \
   --daemon-user nobody \
   --daemon-group daemon \
   --iface eth0 --upstream "http://127.0.0.1:8081" --arxignis-api-key "your-key"
@@ -187,18 +187,18 @@ Ensure proper permissions for daemon files:
 
 ```bash
 # Create log directory
-sudo mkdir -p /var/log/moat
-sudo chown nobody:daemon /var/log/moat
-sudo chmod 755 /var/log/moat
+sudo mkdir -p /var/log/synapse
+sudo chown nobody:daemon /var/log/synapse
+sudo chmod 755 /var/log/synapse
 
 # Create PID directory
 sudo mkdir -p /var/run
 sudo chmod 755 /var/run
 
 # Set up log files
-sudo touch /var/log/moat.out /var/log/moat.err
-sudo chown nobody:daemon /var/log/moat.out /var/log/moat.err
-sudo chmod 644 /var/log/moat.out /var/log/moat.err
+sudo touch /var/log/synapse.out /var/log/synapse.err
+sudo chown nobody:daemon /var/log/synapse.out /var/log/synapse.err
+sudo chmod 644 /var/log/synapse.out /var/log/synapse.err
 ```
 
 ## Systemd Integration
@@ -206,16 +206,16 @@ sudo chmod 644 /var/log/moat.out /var/log/moat.err
 Create a systemd service file for easier management:
 
 ```ini
-# /etc/systemd/system/moat.service
+# /etc/systemd/system/synapse.service
 [Unit]
-Description=Moat Reverse Proxy and Firewall
+Description=Synapse Reverse Proxy and Firewall
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=forking
-PIDFile=/var/run/moat.pid
-ExecStart=/usr/local/bin/moat --daemon --config /etc/moat/config.yaml
+PIDFile=/var/run/synapse.pid
+ExecStart=/usr/local/bin/synapse --daemon --config /etc/synapse/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
@@ -225,7 +225,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/moat /var/run
+ReadWritePaths=/var/log/synapse /var/run
 
 [Install]
 WantedBy=multi-user.target
@@ -235,22 +235,22 @@ Manage with systemd:
 
 ```bash
 # Enable service
-sudo systemctl enable moat
+sudo systemctl enable synapse
 
 # Start service
-sudo systemctl start moat
+sudo systemctl start synapse
 
 # Stop service
-sudo systemctl stop moat
+sudo systemctl stop synapse
 
 # Restart service
-sudo systemctl restart moat
+sudo systemctl restart synapse
 
 # View status
-sudo systemctl status moat
+sudo systemctl status synapse
 
 # View logs
-sudo journalctl -u moat -f
+sudo journalctl -u synapse -f
 ```
 
 ## Implementation Details
@@ -294,10 +294,10 @@ The application already has proper signal handling with `tokio::signal::ctrl_c()
 ### Daemon Won't Start
 
 Check:
-1. Log files for errors: `cat /var/log/moat.err`
+1. Log files for errors: `cat /var/log/synapse.err`
 2. Permissions on log directory and PID file location
 3. User/group exists: `id nobody`
-4. Configuration file is valid: `moat --config /etc/moat/config.yaml` (without `--daemon`)
+4. Configuration file is valid: `synapse --config /etc/synapse/config.yaml` (without `--daemon`)
 
 ### Permission Denied Errors
 
@@ -312,18 +312,18 @@ If you see permission errors:
 If daemon won't start due to existing PID file:
 ```bash
 # Check if process is actually running
-ps -p $(cat /var/run/moat.pid)
+ps -p $(cat /var/run/synapse.pid)
 
 # If not running, remove stale PID file
-sudo rm /var/run/moat.pid
+sudo rm /var/run/synapse.pid
 
 # Then start daemon
-moat --daemon --config /etc/moat/config.yaml
+synapse --daemon --config /etc/synapse/config.yaml
 ```
 
 ## References
 
 - [daemonize crate documentation](https://docs.rs/daemonize/latest/daemonize/)
-- [Moat README](README.md)
+- [Synapse README](README.md)
 - [Configuration Examples](config_example.yaml)
 

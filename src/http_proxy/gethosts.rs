@@ -25,7 +25,7 @@ impl GetHost for LB {
             let (servers, index) = arxignis_path_entry.value();
             if !servers.is_empty() {
                 let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
-                debug!("Using Arxignis path {} -> {}", path, servers[idx].address);
+                debug!("Using Gen0Sec path {} -> {}", path, servers[idx].address);
                 return Some(servers[idx].clone());
             }
         }
@@ -76,7 +76,7 @@ impl GetHost for LB {
             }
         }
         if let Some((pattern, server, _)) = best_match {
-            debug!("Using Arxignis path pattern {} -> {} (matched path: {})", pattern, server.address, path);
+            debug!("Using Gen0Sec path pattern {} -> {} (matched path: {})", pattern, server.address, path);
             return Some(server);
         }
         // If no prefix match, try progressively shorter paths (same logic as regular upstreams)
@@ -86,7 +86,7 @@ impl GetHost for LB {
                 let (servers, index) = arxignis_path_entry.value();
                 if !servers.is_empty() {
                     let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
-                    debug!("Using Arxignis path {} -> {} (matched from {})", current_path, servers[idx].address, path);
+                    debug!("Using Gen0Sec path {} -> {} (matched from {})", current_path, servers[idx].address, path);
                     return Some(servers[idx].clone());
                 }
             }

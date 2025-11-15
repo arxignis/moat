@@ -31,7 +31,7 @@ where
     }
 }
 
-/// Threat intelligence response from Arxignis API
+/// Threat intelligence response from Gen0Sec API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatResponse {
     pub schema_version: String,
@@ -169,7 +169,7 @@ impl ThreatClient {
         }
     }
 
-    /// Fetch threat data from Arxignis API
+    /// Fetch threat data from Gen0Sec API
     async fn fetch_from_api(&self, ip: &str) -> Result<Option<ThreatResponse>> {
         let url = format!("{}/threat?ip={}", self.base_url, ip);
 

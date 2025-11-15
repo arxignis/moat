@@ -20,9 +20,9 @@ RUN cargo build --release
 
 FROM gcr.io/distroless/cc-debian13
 
-COPY --from=builder /app/target/release/moat /usr/local/bin/moat
+COPY --from=builder /app/target/release/synapse /usr/local/bin/synapse
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /usr/lib/*/libelf.so.1 /usr/lib/
 COPY --from=builder /usr/lib/*/libzstd.so.1 /usr/lib/
 
-ENTRYPOINT ["/usr/local/bin/moat"]
+ENTRYPOINT ["/usr/local/bin/synapse"]

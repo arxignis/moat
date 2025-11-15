@@ -698,7 +698,7 @@ pub async fn request_certificate_from_acme(
     // Read challenge type from upstreams.yaml
     // Get upstreams path from global store (set by certificate worker) or use default
     let upstreams_path = get_upstreams_path().await
-        .unwrap_or_else(|| "/root/moat/upstreams.yaml".to_string());
+        .unwrap_or_else(|| "/root/synapse/upstreams.yaml".to_string());
 
     let (use_dns, domain_email) = {
 
@@ -923,7 +923,7 @@ async fn check_and_renew_expiring_certificates(upstreams_path: &str) -> Result<(
                 domain, days_until_expiration);
 
             // Request renewal from ACME
-            let certificate_path = "/tmp/moat-certs"; // Placeholder, will be stored in Redis
+            let certificate_path = "/tmp/synapse-certs"; // Placeholder, will be stored in Redis
             if let Err(e) = request_certificate_from_acme(domain, normalized_domain, certificate_path).await {
                 log::warn!("Failed to renew certificate for domain {}: {}", domain, e);
             } else {

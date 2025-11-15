@@ -36,7 +36,7 @@ pub struct Config {
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
-    pub arxignis: ArxignisConfig,
+    pub arxignis: Gen0SecConfig,
     #[serde(default)]
     pub content_scanning: ContentScanningCliConfig,
     #[serde(default)]
@@ -122,7 +122,7 @@ pub struct NetworkConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ArxignisConfig {
+pub struct Gen0SecConfig {
     #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_base_url")]
@@ -138,7 +138,7 @@ pub struct ArxignisConfig {
 }
 
 fn default_base_url() -> String {
-    "https://api.arxignis.com/v1".to_string()
+    "https://api.gen0sec.com/v1".to_string()
 }
 
 fn default_log_sending_enabled() -> bool {
@@ -208,7 +208,7 @@ impl Config {
             mode: "proxy".to_string(),
             redis: RedisConfig {
                 url: "redis://127.0.0.1/0".to_string(),
-                prefix: "ax:moat".to_string(),
+                prefix: "ax:synapse".to_string(),
                 ssl: None,
             },
             network: NetworkConfig {
@@ -216,9 +216,9 @@ impl Config {
                 ifaces: vec![],
                 disable_xdp: false,
             },
-            arxignis: ArxignisConfig {
+            arxignis: Gen0SecConfig {
                 api_key: "".to_string(),
-                base_url: "https://api.arxignis.com/v1".to_string(),
+                base_url: "https://api.gen0sec.com/v1".to_string(),
                 log_sending_enabled: true,
                 include_response_body: true,
                 max_body_size: 1024 * 1024, // 1MB
@@ -265,7 +265,7 @@ impl Config {
         if let Some(api_key) = &args.arxignis_api_key {
             self.arxignis.api_key = api_key.clone();
         }
-        if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.arxignis.com/v1" {
+        if !args.arxignis_base_url.is_empty() && args.arxignis_base_url != "https://api.gen0sec.com/v1" {
             self.arxignis.base_url = args.arxignis_base_url.clone();
         }
         if let Some(log_sending_enabled) = args.arxignis_log_sending_enabled {
@@ -298,16 +298,16 @@ impl Config {
         if args.daemon {
             self.daemon.enabled = true;
         }
-        if args.daemon_pid_file != "/var/run/moat.pid" {
+        if args.daemon_pid_file != "/var/run/synapse.pid" {
             self.daemon.pid_file = args.daemon_pid_file.clone();
         }
         if args.daemon_working_dir != "/" {
             self.daemon.working_directory = args.daemon_working_dir.clone();
         }
-        if args.daemon_stdout != "/var/log/moat.out" {
+        if args.daemon_stdout != "/var/log/synapse.out" {
             self.daemon.stdout = args.daemon_stdout.clone();
         }
-        if args.daemon_stderr != "/var/log/moat.err" {
+        if args.daemon_stderr != "/var/log/synapse.err" {
             self.daemon.stderr = args.daemon_stderr.clone();
         }
         if args.daemon_user.is_some() {
@@ -321,7 +321,7 @@ impl Config {
         if !args.redis_url.is_empty() && args.redis_url != "redis://127.0.0.1/0" {
             self.redis.url = args.redis_url.clone();
         }
-        if !args.redis_prefix.is_empty() && args.redis_prefix != "ax:moat" {
+        if !args.redis_prefix.is_empty() && args.redis_prefix != "ax:synapse" {
             self.redis.prefix = args.redis_prefix.clone();
         }
     }
@@ -330,7 +330,7 @@ impl Config {
         // Check if arxignis API key is provided - only warn if not provided
         // (to support old config format that doesn't have this field)
         if args.arxignis_api_key.is_none() && self.arxignis.api_key.is_empty() {
-            log::warn!("Arxignis API key not provided. Some features may not work.");
+            log::warn!("Gen0Sec API key not provided. Some features may not work.");
         }
 
         Ok(())
@@ -424,7 +424,7 @@ impl Config {
             self.network.disable_xdp = val.parse().unwrap_or(false);
         }
 
-        // Arxignis configuration overrides
+        // Gen0Sec configuration overrides
         if let Ok(val) = env::var("AX_ARXIGNIS_API_KEY") {
             self.arxignis.api_key = val;
         }
@@ -536,7 +536,7 @@ pub struct Args {
     pub redis_url: String,
 
     /// Namespace prefix for Redis ACME cache entries.
-    #[arg(long, default_value = "ax:moat")]
+    #[arg(long, default_value = "ax:synapse")]
     pub redis_prefix: String,
 
     /// The network interface to attach the XDP program to.
@@ -550,8 +550,8 @@ pub struct Args {
     #[arg(long)]
     pub arxignis_api_key: Option<String>,
 
-    /// Base URL for Arxignis API.
-    #[arg(long, default_value = "https://api.arxignis.com/v1")]
+    /// Base URL for Gen0Sec API.
+    #[arg(long, default_value = "https://api.gen0sec.com/v1")]
     pub arxignis_base_url: String,
 
     /// Enable sending access logs to arxignis server
@@ -612,7 +612,7 @@ pub struct Args {
     pub daemon: bool,
 
     /// PID file path for daemon mode
-    #[arg(long, default_value = "/var/run/moat.pid")]
+    #[arg(long, default_value = "/var/run/synapse.pid")]
     pub daemon_pid_file: String,
 
     /// Working directory for daemon mode
@@ -620,11 +620,11 @@ pub struct Args {
     pub daemon_working_dir: String,
 
     /// Stdout log file for daemon mode
-    #[arg(long, default_value = "/var/log/moat.out")]
+    #[arg(long, default_value = "/var/log/synapse.out")]
     pub daemon_stdout: String,
 
     /// Stderr log file for daemon mode
-    #[arg(long, default_value = "/var/log/moat.err")]
+    #[arg(long, default_value = "/var/log/synapse.err")]
     pub daemon_stderr: String,
 
     /// User to run daemon as
@@ -716,10 +716,10 @@ pub struct DaemonConfig {
 }
 
 fn default_daemon_enabled() -> bool { false }
-fn default_daemon_pid_file() -> String { "/var/run/moat.pid".to_string() }
+fn default_daemon_pid_file() -> String { "/var/run/synapse.pid".to_string() }
 fn default_daemon_working_directory() -> String { "/".to_string() }
-fn default_daemon_stdout() -> String { "/var/log/moat.out".to_string() }
-fn default_daemon_stderr() -> String { "/var/log/moat.err".to_string() }
+fn default_daemon_stdout() -> String { "/var/log/synapse.out".to_string() }
+fn default_daemon_stderr() -> String { "/var/log/synapse.err".to_string() }
 fn default_daemon_chown_pid_file() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -794,7 +794,7 @@ impl Default for AcmeConfig {
 
 fn default_acme_enabled() -> bool { false }
 fn default_acme_port() -> u16 { 9180 }
-fn default_acme_storage_path() -> String { "/tmp/moat-acme".to_string() }
+fn default_acme_storage_path() -> String { "/tmp/synapse-acme".to_string() }
 
 impl PingoraConfig {
     /// Convert PingoraConfig to AppConfig for compatibility with old proxy system

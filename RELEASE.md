@@ -1,33 +1,33 @@
 # Release Guide
 
-This document describes the release process for Moat, its Helm chart, and the Moat operator controller. Each component has its own independent release process.
+This document describes the release process for Synapse, its Helm chart, and the Synapse operator controller. Each component has its own independent release process.
 
 ## Overview
 
-The Moat project consists of three independently versioned components:
+The Synapse project consists of three independently versioned components:
 
-1. **Moat** - The main Rust application (reverse proxy and firewall)
-2. **Chart** - The Helm chart for deploying Moat and the operator
+1. **Synapse** - The main Rust application (reverse proxy and firewall)
+2. **Chart** - The Helm chart for deploying Synapse and the operator
 3. **Controller** - The Kubernetes operator (Go-based)
 
 Each component can be released independently using the Makefile targets. Releases create Git tags that trigger GitHub Actions workflows for building and publishing artifacts.
 
 ## Release Types
 
-### 1. Moat Release
+### 1. Synapse Release
 
-Releases the main Moat application.
+Releases the main Synapse application.
 
 **Command:**
 ```bash
-make release-moat VERSION=x.y.z
+make release-synapse VERSION=x.y.z
 ```
 
 **What it does:**
 - Updates `Cargo.toml` version field
 - Updates `install.sh` VERSION variable
-- Runs `cargo update -p moat` to update Cargo.lock
-- Commits changes with message: `chore: release moat x.y.z`
+- Runs `cargo update -p synapse` to update Cargo.lock
+- Commits changes with message: `chore: release synapse x.y.z`
 - Creates Git tag: `vx.y.z`
 - Pushes commit and tag to `origin/main`
 
@@ -39,12 +39,12 @@ make release-moat VERSION=x.y.z
 
 **Example:**
 ```bash
-make release-moat VERSION=0.1.0
+make release-synapse VERSION=0.1.0
 ```
 
 ### 2. Chart Release
 
-Releases the Helm chart for deploying Moat and the operator.
+Releases the Helm chart for deploying Synapse and the operator.
 
 **Command:**
 ```bash
@@ -52,11 +52,11 @@ make release-chart VERSION=x.y.z
 ```
 
 **What it does:**
-- Updates `moat-operator/helm/Chart.yaml`:
+- Updates `synapse-operator/helm/Chart.yaml`:
   - `version` field (chart version)
   - `appVersion` field (application version)
-  - `dependencies[].version` for the moat subchart
-- Updates `moat-operator/helm/charts/moat/Chart.yaml`:
+  - `dependencies[].version` for the synapse subchart
+- Updates `synapse-operator/helm/charts/synapse/Chart.yaml`:
   - `version` field (chart version)
   - `appVersion` field (application version)
 - Commits changes with message: `chore: release chart x.y.z`
@@ -64,7 +64,7 @@ make release-chart VERSION=x.y.z
 - Pushes commit and tag to `origin/main`
 
 **GitHub Workflow:**
-- Triggers `.github/workflows/moat-chart-release.yaml`
+- Triggers `.github/workflows/synapse-chart-release.yaml`
 - Uses `helm/chart-releaser-action` to package and publish the chart
 - Publishes to GitHub Pages (chart repository)
 
@@ -75,7 +75,7 @@ make release-chart VERSION=0.2.0
 
 ### 3. Controller Release
 
-Releases the Moat operator (Kubernetes controller).
+Releases the Synapse operator (Kubernetes controller).
 
 **Command:**
 ```bash
@@ -89,7 +89,7 @@ make release-controller VERSION=x.y.z
 - Pushes commit and tag to `origin/main`
 
 **GitHub Workflow:**
-- Triggers `.github/workflows/moat-operator-release.yaml`
+- Triggers `.github/workflows/synapse-operator-release.yaml`
 - Builds Docker image for multiple platforms (linux/amd64, linux/arm64)
 - Builds binary artifacts for multiple architectures
 - Creates GitHub release with artifacts
@@ -133,7 +133,7 @@ Before releasing, ensure:
    - Update CHANGELOG if maintained
 
 2. **Choose the appropriate release command:**
-   - For Moat application: `make release-moat VERSION=x.y.z`
+   - For Synapse application: `make release-synapse VERSION=x.y.z`
    - For Helm chart: `make release-chart VERSION=x.y.z`
    - For Controller: `make release-controller VERSION=x.y.z`
 
@@ -144,7 +144,7 @@ Before releasing, ensure:
 
 ## Tag Naming Convention
 
-- **Moat releases:** `vx.y.z` (e.g., `v0.1.0`)
+- **Synapse releases:** `vx.y.z` (e.g., `v0.1.0`)
 - **Chart releases:** `chart/vx.y.z` (e.g., `chart/v0.2.0`)
 - **Controller releases:** `controller/vx.y.z` (e.g., `controller/v0.1.0`)
 
@@ -157,7 +157,7 @@ Before releasing, ensure:
 ## Troubleshooting
 
 ### Release fails with "VERSION is required"
-- Ensure you're providing the VERSION parameter: `make release-moat VERSION=x.y.z`
+- Ensure you're providing the VERSION parameter: `make release-synapse VERSION=x.y.z`
 
 ### Release fails with "uncommitted changes"
 - Commit or stash your changes before running a release

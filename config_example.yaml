@@ -1,5 +1,5 @@
-# Moat Configuration File
-# This file contains all configuration options for the Moat reverse proxy
+# Synapse Configuration File
+# This file contains all configuration options for the Synapse reverse proxy
 #
 # Environment Variable Overrides:
 # All configuration options can be overridden using environment variables with the AX_ prefix.
@@ -27,7 +27,7 @@ redis:
   url: "redis://127.0.0.1/0"
 
   # Namespace prefix for Redis ACME cache entries
-  prefix: "ax:moat"
+  prefix: "ax:synapse"
 
   # Redis SSL/TLS configuration (optional)
   # ssl:
@@ -51,13 +51,13 @@ network:
   # Disable XDP packet filtering (run without BPF/XDP)
   disable_xdp: false
 
-# Arxignis Configuration
+# Gen0Sec Configuration
 arxignis:
-  # API key for Arxignis service
+  # API key for Gen0Sec service
   api_key: ""
 
-  # Base URL for Arxignis API
-  base_url: "https://api.arxignis.com/v1"
+  # Base URL for Gen0Sec API
+  base_url: "https://api.gen0sec.com/v1"
 
   # Enable sending access logs to arxignis server
   log_sending_enabled: true
@@ -163,16 +163,16 @@ daemon:
   enabled: false
 
   # PID file path
-  pid_file: "/var/run/moat.pid"
+  pid_file: "/var/run/synapse.pid"
 
   # Working directory for daemon
   working_directory: "/"
 
   # Stdout log file (application logs: info, debug, warn, error)
-  stdout: "/var/log/moat/access.log"
+  stdout: "/var/log/synapse/access.log"
 
   # Stderr log file (panic messages and system errors)
-  stderr: "/var/log/moat/error.log"
+  stderr: "/var/log/synapse/error.log"
 
   # User to run daemon as (optional, e.g., "nobody")
   user: null
@@ -193,7 +193,7 @@ pingora:
   proxy_address_tls: "0.0.0.0:443"
 
   # Mandatory if proxy_address_tls is set (cert files: {NAME}.crt, {NAME}.key)
-  proxy_certificates: "/root/moat/certs"
+  proxy_certificates: "/root/synapse/certs"
 
   # TLS suite grade (high, medium, unsafe)
   proxy_tls_grade: "medium"
@@ -203,7 +203,7 @@ pingora:
   default_certificate: "default"
 
   # Path to upstreams configuration file
-  upstreams_conf: "/root/moat/upstreams.yaml"
+  upstreams_conf: "/root/synapse/upstreams.yaml"
 
   # HTTP API address for remote config updates
   config_address: "0.0.0.0:3000"
@@ -242,7 +242,7 @@ acme:
 
   # Storage path for certificates and ACME challenge files
   # Certificates will be stored in subdirectories per domain
-  storage_path: "/var/lib/moat/acme"
+  storage_path: "/var/lib/synapse/acme"
 
   # Use Let's Encrypt staging server (for testing)
   # Set to true for testing to avoid rate limits

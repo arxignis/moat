@@ -1,4 +1,4 @@
-# Moat BPF Firewall - Quick Start
+# Synapse BPF Firewall - Quick Start
 
 
 ### Terminal 1: Start Docker
@@ -41,7 +41,7 @@ sudo bash -c 'ulimit -l unlimited && target/release/bpf-firewall \
     --acme-domains your-domain.com \
     --acme-contacts admin@your-domain.com \
     --redis-url redis://127.0.0.1:6379/0 \
-    --redis-prefix moat:acme \
+    --redis-prefix synapse:acme \
     --acme-accept-tos \
     --acme-use-prod \
     --upstream http://127.0.0.1:8081'

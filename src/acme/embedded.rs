@@ -1,4 +1,4 @@
-//! Embedded ACME server that integrates with the main moat application
+//! Embedded ACME server that integrates with the main synapse application
 //! Reads domains from upstreams.yaml and manages certificates
 
 use crate::acme::domain_reader::{DomainConfig, DomainReader};

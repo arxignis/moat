@@ -20,9 +20,9 @@ config:
   # Global headers to add to all responses
   global_headers:
     - "Access-Control-Allow-Origin:*"
-    - "X-Proxy-From:Consul-Moat"
+    - "X-Proxy-From:Consul-Synapse"
 
-# Arxignis paths - Global paths that work across ALL hostnames
+# Gen0Sec paths - Global paths that work across ALL hostnames
 # These paths are evaluated BEFORE hostname-specific routing and Consul service discovery
 # Perfect for common endpoints like captcha, health checks, admin panels, etc.
 arxignis_paths:

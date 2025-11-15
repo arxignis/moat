@@ -8,14 +8,14 @@ MOAT_NS="ax"
 OP_NS="ax-system"
 
 # hardcoded resource names (created by the umbrella chart)
-DP_DEPLOY="moat-stack"     # dataplane Deployment
-CM_NAME="moat-stack"       # ConfigMap holding config.yaml
-OP_DEPLOY="moat-operator"  # operator Deployment
+DP_DEPLOY="synapse-stack"     # dataplane Deployment
+CM_NAME="synapse-stack"       # ConfigMap holding config.yaml
+OP_DEPLOY="synapse-operator"  # operator Deployment
 
 # public Helm repo + chart version to install
 HELM_REPO_NAME="arxignis"
-HELM_REPO_URL="https://helm.arxignis.com"
-CHART="${HELM_REPO_NAME}/moat-stack"
+HELM_REPO_URL="https://helm.gen0sec.com"
+CHART="${HELM_REPO_NAME}/synapse-stack"
 CHART_VER="0.1.2"
 
 # ===== parse CLI arguments =====
@@ -30,7 +30,7 @@ Options:
 Examples:
   $0 --api-key your-api-key-here
   MOAT_API_KEY=your-key $0
-  curl -sSL https://raw.githubusercontent.com/arxignis/moat/main/scenarios/moat-operator/moat.sh | bash -s -- --api-key your-key
+  curl -sSL https://raw.githubusercontent.com/gen0sec/synapse/main/scenarios/synapse-operator/synapse.sh | bash -s -- --api-key your-key
 EOF
   exit 0
 }
@@ -62,16 +62,16 @@ if [ -z "${MOAT_API_KEY:-}" ]; then
   if [ -n "${BASH_VERSION:-}" ]; then
     if [ -t 0 ]; then
       # Bash with terminal: use silent read
-      read -rs -p "Enter Arxignis API key: " MOAT_API_KEY; echo
+      read -rs -p "Enter Gen0Sec API key: " MOAT_API_KEY; echo
     else
       # Bash without terminal (piped): read without hiding
-      printf "Enter Arxignis API key: "
+      printf "Enter Gen0Sec API key: "
       read MOAT_API_KEY
       echo
     fi
   else
     # POSIX-compatible fallback for sh
-    printf "Enter Arxignis API key: "
+    printf "Enter Gen0Sec API key: "
     if [ -t 0 ]; then
       # Terminal available: hide input
       stty -echo 2>/dev/null || true
@@ -127,20 +127,20 @@ helm repo add "${HELM_REPO_NAME}" "${HELM_REPO_URL}" --force-update >/dev/null
 helm repo update >/dev/null
 
 echo "[helm] Installing/Upgrading ${CHART} (version ${CHART_VER})..."
-helm upgrade --install moat-stack "$CHART" \
+helm upgrade --install synapse-stack "$CHART" \
   --version "$CHART_VER" \
   -n "$MOAT_NS" --create-namespace \
-  --set global.namespaces.moat="$MOAT_NS" \
+  --set global.namespaces.synapse="$MOAT_NS" \
   --set global.namespaces.operator="$OP_NS" \
-  --set moat.image.repository="ghcr.io/arxignis/moat" \
-  --set moat.image.tag="latest" \
-  --set moat.moat.server.upstream="http://example.com" \
-  --set moat.moat.network.disableXdp=true \
-  --set moat.moat.arxignis.apiKey="$MOAT_API_KEY" \
-  --set moat.moat.contentScanning.scanExpression='http.request.method eq "POST" or http.request.method eq "PUT"' \
+  --set synapse.image.repository="ghcr.io/gen0sec/synapse" \
+  --set synapse.image.tag="latest" \
+  --set synapse.synapse.server.upstream="http://example.com" \
+  --set synapse.synapse.network.disableXdp=true \
+  --set synapse.synapse.arxignis.apiKey="$MOAT_API_KEY" \
+  --set synapse.synapse.contentScanning.scanExpression='http.request.method eq "POST" or http.request.method eq "PUT"' \
   --set operator.enabled=true \
   --set operator.createNamespace=true \
-  --set operator.image.repository="ghcr.io/arxignis/moat-operator" \
+  --set operator.image.repository="ghcr.io/gen0sec/synapse-operator" \
   --set operator.image.tag="latest"
 
 # ===== wait for rollouts =====
@@ -154,27 +154,27 @@ kubectl -n "$OP_NS" rollout status "deploy/${OP_DEPLOY}"
 echo "[helpers] Installing helper commands..."
 
 # stream dataplane logs
-as_root bash -c "cat >/usr/local/bin/moat-logs" <<'H1'
+as_root bash -c "cat >/usr/local/bin/synapse-logs" <<'H1'
 #!/usr/bin/env bash
 set -euo pipefail
-kubectl -n moat logs deploy/moat-stack -f --tail=200
+kubectl -n synapse logs deploy/synapse-stack -f --tail=200
 H1
-as_root chmod +x /usr/local/bin/moat-logs
+as_root chmod +x /usr/local/bin/synapse-logs
 
 # port-forward dataplane 80 -> localhost:8080
-as_root bash -c "cat >/usr/local/bin/moat-pf" <<'H2'
+as_root bash -c "cat >/usr/local/bin/synapse-pf" <<'H2'
 #!/usr/bin/env bash
 set -euo pipefail
-kubectl -n moat port-forward deploy/moat-stack 8080:80
+kubectl -n synapse port-forward deploy/synapse-stack 8080:80
 H2
-as_root chmod +x /usr/local/bin/moat-pf
+as_root chmod +x /usr/local/bin/synapse-pf
 
 # toggle logging level info<->debug inside the umbrella ConfigMap and apply it back
-as_root bash -c "cat >/usr/local/bin/moat-toggle-config" <<'H3'
+as_root bash -c "cat >/usr/local/bin/synapse-toggle-config" <<'H3'
 #!/usr/bin/env bash
 set -euo pipefail
-NS="moat"
-CM="moat-stack"
+NS="synapse"
+CM="synapse-stack"
 TMP="$(mktemp)"
 
 # extract config.yaml from the known key name
@@ -200,10 +200,10 @@ rm -f "$TMP"
 
 echo "[toggle] Updated $CM in $NS. In another terminal, run: kubectl -n $NS get pods -w"
 H3
-as_root chmod +x /usr/local/bin/moat-toggle-config
+as_root chmod +x /usr/local/bin/synapse-toggle-config
 
 echo
-echo "[moat] ✅ Install complete."
+echo "[synapse] ✅ Install complete."
 
 cat <<EONEXT
 
@@ -213,9 +213,9 @@ To WATCH a restart (use two terminals):
     kubectl -n "${MOAT_NS}" get pods -w
 
   Terminal B)
-    moat-toggle-config    # flips logging level info<->debug and should trigger a rollout
+    synapse-toggle-config    # flips logging level info<->debug and should trigger a rollout
 
 Handy shortcuts:
-  moat-logs              # stream dataplane logs
-  moat-pf                # port-forward dataplane 80 -> localhost:8080
+  synapse-logs              # stream dataplane logs
+  synapse-pf                # port-forward dataplane 80 -> localhost:8080
 EONEXT

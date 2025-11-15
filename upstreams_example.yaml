@@ -41,7 +41,7 @@ config:
   # HTTP method to use for health checks (GET, HEAD, POST, etc.)
   healthcheck_method: "GET"
 
-# Arxignis paths - Global paths that work across ALL hostnames
+# Gen0Sec paths - Global paths that work across ALL hostnames
 # These paths are evaluated BEFORE hostname-specific routing
 # Perfect for common endpoints like captcha verification, health checks, APIs, etc.
 arxignis_paths:
@@ -92,7 +92,7 @@ upstreams:
 
         # Custom headers for this path (merged with global headers)
         headers:
-          - "X-Proxy-From:Moat"
+          - "X-Proxy-From:Synapse"
           - "X-Forwarded-Proto:https"
 
         # Backend servers (load balanced)

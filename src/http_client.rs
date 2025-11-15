@@ -21,7 +21,7 @@ impl Default for HttpClientConfig {
             connect_timeout: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(60), // Keep connections alive for 60 seconds
             max_idle_per_host: 10, // Allow up to 10 idle connections per host
-            user_agent: format!("Moat/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: format!("Synapse/{}", env!("CARGO_PKG_VERSION")),
             danger_accept_invalid_certs: false,
         }
     }
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
         assert_eq!(config.keepalive_timeout, Duration::from_secs(60));
         assert_eq!(config.max_idle_per_host, 10);
-        assert_eq!(config.user_agent, format!("Moat/{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(config.user_agent, format!("Synapse/{}", env!("CARGO_PKG_VERSION")));
         assert!(!config.danger_accept_invalid_certs);
     }
 
@@ -144,12 +144,12 @@ mod tests {
     fn test_shared_http_client_creation() {
         let config = HttpClientConfig::default();
         let client = SharedHttpClient::new(config).unwrap();
-        assert_eq!(client.config().user_agent, format!("Moat/{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(client.config().user_agent, format!("Synapse/{}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
     fn test_shared_http_client_with_defaults() {
         let client = SharedHttpClient::with_defaults().unwrap();
-        assert_eq!(client.config().user_agent, format!("Moat/{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(client.config().user_agent, format!("Synapse/{}", env!("CARGO_PKG_VERSION")));
     }
 }

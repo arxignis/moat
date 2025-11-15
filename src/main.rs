@@ -431,9 +431,9 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
                         .or_else(|| yaml.get("proxy_certificates"))
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
                 })
-                .unwrap_or_else(|| "/tmp/moat-certs".to_string())
+                .unwrap_or_else(|| "/tmp/synapse-certs".to_string())
         } else {
-            "/tmp/moat-certs".to_string()
+            "/tmp/synapse-certs".to_string()
         };
 
         // Set proxy_certificates path for ACME certificate saving
