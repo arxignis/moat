@@ -1,11 +1,11 @@
-![Arxignis logo](./images/logo.png)
+![Gen0Sec logo](./images/logo.svg)
 
 <p align="center">
-  <a href="https://github.com/arxignis/moat/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-ELv2-green" alt="License - Elastic 2.0"></a> &nbsp;
-  <a href="https://github.com/arxignis/moat/actions?query=branch%3Amain"><img src="https://github.com/arxignis/moat/actions/workflows/release.yaml/badge.svg" alt="CI Build"></a> &nbsp;
-  <a href="https://github.com/arxignis/moat/releases"><img src="https://img.shields.io/github/release/arxignis/moat.svg?label=Release" alt="Release"></a> &nbsp;
-  <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/arxignis/moat/total"> &nbsp;
-  <a href="https://docs.arxignis.com/"><img alt="Static Badge" src="https://img.shields.io/badge/arxignis-documentation-page?style=flat&link=https%3A%2F%2Fdocs.arxignis.com%2F"></a> &nbsp;
+  <a href="https://github.com/gen0sec/synapse/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-ELv2-green" alt="License - Elastic 2.0"></a> &nbsp;
+  <a href="https://github.com/gen0sec/synapse/actions?query=branch%3Amain"><img src="https://github.com/gen0sec/synapse/actions/workflows/release.yaml/badge.svg" alt="CI Build"></a> &nbsp;
+  <a href="https://github.com/gen0sec/synapse/releases"><img src="https://img.shields.io/github/release/gen0sec/synapse.svg?label=Release" alt="Release"></a> &nbsp;
+  <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/gen0sec/synapse/total"> &nbsp;
+  <a href="https://docs.gen0sec.com/"><img alt="Static Badge" src="https://img.shields.io/badge/arxignis-documentation-page?style=flat&link=https%3A%2F%2Fdocs.gen0sec.com%2F"></a> &nbsp;
   <a href="https://discord.gg/jzsW5Q6s9q"><img src="https://img.shields.io/discord/1377189913849757726?label=Discord" alt="Discord"></a> &nbsp;
   <a href="https://x.com/arxignis"><img src="https://img.shields.io/twitter/follow/arxignis?style=flat" alt="X (formerly Twitter) Follow" /> </a>
 </p>
@@ -14,21 +14,18 @@
 [![Join us on Discord](https://img.shields.io/badge/Join%20Us%20on-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/jzsW5Q6s9q)
 [![Substack](https://img.shields.io/badge/Substack-FF6719?logo=substack&logoColor=fff)](https://arxignis.substack.com/)
 
-## What is moat ancient story?
-You can read [here](./docs/STORY.md).
-
 ## Overview
 
-Moat is a high-performance reverse proxy and firewall built with Rust, featuring:
+Synapse is a high-performance reverse proxy and firewall built with Rust, featuring:
 
 - **XDP-based packet filtering** for ultra-low latency protection at kernel level
-- **Dynamic access rules** with automatic updates from Arxignis API
+- **Dynamic access rules** with automatic updates from Gen0Sec API
 - **BPF statistics collection** for packet processing and dropped IP monitoring
 - **TCP fingerprinting** for behavioral analysis and threat detection
 - **TLS fingerprinting** with JA4 support for client identification
 - **JA4+ fingerprinting** with complete suite: JA4H (HTTP headers), JA4T (TCP options), JA4L (latency), JA4S (TLS server), and JA4X (X.509 certificates)
 - **Automatic TLS certificate management** with ACME/Let's Encrypt integration
-- **Threat intelligence integration** with Arxignis API for real-time protection
+- **Threat intelligence integration** with Gen0Sec API for real-time protection
 - **CAPTCHA protection** with support for hCaptcha, reCAPTCHA, and Cloudflare Turnstile
 - **Content scanning** with ClamAV integration for malware detection
 <!-- - **PROXY protocol support** for preserving client IP addresses through load balancers -->
@@ -43,11 +40,11 @@ Moat is a high-performance reverse proxy and firewall built with Rust, featuring
 
 ## Modes
 
-Moat can run in two modes:
+Synapse can run in two modes:
 
 ### Reverse Proxy Mode (Default)
 
-Moat runs as a full-featured reverse proxy with HTTP/HTTPS support, forwarding requests to upstream servers while applying access rules and threat intelligence at the kernel level.
+Synapse runs as a full-featured reverse proxy with HTTP/HTTPS support, forwarding requests to upstream servers while applying access rules and threat intelligence at the kernel level.
 
 **Features:**
 - HTTP/HTTPS reverse proxy
@@ -68,16 +65,16 @@ server:
 
 **CLI:**
 ```bash
-moat --upstream http://localhost:8080 --arxignis-api-key "your-key"
+synapse --upstream http://localhost:8080 --arxignis-api-key "your-key"
 ```
 
 ### Agent Mode
 
-Moat runs as a standalone agent focused on access rules enforcement without HTTP/HTTPS proxy functionality. This mode is ideal for network-level protection where you don't need request proxying.
+Synapse runs as a standalone agent focused on access rules enforcement without HTTP/HTTPS proxy functionality. This mode is ideal for network-level protection where you don't need request proxying.
 
 **Features:**
 - XDP-based packet filtering at kernel level
-- Dynamic access rules with automatic updates from Arxignis API
+- Dynamic access rules with automatic updates from Gen0Sec API
 - BPF statistics collection
 - TCP fingerprinting
 - No HTTP/HTTPS proxy servers (no upstream required)
@@ -91,7 +88,7 @@ server:
 
 **CLI:**
 ```bash
-moat --disable-http-server --arxignis-api-key "your-key"
+synapse --disable-http-server --arxignis-api-key "your-key"
 ```
 
 **Environment Variable:**
@@ -107,7 +104,7 @@ export AX_SERVER_DISABLE_HTTP_SERVER=true
 
 ## Configuration Methods
 
-Moat supports three configuration methods with the following priority (highest to lowest):
+Synapse supports three configuration methods with the following priority (highest to lowest):
 
 1. **YAML Configuration File** - Comprehensive configuration via `config.yaml`
 2. **Command Line Arguments** - Override specific settings via CLI flags
@@ -137,32 +134,32 @@ Configuration from higher priority sources overrides lower priority sources. For
 
 ### Ubuntu install
 ```bash
-curl -fSL https://raw.githubusercontent.com/arxignis/moat/refs/heads/main/install.sh | sh
+curl -fSL https://raw.githubusercontent.com/gen0sec/synapse/refs/heads/main/install.sh | sh
 ```
 ✅ Tested with Ubuntu 24.04
 
 ### Kubernetes install
 ```bash
-helm repo add arxignis https://helm.arxignis.com
-helm install moat-stack
+helm repo add arxignis https://helm.gen0sec.com
+helm install synapse-stack
 ```
 
 [More details here.](./docs/OPERATOR_README.md)
 
 ### Killercoda playground
 ```bash
-curl -sSL https://raw.githubusercontent.com/arxignis/moat/main/scenarios/moat-operator/moat.sh | bash -s -- --api-key <YOUR_API_KEY>
+curl -sSL https://raw.githubusercontent.com/gen0sec/synapse/main/scenarios/synapse-operator/synapse.sh | bash -s -- --api-key <YOUR_API_KEY>
 ```
 
 ## Configuration
-You have 3 options can configure moat.
+You have 3 options can configure synapse.
 - config file
 - environment variables
 - cli parameters
 
 ### Configuration File
 
-[Moat supports configuration via YAML files.](./config_example.yaml)
+[Synapse supports configuration via YAML files.](./config_example.yaml)
 
 ### Environment Variables
 
@@ -186,15 +183,15 @@ export AX_ACME_USE_PROD="true"
 
 # Redis configuration
 export AX_REDIS_URL="redis://127.0.0.1/0"
-export AX_REDIS_PREFIX="ax:moat"
+export AX_REDIS_PREFIX="ax:synapse"
 
 # Network configuration
 export AX_NETWORK_IFACE="eth0"
 export AX_NETWORK_DISABLE_XDP="false"
 
-# Arxignis configuration
+# Gen0Sec configuration
 export AX_ARXIGNIS_API_KEY="your-api-key"
-export AX_ARXIGNIS_BASE_URL="https://api.arxignis.com/v1"
+export AX_ARXIGNIS_BASE_URL="https://api.gen0sec.com/v1"
 export AX_ARXIGNIS_LOG_SENDING_ENABLED="true"
 export AX_ARXIGNIS_INCLUDE_RESPONSE_BODY="true"
 export AX_ARXIGNIS_MAX_BODY_SIZE="1048576"
@@ -238,10 +235,10 @@ export AX_TCP_FINGERPRINT_MIN_CONNECTION_DURATION="1"
 
 # Daemon mode
 export AX_DAEMON_ENABLED="false"
-export AX_DAEMON_PID_FILE="/var/run/moat.pid"
+export AX_DAEMON_PID_FILE="/var/run/synapse.pid"
 export AX_DAEMON_WORKING_DIRECTORY="/"
-export AX_DAEMON_STDOUT="/var/log/moat/access.log"
-export AX_DAEMON_STDERR="/var/log/moat/error.log"
+export AX_DAEMON_STDOUT="/var/log/synapse/access.log"
+export AX_DAEMON_STDERR="/var/log/synapse/error.log"
 
 # Logging
 export AX_LOGGING_LEVEL="info"
@@ -251,12 +248,12 @@ For a complete list of all available environment variables, see [ENVIRONMNET_VAR
 
 ### Upstreams Configuration
 
-Moat supports advanced upstream routing via a separate upstreams configuration file. This file supports hot-reloading - changes are applied immediately without restarting the service.
+Synapse supports advanced upstream routing via a separate upstreams configuration file. This file supports hot-reloading - changes are applied immediately without restarting the service.
 
 **Features:**
 - **Multiple service discovery providers** - File-based, Consul, and Kubernetes service discovery
 - **Global configuration** - Sticky sessions, rate limits, and headers applied globally
-- **Arxignis paths** - Global paths that work across all hostnames (evaluated before hostname-specific routing)
+- **Gen0Sec paths** - Global paths that work across all hostnames (evaluated before hostname-specific routing)
 - **Per-path configuration** - Rate limits, headers, and HTTPS redirects per path
 - **Hot-reloading** - Configuration changes apply immediately without service restart
 
@@ -274,7 +271,7 @@ config:
   global_rate_limit: 100
   global_headers:
     - "Access-Control-Allow-Origin:*"
-    - "X-Proxy-From:Moat"
+    - "X-Proxy-From:Synapse"
 
 arxignis_paths:
   "/cgi-bin/captcha/verify":
@@ -342,7 +339,7 @@ consul:
 ### Basic Usage
 
 ```bash
-moat --help
+synapse --help
 ```
 
 ### Configuration Options
@@ -353,14 +350,14 @@ moat --help
 
 ### Threat Intelligence Integration
 
-Moat integrates with Arxignis API to provide real-time threat intelligence:
+Synapse integrates with Gen0Sec API to provide real-time threat intelligence:
 
 - **IP reputation scoring** - Automatic scoring of incoming IP addresses
 - **Bot detection** - Advanced bot detection and mitigation
 - **Geolocation filtering** - Block or allow traffic based on geographic location
 - **Threat context** - Rich context about detected threats
 - **Caching** - Redis-backed caching for improved performance
-- **Dynamic access rules** - Automatic updates of access rules (allow/block lists) from Arxignis API
+- **Dynamic access rules** - Automatic updates of access rules (allow/block lists) from Gen0Sec API
 - **JA4/JA4+ fingerprinting** - Complete JA4+ suite implementation:
   - **JA4**: TLS client fingerprinting from ClientHello
   - **JA4H**: HTTP header fingerprinting from request headers
@@ -374,7 +371,7 @@ Moat integrates with Arxignis API to provide real-time threat intelligence:
 Kernel-level IP filtering with automatic updates:
 
 - **Allow/Block lists** - Configure IP addresses, ASNs, and countries for allow/block rules
-- **Automatic updates** - Rules are fetched from Arxignis API and updated periodically
+- **Automatic updates** - Rules are fetched from Gen0Sec API and updated periodically
 - **BPF map integration** - Rules are enforced at kernel level via XDP for maximum performance
 - **IPv4 and IPv6 support** - Both IP versions are supported with separate rule sets
 - **Recently banned tracking** - Track recently banned IPs for UDP, ICMP, and TCP FIN/RST packets
@@ -387,7 +384,7 @@ Advanced request filtering with powerful expression language:
 - **Flexible expressions** - Use wirefilter expressions for complex filtering rules
 - **HTTP field matching** - Filter based on request method, path, headers, and more
 - **Content scanning triggers** - Define when to scan content based on request characteristics
-- **WAF integration** - Wirefilter expressions are fetched from Arxignis API for centralized management
+- **WAF integration** - Wirefilter expressions are fetched from Gen0Sec API for centralized management
 - **Action support** - Configure actions (allow, block, challenge) based on expression matches
 
 ### ⚠️ Degraded Features When Access Logs Disabled
@@ -397,12 +394,12 @@ When access log sending is disabled (`AX_ARXIGNIS_LOG_SENDING_ENABLED=false` or 
 - **Threat Intelligence (Degraded)** - Basic threat intelligence still works for real-time blocking, but detailed threat analysis and historical data collection is limited
 - **Anomaly Detection** - Advanced anomaly detection capabilities are not available without access log data
 - **Metrics & Analytics** - Comprehensive metrics and analytics are not available without access log aggregation
-- **BPF Statistics** - Statistics can still be collected locally but won't be sent to Arxignis API for centralized analysis
-- **TCP Fingerprinting** - Fingerprints can still be collected locally but won't be sent to Arxignis API for behavioral analysis
+- **BPF Statistics** - Statistics can still be collected locally but won't be sent to Gen0Sec API for centralized analysis
+- **TCP Fingerprinting** - Fingerprints can still be collected locally but won't be sent to Gen0Sec API for behavioral analysis
 
 ### CAPTCHA Protection
 
-Moat supports multiple CAPTCHA providers for additional security:
+Synapse supports multiple CAPTCHA providers for additional security:
 
 - **hCaptcha** - Privacy-focused CAPTCHA service
 - **reCAPTCHA** - Google's CAPTCHA service
@@ -415,7 +412,7 @@ Features:
 
 ### Content Scanning
 
-Moat provides comprehensive content scanning capabilities:
+Synapse provides comprehensive content scanning capabilities:
 
 - **ClamAV integration** - Real-time malware detection using ClamAV engine
 - **Multipart form scanning** - Scans individual parts of multipart uploads
@@ -427,7 +424,7 @@ Moat provides comprehensive content scanning capabilities:
 
 ### PROXY Protocol Support
 
-Moat supports [PROXY protocol](./docs/PROXY_PROTOCOL.md) for preserving client information:
+Synapse supports [PROXY protocol](./docs/PROXY_PROTOCOL.md) for preserving client information:
 
 - **TCP PROXY protocol** - Preserves original client IP addresses through load balancers
 - **Configurable timeout** - Customizable timeout for PROXY protocol parsing
@@ -435,7 +432,7 @@ Moat supports [PROXY protocol](./docs/PROXY_PROTOCOL.md) for preserving client i
 
 ### Health Check Endpoints
 
-Moat provides comprehensive health monitoring capabilities with a dedicated health check server:
+Synapse provides comprehensive health monitoring capabilities with a dedicated health check server:
 
 #### Features
 - **Separate port** - Health checks run on a dedicated port independent of main proxy traffic
@@ -479,7 +476,7 @@ curl http://localhost:8080/health
 {
   "status": "healthy",
   "timestamp": "2024-01-01T12:00:00Z",
-  "service": "moat"
+  "service": "synapse"
 }
 ```
 
@@ -507,7 +504,7 @@ Health checks are designed for seamless integration with load balancers:
 
 ### XDP Packet Filtering
 
-Moat uses eXpress Data Path (XDP) for ultra-low latency packet filtering:
+Synapse uses eXpress Data Path (XDP) for ultra-low latency packet filtering:
 
 - **Kernel-space filtering** - Packet filtering happens in kernel space for maximum performance
 - **BPF programs** - Custom Berkeley Packet Filter programs for advanced filtering
@@ -523,7 +520,7 @@ Comprehensive kernel-level statistics collection:
 - **Dropped IP tracking** - Detailed tracking of dropped IP addresses with drop counts
 - **Drop reason classification** - Categorize drops by access rules, UDP, ICMP, or TCP FIN/RST
 - **Periodic logging** - Configurable intervals for statistics and event logging
-- **Event streaming** - Send statistics to Arxignis API for analysis
+- **Event streaming** - Send statistics to Gen0Sec API for analysis
 
 ### TCP Fingerprinting
 
@@ -534,7 +531,7 @@ Advanced TCP-level fingerprinting capabilities:
 - **Pattern analysis** - Identify unique fingerprint patterns and track by IP address
 - **Configurable thresholds** - Filter by minimum packet count and connection duration
 - **Periodic collection** - Configurable intervals for fingerprint collection and logging
-- **Event streaming** - Send fingerprint data to Arxignis API for behavioral analysis
+- **Event streaming** - Send fingerprint data to Gen0Sec API for behavioral analysis
 
 ### Event Processing and Batching
 
@@ -565,8 +562,8 @@ Comprehensive TLS support with multiple modes:
 - **TLS Server** - Manages HTTPS connections and certificate handling
 - **Reverse Proxy** - Forwards requests to upstream services
 - **Upstreams Manager** - Advanced routing with service discovery and hot-reloading
-- **Threat Intelligence** - Integrates with Arxignis API for real-time threat data
-- **Access Rules Engine** - Dynamic IP allow/block lists with periodic updates from Arxignis API
+- **Threat Intelligence** - Integrates with Gen0Sec API for real-time threat data
+- **Access Rules Engine** - Dynamic IP allow/block lists with periodic updates from Gen0Sec API
 - **BPF Statistics Collector** - Tracks packet processing, drops, and banned IP hits at kernel level
 - **TCP Fingerprint Collector** - Extracts and analyzes TCP SYN fingerprints for behavioral analysis
 - **Fingerprint Engine** - Complete JA4+ suite:
@@ -593,15 +590,15 @@ Comprehensive TLS support with multiple modes:
 ## Notes
 
 - The `--upstream` option is always required for request forwarding
-- When TLS mode is `disabled`, Moat runs as an HTTP proxy + firewall
-- When TLS mode is `custom` or `acme`, Moat runs as an HTTPS proxy + firewall
+- When TLS mode is `disabled`, Synapse runs as an HTTP proxy + firewall
+- When TLS mode is `custom` or `acme`, Synapse runs as an HTTPS proxy + firewall
 - `--tls-only` mode enforces TLS requirements: non-SSL requests return 426 Upgrade Required (except ACME challenges)
 - For custom TLS mode, both `--tls-cert-path` and `--tls-key-path` are required
 - Domain filtering supports exact matches (whitelist)
 - When using Docker, ensure the required capabilities (`SYS_ADMIN`, `BPF`, `NET_ADMIN`) are added
 - The XDP program attaches to the specified network interface for packet filtering
 - BPF statistics and TCP fingerprinting require XDP to be enabled (not available with `--disable-xdp`)
-- Access rules are automatically updated from Arxignis API at regular intervals
+- Access rules are automatically updated from Gen0Sec API at regular intervals
 - BPF statistics track packet processing metrics and dropped IPs at kernel level
 - TCP fingerprinting collects SYN packet characteristics for behavioral analysis
 - Fingerprinting supports the complete JA4+ suite:
@@ -617,11 +614,11 @@ Comprehensive TLS support with multiple modes:
 - Content scanning requires a running ClamAV server and is disabled by default
 - PROXY protocol support enables proper client IP preservation through load balancers
 - Health check endpoints can be configured for monitoring and load balancer integration
-- Access logs, statistics, and events are batched and sent to Arxignis API for analysis
+- Access logs, statistics, and events are batched and sent to Gen0Sec API for analysis
 - Configuration priority: YAML file > Command line arguments > Environment variables
 - Upstreams configuration supports hot-reloading - changes apply immediately without restart
 - Service discovery providers: file (static), Consul, and Kubernetes
-- Arxignis paths are global paths that work across all hostnames and are evaluated before hostname-specific routing
+- Gen0Sec paths are global paths that work across all hostnames and are evaluated before hostname-specific routing
 
 ## Thank you!
 [Cloudflare](https://github.com/cloudflare) for Pingora and Wirefilter

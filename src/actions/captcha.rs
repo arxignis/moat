@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::redis::RedisManager;
 use crate::http_client::get_global_reqwest_client;
 
-/// Captcha provider types supported by Arxignis
+/// Captcha provider types supported by Gen0Sec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
 pub enum CaptchaProvider {
     #[serde(rename = "hcaptcha")]
@@ -179,7 +179,7 @@ impl CaptchaClient {
 
         let claims = CaptchaClaims {
             sub: format!("captcha:{}", ip_address),
-            iss: "arxignis-moat".to_string(),
+            iss: "arxignis-synapse".to_string(),
             aud: "captcha-validation".to_string(),
             exp: exp.timestamp(),
             iat: now.timestamp(),
@@ -449,7 +449,7 @@ impl CaptchaClient {
             r#"<!doctype html>
 <html lang="en">
   <head>
-    <title>Arxignis Captcha</title>
+    <title>Gen0Sec Captcha</title>
     <meta content="text/html; charset=utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script src="{}" async defer></script>
@@ -516,7 +516,7 @@ impl CaptchaClient {
   <body>
     <div class="container">
       <div class="header">
-        <h1 class="title">Arxignis Captcha</h1>
+        <h1 class="title">Gen0Sec Captcha</h1>
         <p class="subtitle">Please complete the security verification below to continue.</p>
       </div>
 
@@ -539,8 +539,8 @@ impl CaptchaClient {
 
       <div class="footer">
         <p>Secured by</p>
-        <a href="https://arxignis.com/" target="_blank" rel="noopener">
-          Arxignis Security
+        <a href="https://gen0sec.com/" target="_blank" rel="noopener">
+          Gen0Sec Security
         </a>
       </div>
     </div>

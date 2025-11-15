@@ -1,4 +1,4 @@
-﻿install the tooling 
+﻿install the tooling
 ```bash
 # Base packages
 apt-get update -qq
@@ -12,7 +12,7 @@ tar -C /usr/local -xzf /tmp/go.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin:/root/go/bin' >> ~/.bashrc
 export PATH=$PATH:/usr/local/go/bin:/root/go/bin
 
-# kind + Helm + kubectl 
+# kind + Helm + kubectl
 curl -sSL https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64 -o /usr/local/bin/kind
 chmod +x /usr/local/bin/kind
 curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null
@@ -25,16 +25,16 @@ fi
 # Workspace checkout
 mkdir -p /root/workspace
 cd /root/workspace
-if [ ! -d moat ]; then
-  git clone --branch controller --single-branch https://github.com/arxignis/moat.git moat
+if [ ! -d synapse ]; then
+  git clone --branch controller --single-branch https://github.com/gen0sec/synapse.git synapse
 else
-  cd moat
+  cd synapse
   git fetch origin controller
   git checkout controller
   git pull --ff-only origin controller
   cd ..
 fi
-git config --global --add safe.directory /root/workspace/moat
-[ -e /root/workspace/moat-operator ] || ln -s /root/workspace/moat/moat-operator /root/workspace/moat-operator
+git config --global --add safe.directory /root/workspace/synapse
+[ -e /root/workspace/synapse-operator ] || ln -s /root/workspace/synapse/synapse-operator /root/workspace/synapse-operator
 
 ```

@@ -209,7 +209,7 @@ async fn check_and_request_certificates_for_upstreams(upstreams: &crate::utils::
         if cert_exists == 0 {
             info!("Certificate not found in Redis for domain: {}, requesting from ACME", domain);
             // Use a placeholder certificate path (will be stored in Redis)
-            let certificate_path = format!("/tmp/moat-certs/{}", normalized_domain.replace('.', "_"));
+            let certificate_path = format!("/tmp/synapse-certs/{}", normalized_domain.replace('.', "_"));
             if let Err(e) = request_certificate_from_acme(domain, normalized_domain, &certificate_path).await {
                 warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
             } else {

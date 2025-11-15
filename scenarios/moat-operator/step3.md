@@ -1,8 +1,8 @@
 Create a config for the chart, install it, and make sure the pods run.
 
 ```bash
-cat <<'EOF' >/tmp/moat-values.yaml
-moat:
+cat <<'EOF' >/tmp/synapse-values.yaml
+synapse:
   server:
     upstream: "http://example.com"
   network:
@@ -14,20 +14,20 @@ moat:
   contentScanning:
     scanExpression: 'http.request.method eq "POST" or http.request.method eq "PUT"'
 image:
-  repository: ghcr.io/arxignis/moat
+  repository: ghcr.io/gen0sec/synapse
   tag: latest
   pullPolicy: IfNotPresent
 EOF
 
-cd ~/workspace/moat/helm
-kubectl delete namespace moat --ignore-not-found
-helm upgrade --install moat . \
-  --namespace moat \
+cd ~/workspace/synapse/helm
+kubectl delete namespace synapse --ignore-not-found
+helm upgrade --install synapse . \
+  --namespace synapse \
   --create-namespace \
-  -f /tmp/moat-values.yaml
+  -f /tmp/synapse-values.yaml
 
-kubectl -n moat rollout status deployment/moat
-kubectl -n moat get pods -o wide
-kubectl -n moat get configmap moat -o yaml | sed -n '1,40p'
+kubectl -n synapse rollout status deployment/synapse
+kubectl -n synapse get pods -o wide
+kubectl -n synapse get configmap synapse -o yaml | sed -n '1,40p'
 ```
 

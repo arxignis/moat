@@ -20,10 +20,10 @@ config:
   # Global headers to add to all responses
   global_headers:
     - "Access-Control-Allow-Origin:*"
-    - "X-Proxy-From:Kubernetes-Moat"
+    - "X-Proxy-From:Kubernetes-Synapse"
     - "X-K8s-Cluster:production"
 
-# Arxignis paths - Global paths that work across ALL hostnames
+# Gen0Sec paths - Global paths that work across ALL hostnames
 # These paths are evaluated BEFORE hostname-specific routing and Kubernetes service discovery
 # Perfect for common endpoints like captcha, health checks, monitoring, etc.
 arxignis_paths:

@@ -30,7 +30,7 @@ pub struct ServerCertInfo {
 /// # Usage Example
 ///
 /// ```no_run
-/// use moat::access_log::{AccessLogSummary, UpstreamInfo, PerformanceInfo};
+/// use synapse::access_log::{AccessLogSummary, UpstreamInfo, PerformanceInfo};
 /// use chrono::Utc;
 ///
 /// // Create a summary with upstream and performance info
@@ -44,7 +44,7 @@ pub struct ServerCertInfo {
 ///     }),
 ///     waf: None,
 ///     threat: None,
-///     network: moat::access_log::NetworkSummary {
+///     network: synapse::access_log::NetworkSummary {
 ///         src_ip: "1.2.3.4".to_string(),
 ///         dst_ip: "10.0.0.1".to_string(),
 ///         protocol: "https".to_string(),

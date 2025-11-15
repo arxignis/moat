@@ -1,23 +1,23 @@
-# Systemd service file for Moat
+# Systemd service file for Synapse
 # Installation:
-#   1. Copy this file to /etc/systemd/system/moat.service
+#   1. Copy this file to /etc/systemd/system/synapse.service
 #   2. Update paths and configuration as needed
 #   3. Run: systemctl daemon-reload
-#   4. Run: systemctl enable moat
-#   5. Run: systemctl start moat
+#   4. Run: systemctl enable synapse
+#   5. Run: systemctl start synapse
 
 [Unit]
-Description=Moat - High-performance reverse proxy and firewall
-Documentation=https://github.com/arxignis/moat
+Description=Synapse - High-performance reverse proxy and firewall
+Documentation=https://github.com/gen0sec/synapse
 After=network-online.target redis.target
 Wants=network-online.target
 
 [Service]
 Type=forking
-PIDFile=/var/run/moat.pid
+PIDFile=/var/run/synapse.pid
 
 # Paths
-ExecStart=/usr/local/bin/moat --daemon --config /etc/moat/config.yaml
+ExecStart=/usr/local/bin/synapse --daemon --config /etc/synapse/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 ExecStop=/bin/kill -TERM $MAINPID
 
@@ -30,7 +30,7 @@ TimeoutStopSec=30s
 Environment="RUST_LOG=info"
 
 # Working directory
-WorkingDirectory=/var/lib/moat
+WorkingDirectory=/var/lib/synapse
 
 # Security settings
 # Note: Some of these may need adjustment depending on your requirements
@@ -40,7 +40,7 @@ PrivateTmp=true
 # File system access
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/moat /var/run /var/lib/moat /etc/moat/certs
+ReadWritePaths=/var/log/synapse /var/run /var/lib/synapse /etc/synapse/certs
 
 # Capabilities (required for XDP/BPF)
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_BPF
@@ -53,7 +53,7 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=moat
+SyslogIdentifier=synapse
 
 [Install]
 WantedBy=multi-user.target

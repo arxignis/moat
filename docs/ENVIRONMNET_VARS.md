@@ -4,16 +4,16 @@ export AX_MODE="proxy"
 
 # Redis configuration
 export AX_REDIS_URL="redis://127.0.0.1/0"
-export AX_REDIS_PREFIX="ax:moat"
+export AX_REDIS_PREFIX="ax:synapse"
 
 # Network configuration
 export AX_NETWORK_IFACE="eth0"
 export AX_NETWORK_IFACES="eth0,eth1"
 export AX_NETWORK_DISABLE_XDP="false"
 
-# Arxignis configuration
+# Gen0Sec configuration
 export AX_ARXIGNIS_API_KEY="your-api-key"
-export AX_ARXIGNIS_BASE_URL="https://api.arxignis.com/v1"
+export AX_ARXIGNIS_BASE_URL="https://api.gen0sec.com/v1"
 
 # CAPTCHA configuration
 export AX_CAPTCHA_SITE_KEY="your-site-key"
@@ -33,10 +33,10 @@ export AX_CONTENT_SCAN_EXPRESSION="http.request.method eq \"POST\" or http.reque
 
 # Daemon mode
 export AX_DAEMON_ENABLED="false"
-export AX_DAEMON_PID_FILE="/var/run/moat.pid"
+export AX_DAEMON_PID_FILE="/var/run/synapse.pid"
 export AX_DAEMON_WORKING_DIRECTORY="/"
-export AX_DAEMON_STDOUT="/var/log/moat/access.log"
-export AX_DAEMON_STDERR="/var/log/moat/error.log"
+export AX_DAEMON_STDOUT="/var/log/synapse/access.log"
+export AX_DAEMON_STDERR="/var/log/synapse/error.log"
 export AX_DAEMON_USER="nobody"
 export AX_DAEMON_GROUP="daemon"
 export AX_DAEMON_CHOWN_PID_FILE="true"
@@ -58,7 +58,7 @@ export AX_TCP_FINGERPRINT_EVENTS_INTERVAL="30"
 export AX_TCP_FINGERPRINT_MIN_PACKET_COUNT="3"
 export AX_TCP_FINGERPRINT_MIN_CONNECTION_DURATION="1"
 
-# Arxignis log sending configuration
+# Gen0Sec log sending configuration
 export AX_ARXIGNIS_LOG_SENDING_ENABLED="true"
 export AX_ARXIGNIS_INCLUDE_RESPONSE_BODY="true"
 export AX_ARXIGNIS_MAX_BODY_SIZE="1048576"

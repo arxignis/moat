@@ -1,10 +1,10 @@
 # PROXY Protocol Support
 
-This document describes the PROXY protocol implementation in moat.
+This document describes the PROXY protocol implementation in synapse.
 
 ## Overview
 
-The PROXY protocol is used when running moat behind a Layer 4 load balancer (like AWS NLB, HAProxy, nginx stream module) to preserve the original client IP address and port information. Without the PROXY protocol, moat would only see the load balancer's IP address, making it impossible to apply proper security policies based on the true client IP.
+The PROXY protocol is used when running synapse behind a Layer 4 load balancer (like AWS NLB, HAProxy, nginx stream module) to preserve the original client IP address and port information. Without the PROXY protocol, synapse would only see the load balancer's IP address, making it impossible to apply proper security policies based on the true client IP.
 
 ## Specification
 
@@ -47,14 +47,14 @@ server:
 ### Via Command Line
 
 ```bash
-./moat --enable-proxy-protocol --upstream http://localhost:8080
+./synapse --enable-proxy-protocol --upstream http://localhost:8080
 ```
 
 ### Via Environment Variable
 
 ```bash
 export AX_SERVER_ENABLE_PROXY_PROTOCOL=true
-./moat --upstream http://localhost:8080
+./synapse --upstream http://localhost:8080
 ```
 
 ## How It Works
@@ -62,16 +62,16 @@ export AX_SERVER_ENABLE_PROXY_PROTOCOL=true
 ### Connection Flow
 
 1. **Load Balancer** receives connection from client (1.2.3.4:56789)
-2. **Load Balancer** establishes connection to moat and sends PROXY protocol header:
+2. **Load Balancer** establishes connection to synapse and sends PROXY protocol header:
    ```
    PROXY TCP4 1.2.3.4 10.0.0.5 56789 443\r\n
    ```
-3. **moat** parses the PROXY protocol header, extracts client IP (1.2.3.4)
-4. **moat** uses the real client IP for:
+3. **synapse** parses the PROXY protocol header, extracts client IP (1.2.3.4)
+4. **synapse** uses the real client IP for:
    - Security policies and threat intelligence
    - WAF rules and access control
    - Logging and analytics
-5. **moat** adds `Forwarded: for=1.2.3.4` header to upstream request
+5. **synapse** adds `Forwarded: for=1.2.3.4` header to upstream request
 6. **Upstream server** receives request with original client IP information
 
 ### PROXY Protocol v1 Format
@@ -113,27 +113,27 @@ aws elbv2 modify-target-group-attributes \
 frontend https_frontend
     bind *:443
     mode tcp
-    default_backend moat_backend
+    default_backend synapse_backend
 
-backend moat_backend
+backend synapse_backend
     mode tcp
     balance roundrobin
-    server moat1 10.0.1.10:443 send-proxy-v2 check
-    server moat2 10.0.1.11:443 send-proxy-v2 check
+    server synapse1 10.0.1.10:443 send-proxy-v2 check
+    server synapse2 10.0.1.11:443 send-proxy-v2 check
 ```
 
 ### nginx (stream module)
 
 ```nginx
 stream {
-    upstream moat_backend {
+    upstream synapse_backend {
         server 10.0.1.10:443;
         server 10.0.1.11:443;
     }
 
     server {
         listen 443;
-        proxy_pass moat_backend;
+        proxy_pass synapse_backend;
         proxy_protocol on;
     }
 }
@@ -143,13 +143,13 @@ stream {
 
 ### Important: Trusted Networks Only
 
-**WARNING**: Only enable PROXY protocol when moat is deployed behind a trusted load balancer in a secure network. If PROXY protocol is enabled and moat is directly exposed to the internet, attackers can spoof arbitrary source IP addresses by sending crafted PROXY protocol headers.
+**WARNING**: Only enable PROXY protocol when synapse is deployed behind a trusted load balancer in a secure network. If PROXY protocol is enabled and synapse is directly exposed to the internet, attackers can spoof arbitrary source IP addresses by sending crafted PROXY protocol headers.
 
 ### Best Practices
 
-1. **Network Isolation**: Deploy moat in a private network, only accessible from the load balancer
+1. **Network Isolation**: Deploy synapse in a private network, only accessible from the load balancer
 2. **Firewall Rules**: Configure firewall to only allow connections from the load balancer IPs
-3. **TLS Termination**: Consider whether TLS should be terminated at the load balancer or at moat
+3. **TLS Termination**: Consider whether TLS should be terminated at the load balancer or at synapse
 4. **Health Checks**: Use PROXY protocol v2 LOCAL command for health checks
 
 ## Troubleshooting
@@ -159,15 +159,15 @@ stream {
 This occurs when:
 - The load balancer is not configured to send PROXY protocol headers
 - The load balancer is sending the wrong version (v1 vs v2)
-- Non-load-balanced traffic reaches moat with PROXY protocol enabled
+- Non-load-balanced traffic reaches synapse with PROXY protocol enabled
 
-**Solution**: Verify load balancer configuration and ensure only proxied traffic reaches moat.
+**Solution**: Verify load balancer configuration and ensure only proxied traffic reaches synapse.
 
 ### Client IP Still Shows Load Balancer IP
 
 Check that:
-1. PROXY protocol is enabled in moat configuration
-2. moat was compiled with `--features proxy_protocol`
+1. PROXY protocol is enabled in synapse configuration
+2. synapse was compiled with `--features proxy_protocol`
 3. Load balancer is configured to send PROXY protocol headers
 4. Check logs for "PROXY protocol enabled" message on startup
 
@@ -185,7 +185,7 @@ Some load balancers send health checks without PROXY protocol headers. Use:
 The `ProxyProtocolStream` wrapper reads and parses the PROXY protocol header transparently:
 
 ```rust
-use moat::http::proxy_protocol::ProxyProtocolStream;
+use synapse::http::proxy_protocol::ProxyProtocolStream;
 
 // Wrap a TCP stream
 let proxy_stream = ProxyProtocolStream::new(tcp_stream).await?;
@@ -202,7 +202,7 @@ if let Some(info) = proxy_stream.proxy_info() {
 
 ### Forwarded Header
 
-When PROXY protocol is enabled and client information is available, moat automatically adds the `Forwarded` HTTP header as specified in [RFC 7239](https://tools.ietf.org/html/rfc7239):
+When PROXY protocol is enabled and client information is available, synapse automatically adds the `Forwarded` HTTP header as specified in [RFC 7239](https://tools.ietf.org/html/rfc7239):
 
 ```
 Forwarded: for=192.168.1.1
@@ -245,7 +245,7 @@ The PROXY protocol adds minimal overhead:
           │
           ▼
      ┌────────────────┐
-     │  moat instance │
+     │  synapse instance │
      │  10.0.1.10     │
      │  (proxy proto) │
      └────────┬───────┘
@@ -266,8 +266,8 @@ To test PROXY protocol locally, you can use HAProxy or send manual PROXY headers
 ### Using netcat to send PROXY v1
 
 ```bash
-# Start moat with proxy protocol
-./moat --enable-proxy-protocol --upstream http://localhost:8080 &
+# Start synapse with proxy protocol
+./synapse --enable-proxy-protocol --upstream http://localhost:8080 &
 
 # Send PROXY v1 header followed by HTTP request
 (echo -ne "PROXY TCP4 1.2.3.4 127.0.0.1 56789 443\r\n"; \
@@ -282,11 +282,11 @@ To test PROXY protocol locally, you can use HAProxy or send manual PROXY headers
 frontend test_fe
     bind *:8443
     mode tcp
-    default_backend moat_be
+    default_backend synapse_be
 
-backend moat_be
+backend synapse_be
     mode tcp
-    server moat 127.0.0.1:443 send-proxy-v2
+    server synapse 127.0.0.1:443 send-proxy-v2
 ```
 
 ```bash

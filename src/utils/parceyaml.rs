@@ -129,7 +129,7 @@ async fn populate_headers_and_auth(config: &mut Configuration, parsed: &Config) 
 async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
     // Handle arxignis_paths first - these are global paths that work across all hostnames
     if let Some(arxignis_paths) = &parsed.arxignis_paths {
-        info!("Processing {} Arxignis paths", arxignis_paths.len());
+        info!("Processing {} Gen0Sec paths", arxignis_paths.len());
         for (path, path_config) in arxignis_paths {
             let mut server_list = Vec::new();
             for server in &path_config.servers {
@@ -151,7 +151,7 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
                 }
             }
             config.arxignis_paths.insert(path.clone(), (server_list, AtomicUsize::new(0)));
-            info!("Arxignis path {} -> {} backend(s)", path, config.arxignis_paths.get(path).unwrap().0.len());
+            info!("Gen0Sec path {} -> {} backend(s)", path, config.arxignis_paths.get(path).unwrap().0.len());
         }
     }
 
