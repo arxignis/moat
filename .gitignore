@@ -36,3 +36,4 @@ config.yaml
 upstreams.yaml
 docker/volumes/
 certs
+.tmp
