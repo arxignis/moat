@@ -106,7 +106,7 @@ port_check = "0.3.0"
 notify = "8.2.0"
 privdrop = "0.5.6"
 base16ct = { version = "0.3.0", features = ["alloc"] }
-actix-web = "4.7"
+actix-web = "4.12"
 actix-files = "0.6"
 instant-acme = "0.8"
 trust-dns-resolver = "0.23.2"
