@@ -407,15 +407,16 @@ impl Config {
             }
         }
         if let Ok(val) = env::var("AX_REDIS_SSL_INSECURE") {
+            let insecure = val.parse().unwrap_or(false);
             if self.redis.ssl.is_none() {
                 self.redis.ssl = Some(RedisSslConfig {
                     ca_cert_path: None,
                     client_cert_path: None,
                     client_key_path: None,
-                    insecure: val.parse().unwrap_or(false),
+                    insecure,
                 });
             } else {
-                self.redis.ssl.as_mut().unwrap().insecure = val.parse().unwrap_or(false);
+                self.redis.ssl.as_mut().unwrap().insecure = insecure;
             }
         }
 
