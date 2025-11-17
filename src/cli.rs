@@ -364,13 +364,19 @@ impl Config {
         }
 
         // Redis SSL configuration overrides
+        // First, check if insecure is set to use when creating new SSL configs
+        let insecure_default = env::var("AX_REDIS_SSL_INSECURE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
+
         if let Ok(val) = env::var("AX_REDIS_SSL_CA_CERT_PATH") {
             if self.redis.ssl.is_none() {
                 self.redis.ssl = Some(RedisSslConfig {
                     ca_cert_path: Some(val),
                     client_cert_path: None,
                     client_key_path: None,
-                    insecure: false,
+                    insecure: insecure_default,
                 });
             } else {
                 self.redis.ssl.as_mut().unwrap().ca_cert_path = Some(val);
@@ -382,7 +388,7 @@ impl Config {
                     ca_cert_path: None,
                     client_cert_path: Some(val),
                     client_key_path: None,
-                    insecure: false,
+                    insecure: insecure_default,
                 });
             } else {
                 self.redis.ssl.as_mut().unwrap().client_cert_path = Some(val);
@@ -394,22 +400,23 @@ impl Config {
                     ca_cert_path: None,
                     client_cert_path: None,
                     client_key_path: Some(val),
-                    insecure: false,
+                    insecure: insecure_default,
                 });
             } else {
                 self.redis.ssl.as_mut().unwrap().client_key_path = Some(val);
             }
         }
         if let Ok(val) = env::var("AX_REDIS_SSL_INSECURE") {
+            let insecure = val.parse().unwrap_or(false);
             if self.redis.ssl.is_none() {
                 self.redis.ssl = Some(RedisSslConfig {
                     ca_cert_path: None,
                     client_cert_path: None,
                     client_key_path: None,
-                    insecure: val.parse().unwrap_or(false),
+                    insecure,
                 });
             } else {
-                self.redis.ssl.as_mut().unwrap().insecure = val.parse().unwrap_or(false);
+                self.redis.ssl.as_mut().unwrap().insecure = insecure;
             }
         }
 
