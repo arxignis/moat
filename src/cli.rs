@@ -364,59 +364,49 @@ impl Config {
         }
 
         // Redis SSL configuration overrides
-        // First, check if insecure is set to use when creating new SSL configs
-        let insecure_default = env::var("AX_REDIS_SSL_INSECURE")
-            .ok()
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false);
+        // Read all SSL environment variables once
+        let ca_cert_path = env::var("AX_REDIS_SSL_CA_CERT_PATH").ok();
+        let client_cert_path = env::var("AX_REDIS_SSL_CLIENT_CERT_PATH").ok();
+        let client_key_path = env::var("AX_REDIS_SSL_CLIENT_KEY_PATH").ok();
+        let insecure_val = env::var("AX_REDIS_SSL_INSECURE").ok();
 
-        if let Ok(val) = env::var("AX_REDIS_SSL_CA_CERT_PATH") {
+        // If any SSL env var is set, ensure SSL config exists
+        if ca_cert_path.is_some()
+            || client_cert_path.is_some()
+            || client_key_path.is_some()
+            || insecure_val.is_some() {
+
+            // Create SSL config if it doesn't exist
             if self.redis.ssl.is_none() {
-                self.redis.ssl = Some(RedisSslConfig {
-                    ca_cert_path: Some(val),
-                    client_cert_path: None,
-                    client_key_path: None,
-                    insecure: insecure_default,
-                });
-            } else {
-                self.redis.ssl.as_mut().unwrap().ca_cert_path = Some(val);
-            }
-        }
-        if let Ok(val) = env::var("AX_REDIS_SSL_CLIENT_CERT_PATH") {
-            if self.redis.ssl.is_none() {
-                self.redis.ssl = Some(RedisSslConfig {
-                    ca_cert_path: None,
-                    client_cert_path: Some(val),
-                    client_key_path: None,
-                    insecure: insecure_default,
-                });
-            } else {
-                self.redis.ssl.as_mut().unwrap().client_cert_path = Some(val);
-            }
-        }
-        if let Ok(val) = env::var("AX_REDIS_SSL_CLIENT_KEY_PATH") {
-            if self.redis.ssl.is_none() {
-                self.redis.ssl = Some(RedisSslConfig {
-                    ca_cert_path: None,
-                    client_cert_path: None,
-                    client_key_path: Some(val),
-                    insecure: insecure_default,
-                });
-            } else {
-                self.redis.ssl.as_mut().unwrap().client_key_path = Some(val);
-            }
-        }
-        if let Ok(val) = env::var("AX_REDIS_SSL_INSECURE") {
-            let insecure = val.parse::<bool>().unwrap_or(false);
-            if self.redis.ssl.is_none() {
+                // Parse insecure value if provided, default to false
+                let insecure_default = insecure_val
+                    .as_ref()
+                    .and_then(|v| v.parse::<bool>().ok())
+                    .unwrap_or(false);
+
                 self.redis.ssl = Some(RedisSslConfig {
                     ca_cert_path: None,
                     client_cert_path: None,
                     client_key_path: None,
-                    insecure,
+                    insecure: insecure_default,
                 });
-            } else {
-                self.redis.ssl.as_mut().unwrap().insecure = insecure;
+            }
+
+            // Update the SSL config with values from environment variables
+            let ssl = self.redis.ssl.as_mut().expect("SSL config should exist here");
+            if let Some(val) = ca_cert_path {
+                ssl.ca_cert_path = Some(val);
+            }
+            if let Some(val) = client_cert_path {
+                ssl.client_cert_path = Some(val);
+            }
+            if let Some(val) = client_key_path {
+                ssl.client_key_path = Some(val);
+            }
+            if let Some(val) = insecure_val {
+                if let Ok(insecure) = val.parse::<bool>() {
+                    ssl.insecure = insecure;
+                }
             }
         }
 
@@ -843,6 +833,7 @@ impl PingoraConfig {
 mod tests {
     use super::*;
     use std::env;
+    use serial_test::serial;
 
     #[test]
     fn test_redis_ssl_config_deserialize() {
@@ -909,15 +900,20 @@ prefix: "test:prefix"
         assert!(config.ssl.is_none());
     }
 
-    #[test]
-    fn test_apply_env_overrides_redis_ssl_ca_cert() {
-        // Clean up any leftover env vars from previous tests
+    // Helper function to clean up SSL environment variables for test isolation
+    fn cleanup_redis_ssl_env_vars() {
         unsafe {
             env::remove_var("AX_REDIS_SSL_CA_CERT_PATH");
             env::remove_var("AX_REDIS_SSL_CLIENT_CERT_PATH");
             env::remove_var("AX_REDIS_SSL_CLIENT_KEY_PATH");
             env::remove_var("AX_REDIS_SSL_INSECURE");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_env_overrides_redis_ssl_ca_cert() {
+        cleanup_redis_ssl_env_vars();
 
         let mut config = Config::default();
         unsafe {
@@ -935,7 +931,10 @@ prefix: "test:prefix"
     }
 
     #[test]
+    #[serial]
     fn test_apply_env_overrides_redis_ssl_client_cert() {
+        cleanup_redis_ssl_env_vars();
+
         let mut config = Config::default();
         unsafe {
             env::set_var("AX_REDIS_SSL_CLIENT_CERT_PATH", "/test/client.crt");
@@ -956,14 +955,9 @@ prefix: "test:prefix"
     }
 
     #[test]
+    #[serial]
     fn test_apply_env_overrides_redis_ssl_insecure() {
-        // Clean up any leftover env vars from previous tests
-        unsafe {
-            env::remove_var("AX_REDIS_SSL_CA_CERT_PATH");
-            env::remove_var("AX_REDIS_SSL_CLIENT_CERT_PATH");
-            env::remove_var("AX_REDIS_SSL_CLIENT_KEY_PATH");
-            env::remove_var("AX_REDIS_SSL_INSECURE");
-        }
+        cleanup_redis_ssl_env_vars();
 
         let mut config = Config::default();
         unsafe {
@@ -981,7 +975,10 @@ prefix: "test:prefix"
     }
 
     #[test]
+    #[serial]
     fn test_apply_env_overrides_redis_ssl_insecure_false() {
+        cleanup_redis_ssl_env_vars();
+
         let mut config = Config::default();
         unsafe {
             env::set_var("AX_REDIS_SSL_INSECURE", "false");
@@ -998,7 +995,9 @@ prefix: "test:prefix"
     }
 
     #[test]
+    #[serial]
     fn test_apply_env_overrides_redis_ssl_combined() {
+        cleanup_redis_ssl_env_vars();
         let mut config = Config::default();
         unsafe {
             env::set_var("AX_REDIS_SSL_CA_CERT_PATH", "/test/ca.crt");
