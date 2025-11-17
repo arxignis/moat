@@ -53,7 +53,7 @@ async-trait = "0.1.81"
 sha2 = "0.10.8"
 tokio-stream = { version = "0.1.15", features = ["net"] }
 hex = "0.4.3"
-bytes = "1.7.1"
+bytes = "1.11.0"
 futures = "0.3.31"
 futures-rustls = "0.26.0"
 tls-parser = "0.12.2"
