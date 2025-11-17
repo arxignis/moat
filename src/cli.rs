@@ -367,7 +367,7 @@ impl Config {
         // First, check if insecure is set to use when creating new SSL configs
         let insecure_default = env::var("AX_REDIS_SSL_INSECURE")
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(false);
 
         if let Ok(val) = env::var("AX_REDIS_SSL_CA_CERT_PATH") {
@@ -407,7 +407,7 @@ impl Config {
             }
         }
         if let Ok(val) = env::var("AX_REDIS_SSL_INSECURE") {
-            let insecure = val.parse().unwrap_or(false);
+            let insecure = val.parse::<bool>().unwrap_or(false);
             if self.redis.ssl.is_none() {
                 self.redis.ssl = Some(RedisSslConfig {
                     ca_cert_path: None,
@@ -911,6 +911,14 @@ prefix: "test:prefix"
 
     #[test]
     fn test_apply_env_overrides_redis_ssl_ca_cert() {
+        // Clean up any leftover env vars from previous tests
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_CA_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_KEY_PATH");
+            env::remove_var("AX_REDIS_SSL_INSECURE");
+        }
+
         let mut config = Config::default();
         unsafe {
             env::set_var("AX_REDIS_SSL_CA_CERT_PATH", "/test/ca.crt");
@@ -949,6 +957,14 @@ prefix: "test:prefix"
 
     #[test]
     fn test_apply_env_overrides_redis_ssl_insecure() {
+        // Clean up any leftover env vars from previous tests
+        unsafe {
+            env::remove_var("AX_REDIS_SSL_CA_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_CERT_PATH");
+            env::remove_var("AX_REDIS_SSL_CLIENT_KEY_PATH");
+            env::remove_var("AX_REDIS_SSL_INSECURE");
+        }
+
         let mut config = Config::default();
         unsafe {
             env::set_var("AX_REDIS_SSL_INSECURE", "true");
