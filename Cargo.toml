@@ -98,7 +98,7 @@ ctrlc = "3.5.0"
 arc-swap = "1.7.1"
 prometheus = "0.14.0"
 once_cell = "1.21.3"
-axum = { version = "0.8.4" }
+axum = { version = "0.8.7" }
 axum-server = { version = "0.7.2", features = ["tls-openssl"] }
 tower-http = { version = "0.6.6", features = ["fs"] }
 tonic = "0.14.2"
