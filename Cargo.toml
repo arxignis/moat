@@ -112,4 +112,3 @@ instant-acme = "0.8"
 trust-dns-resolver = "0.23.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-axum-server = { version = "0.7.3", features = ["tls-openssl"] }
