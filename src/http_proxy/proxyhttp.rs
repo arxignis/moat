@@ -10,7 +10,7 @@ use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use pingora_http::{RequestHeader, ResponseHeader, StatusCode};
 use pingora_core::prelude::*;
-use pingora_core::ErrorSource::Upstream;
+use pingora_core::ErrorSource::{Upstream, Internal as ErrorSourceInternal};
 use pingora_core::{Error, ErrorType::HTTPStatus, RetryType, ImmutStr};
 use pingora_core::listeners::ALPN;
 use pingora_core::prelude::HttpPeer;
@@ -75,6 +75,10 @@ impl ProxyHttp for LB {
         }
     }
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        // Enable body buffering for content scanning
+        session.enable_retry_buffering();
+        info!("BODY BUFFERING ENABLED for request to {}", session.req_header().uri);
+
         let ep = _ctx.extraparams.clone();
 
         // Try to get TLS fingerprint if available
@@ -472,11 +476,17 @@ impl ProxyHttp for LB {
         Self::CTX: Send + Sync,
     {
         // Accumulate request body for content scanning
+        // Copy the body data but don't take it - Pingora will forward it if no malware
         if let Some(body_bytes) = body {
+            info!("BODY CHUNK received: {} bytes, total so far: {}, end_of_stream: {}", body_bytes.len(), ctx.request_body.len() + body_bytes.len(), end_of_stream);
             ctx.request_body.extend_from_slice(body_bytes);
         }
 
         // When stream ends, perform content scanning if enabled
+        if end_of_stream {
+            info!("END OF STREAM reached. Total body size: {} bytes", ctx.request_body.len());
+        }
+        
         if end_of_stream && !ctx.request_body.is_empty() {
             if let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
                 // Get peer address for scanning
@@ -516,8 +526,11 @@ impl ProxyHttp for LB {
                 let (req_parts, _) = req.into_parts();
 
                 // Check if we should scan this request
-                if scanner.should_scan(&req_parts, &ctx.request_body, peer_addr) {
-                    debug!("Content scanner: scanning request body (size: {} bytes)", ctx.request_body.len());
+                info!("Content scanner: checking if should scan - body size: {}, method: {}, content-type: {:?}",
+                      ctx.request_body.len(), req_parts.method, req_parts.headers.get("content-type"));
+                let should_scan = scanner.should_scan(&req_parts, &ctx.request_body, peer_addr);
+                if should_scan {
+                    info!("Content scanner: WILL SCAN request body (size: {} bytes)", ctx.request_body.len());
 
                     // Check if content-type is multipart and scan accordingly
                     let content_type = req_parts.headers
@@ -525,13 +538,16 @@ impl ProxyHttp for LB {
                         .and_then(|h| h.to_str().ok());
 
                     let scan_result = if let Some(ct) = content_type {
+                        info!("Content-Type header: {}", ct);
                         if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
-                            debug!("Detected multipart content, scanning parts individually");
+                            info!("Detected multipart content with boundary: '{}', scanning parts individually", boundary);
                             scanner.scan_multipart_content(&ctx.request_body, &boundary).await
                         } else {
+                            info!("Not multipart or no boundary found, scanning as single blob");
                             scanner.scan_content(&ctx.request_body).await
                         }
                     } else {
+                        info!("No Content-Type header, scanning as single blob");
                         scanner.scan_content(&ctx.request_body).await
                     };
 
@@ -541,11 +557,36 @@ impl ProxyHttp for LB {
                                 info!("Malware detected in request from {}: {} {} - signature: {:?}",
                                     peer_addr, method, uri, scan_result.signature);
 
-                                // Mark malware detected in context - upstream_peer will handle blocking
+                                // Mark malware detected in context
                                 ctx.malware_detected = true;
 
-                                // Don't send response here - let upstream_peer handle it before forwarding
-                                return Ok(());
+                                // Send 403 response immediately to block the request
+                                let json_response = serde_json::json!({
+                                    "success": false,
+                                    "error": "Request blocked",
+                                    "reason": "malware_detected",
+                                    "message": "Malware detected in request"
+                                });
+                                let json_body = Bytes::from(json_response.to_string());
+
+                                let mut header = ResponseHeader::build(403, None)?;
+                                header.insert_header("Content-Type", "application/json")?;
+                                header.insert_header("X-Content-Scan-Result", "malware_detected")?;
+
+                                _session.set_keepalive(None);
+                                _session.write_response_header(Box::new(header), false).await?;
+                                _session.write_response_body(Some(json_body), true).await?;
+                                
+                                ctx.malware_response_sent = true;
+
+                                // Return error to abort the request
+                                return Err(Box::new(Error {
+                                    etype: HTTPStatus(403),
+                                    esource: ErrorSourceInternal,
+                                    retry: RetryType::Decided(false),
+                                    cause: None,
+                                    context: Option::from(ImmutStr::Static("Malware detected")),
+                                }));
                             } else {
                                 debug!("Content scan completed: no malware detected");
                             }
@@ -563,6 +604,7 @@ impl ProxyHttp for LB {
 
         Ok(())
     }
+    
     async fn response_filter(&self, session: &mut Session, _upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
         // Calculate upstream response time
         if let Some(upstream_start) = ctx.upstream_start_time {

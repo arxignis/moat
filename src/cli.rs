@@ -745,6 +745,8 @@ pub struct PingoraConfig {
     pub healthcheck_method: String,
     #[serde(default = "default_pingora_healthcheck_interval")]
     pub healthcheck_interval: u16,
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocolConfig,
 }
 
 fn default_pingora_tls_grade() -> String { "medium".to_string() }
@@ -808,6 +810,7 @@ impl PingoraConfig {
         app_config.master_key = self.master_key.clone();
         app_config.healthcheck_method = self.healthcheck_method.clone();
         app_config.healthcheck_interval = self.healthcheck_interval;
+        app_config.proxy_protocol_enabled = self.proxy_protocol.enabled;
 
         // Parse config_address to local_server
         if let Some((ip, port_str)) = self.config_address.split_once(':') {

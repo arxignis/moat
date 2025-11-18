@@ -150,6 +150,7 @@ pub struct AppConfig {
     pub file_server_folder: Option<String>,
     pub runuser: Option<String>,
     pub rungroup: Option<String>,
+    pub proxy_protocol_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
