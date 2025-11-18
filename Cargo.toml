@@ -85,12 +85,12 @@ daemonize = "0.5.0"
 
 
 wirefilter-engine = { git = "https://github.com/gen0sec/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
-pingora = { git = "https://github.com/gen0sec/pingora", branch = "handle-proxy-req", features = ["lb", "openssl", "proxy"] }
-pingora-core = { git = "https://github.com/gen0sec/pingora", branch = "handle-proxy-req" }
-pingora-proxy = { git = "https://github.com/gen0sec/pingora", branch = "handle-proxy-req" }
-pingora-limits = { git = "https://github.com/gen0sec/pingora", branch = "handle-proxy-req" }
-pingora-http = { git = "https://github.com/gen0sec/pingora", branch = "handle-proxy-req" }
-pingora-memory-cache = { git = "https://github.com/gen0sec/pingora", branch = "handle-proxy-req" }
+pingora = { git = "https://github.com/gen0sec/pingora", features = ["lb", "openssl", "proxy"] }
+pingora-core = { git = "https://github.com/gen0sec/pingora"}
+pingora-proxy = { git = "https://github.com/gen0sec/pingora"}
+pingora-limits = { git = "https://github.com/gen0sec/pingora"}
+pingora-http = { git = "https://github.com/gen0sec/pingora"}
+pingora-memory-cache = { git = "https://github.com/gen0sec/pingora"}
 
 mimalloc = { version = "0.1.48", default-features = false }
 dashmap = "7.0.0-rc2"
