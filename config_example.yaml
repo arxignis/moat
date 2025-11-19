@@ -223,6 +223,9 @@ pingora:
   # Health check interval in seconds
   healthcheck_interval: 2
 
+  # Proxy protocol enabled
+  proxy_protocol_enabled: false
+
 # ACME Configuration (Let's Encrypt certificate management)
 acme:
   # Enable embedded ACME server for automatic certificate management
