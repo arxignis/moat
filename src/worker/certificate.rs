@@ -207,6 +207,7 @@ async fn fetch_domains_from_upstreams(upstreams_path: &str) -> Result<Vec<String
     Ok(domains)
 }
 
+
 /// Fetch SSL certificates from Redis for domains listed in upstreams.yaml
 async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &str) -> Result<()> {
     let redis_manager = RedisManager::get()
@@ -223,9 +224,15 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
         .with_context(|| format!("Failed to parse upstreams YAML: {:?}", path))?;
 
     // Build mapping of domain -> certificate_name (or None if not specified)
+    // Only include domains that need certificates (have ACME config or ssl_enabled: true)
     let mut domain_cert_map: Vec<(String, Option<String>)> = Vec::new();
     if let Some(upstreams) = &parsed.upstreams {
         for (hostname, host_config) in upstreams {
+            // Only process domains that need certificates
+            if !host_config.needs_certificate() {
+                log::debug!("Skipping certificate check for domain {} (no ACME config and ssl_enabled: false)", hostname);
+                continue;
+            }
             let cert_name = host_config.certificate.clone();
             domain_cert_map.push((hostname.clone(), cert_name));
         }

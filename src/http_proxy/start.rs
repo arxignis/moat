@@ -11,6 +11,7 @@ use log::{debug, info, warn};
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::prelude::{background_service, Opt};
 use pingora_core::server::Server;
+use std::fs;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -51,14 +52,14 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
 
     // Pass None to avoid pingora parsing the config file (we use our own parser above)
     let mut server = Server::new(None).unwrap();
-    
+
     // Use proxy_protocol_enabled from config
     if maincfg.proxy_protocol_enabled {
         info!("PROXY protocol support enabled - Pingora will parse headers before HTTP/TLS");
         // Enable PROXY protocol globally in Pingora
         pingora_core::protocols::proxy_protocol::set_proxy_protocol_enabled(true);
     }
-    
+
     server.bootstrap();
 
     let uf_config = Arc::new(DashMap::new());
@@ -110,10 +111,34 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
             let (tx, rx): (Sender<Vec<CertificateConfig>>, Receiver<Vec<CertificateConfig>>) =
                 channel();
             let certs_path = cfg.proxy_certificates.clone().unwrap();
-            thread::spawn(move || {
-                crate::utils::tools::watch_folder(certs_path, tx).unwrap();
-            });
-            let certificate_configs = rx.recv().unwrap();
+
+            // Check if directory exists before watching
+            let certs_path_exists = fs::metadata(&certs_path).is_ok();
+            let certs_path_clone = certs_path.clone();
+
+            if certs_path_exists {
+                // Start watcher thread - it will send initial configs
+                thread::spawn(move || {
+                    if let Err(e) = crate::utils::tools::watch_folder(certs_path_clone, tx) {
+                        warn!("Failed to watch certificate directory: {:?}", e);
+                    }
+                });
+            } else {
+                warn!("Certificate directory does not exist: {}. TLS will be disabled until certificates are added.", certs_path);
+                // Send empty configs so receiver doesn't block
+                if tx.send(vec![]).is_err() {
+                    warn!("Failed to send initial certificate configs");
+                }
+            }
+
+            // Receive initial certificate configs
+            let certificate_configs = match rx.recv() {
+                Ok(configs) => configs,
+                Err(e) => {
+                    warn!("Failed to receive certificate configs: {:?}. TLS will be disabled.", e);
+                    vec![]
+                }
+            };
 
             if let Some(first_set) = tls::Certificates::new(
                 &certificate_configs,

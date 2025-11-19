@@ -97,6 +97,16 @@ pub struct HostConfig {
     pub acme: Option<crate::acme::upstreams_reader::UpstreamsAcmeConfig>,
 }
 
+impl HostConfig {
+    /// Check if a domain needs a certificate to be automatically requested via ACME
+    /// Only returns true if there's an explicit ACME configuration block.
+    /// If ssl_enabled is true but no ACME config exists, the user is expected to provide certificates manually.
+    pub fn needs_certificate(&self) -> bool {
+        // Only request certificates if ACME is explicitly configured
+        self.acme.is_some()
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PathConfig {
     pub servers: Vec<String>,
