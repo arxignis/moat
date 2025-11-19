@@ -42,7 +42,9 @@ impl BackgroundService for LB {
         match config.typecfg.as_str() {
             "file" => {
                 info!("Running File discovery, requested type is: {}", config.typecfg);
-                tx.send(config).await.unwrap();
+                if let Err(e) = tx.send(config).await {
+                    error!("Failed to send config: {}", e);
+                }
                 let file_load = FromFileProvider {
                     path: self.config.upstreams_conf.clone(),
                 };
@@ -56,7 +58,7 @@ impl BackgroundService for LB {
         let api_load = APIUpstreamProvider {
             address: self.config.config_address.clone(),
             masterkey: self.config.master_key.clone(),
-            config_api_enabled: self.config.config_api_enabled.clone(),
+            config_api_enabled: self.config.config_api_enabled,
             tls_address: self.config.config_tls_address.clone(),
             tls_certificate: self.config.config_tls_certificate.clone(),
             tls_key_file: self.config.config_tls_key_file.clone(),
@@ -77,8 +79,7 @@ impl BackgroundService for LB {
                     break;
                 }
                 val = rx.next() => {
-                    match val {
-                        Some(ss) => {
+                    if let Some(ss) = val {
                             // Update healthcheck settings from upstreams config if available
                             if let Some(interval) = ss.healthcheck_interval {
                                 healthcheck_interval = interval;
@@ -94,9 +95,11 @@ impl BackgroundService for LB {
                                 let im_clone = self.ump_byid.clone();
                                 let method_clone = healthcheck_method.clone();
                                 let interval_clone = healthcheck_interval;
-                                let _ = tokio::spawn(async move {
-                                    healthcheck::hc2(uu_clone, ff_clone, im_clone, (&*method_clone.to_string(), interval_clone.to_string().parse().unwrap())).await
-                                });
+                                drop(tokio::spawn(async move {
+                                    if let Ok(interval) = interval_clone.to_string().parse() {
+                                        healthcheck::hc2(uu_clone, ff_clone, im_clone, (&*method_clone.to_string(), interval)).await
+                                    }
+                                }));
                                 healthcheck_started = true;
                             }
 
@@ -122,7 +125,7 @@ impl BackgroundService for LB {
                             for entry in ss.upstreams.iter() {
                                 let global_key = entry.key().clone();
                                 let global_values = DashMap::new();
-                                let mut target_entry = ss.headers.entry(global_key).or_insert_with(DashMap::new);
+                                let mut target_entry = ss.headers.entry(global_key).or_default();
                                 target_entry.extend(global_values);
                                 self.headers.insert(target_entry.key().to_owned(), target_entry.value().to_owned());
                             }
@@ -131,19 +134,17 @@ impl BackgroundService for LB {
                                 let path_key = path.key().clone();
                                 let path_headers = path.value().clone();
                                 self.headers.insert(path_key.clone(), path_headers);
-                                if let Some(global_headers) = ss.headers.get("GLOBAL_HEADERS") {
-                                    if let Some(existing_headers) = self.headers.get(&path_key) {
-                                        crate::utils::tools::merge_headers(existing_headers.value(), &global_headers);
-                                    }
+                                if let Some(global_headers) = ss.headers.get("GLOBAL_HEADERS")
+                                    && let Some(existing_headers) = self.headers.get(&path_key) {
+                                    crate::utils::tools::merge_headers(existing_headers.value(), &global_headers);
                                 }
                             }
 
                             // Update upstreams certificate mappings
-                            if let Some(certs_arc) = &self.certificates {
-                                if let Some(certs) = certs_arc.load().as_ref() {
-                                    certs.set_upstreams_cert_map(ss.certificates.clone());
-                                    info!("Updated upstreams certificate mappings: {} entries", ss.certificates.len());
-                                }
+                            if let Some(certs_arc) = &self.certificates
+                                && let Some(certs) = certs_arc.load().as_ref() {
+                                certs.set_upstreams_cert_map(ss.certificates.clone());
+                                info!("Updated upstreams certificate mappings: {} entries", ss.certificates.len());
                             }
 
                             // Check and request certificates for new/updated domains
@@ -151,8 +152,6 @@ impl BackgroundService for LB {
 
                             // info!("Upstreams list is changed, updating to:");
                             // print_upstreams(&self.ump_full);
-                        }
-                        None => {}
                     }
                 }
             }

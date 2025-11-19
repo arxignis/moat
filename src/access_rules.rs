@@ -33,13 +33,12 @@ pub fn init_access_rules_from_global(
     if skels.is_empty() {
         return Ok(());
     }
-    if let Ok(guard) = global_config().read() {
-        if let Some(cfg) = guard.as_ref() {
-            let previous_rules: PreviousRules = Arc::new(Mutex::new(std::collections::HashSet::new()));
-            let previous_rules_v6: PreviousRulesV6 = Arc::new(Mutex::new(std::collections::HashSet::new()));
-            let resp = config::ConfigApiResponse { success: true, config: cfg.clone() };
-            apply_rules(skels, &resp, &previous_rules, &previous_rules_v6)?;
-        }
+    if let Ok(guard) = global_config().read()
+        && let Some(cfg) = guard.as_ref() {
+        let previous_rules: PreviousRules = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let previous_rules_v6: PreviousRulesV6 = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let resp = config::ConfigApiResponse { success: true, config: cfg.clone() };
+        apply_rules(skels, &resp, &previous_rules, &previous_rules_v6)?;
     }
     Ok(())
 }
@@ -52,23 +51,22 @@ pub fn apply_rules_from_global(
     previous_rules_v6: &PreviousRulesV6,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Read from global config and apply if available
-    if let Ok(guard) = global_config().read() {
-        if let Some(cfg) = guard.as_ref() {
-            // Update WAF wirefilter when config changes
-            if let Err(e) = update_http_filter_from_config_value(cfg) {
-                log::error!("failed to update HTTP filter from config: {e}");
-            }
-            if skels.is_empty() {
-                return Ok(());
-            }
-            apply_rules(
-                skels,
-                &config::ConfigApiResponse { success: true, config: cfg.clone() },
-                previous_rules,
-                previous_rules_v6,
-            )?;
+    if let Ok(guard) = global_config().read()
+        && let Some(cfg) = guard.as_ref() {
+        // Update WAF wirefilter when config changes
+        if let Err(e) = update_http_filter_from_config_value(cfg) {
+            log::error!("failed to update HTTP filter from config: {e}");
+        }
+        if skels.is_empty() {
             return Ok(());
         }
+        apply_rules(
+            skels,
+            &config::ConfigApiResponse { success: true, config: cfg.clone() },
+            previous_rules,
+            previous_rules_v6,
+        )?;
+        return Ok(());
     }
     Ok(())
 }
@@ -220,8 +218,8 @@ fn apply_rules(
     }
 
     // Compare with previous rules to detect changes
-    let mut previous_rules_guard = previous_rules.lock().unwrap();
-    let mut previous_rules_v6_guard = previous_rules_v6.lock().unwrap();
+    let mut previous_rules_guard = previous_rules.lock().expect("Lock poisoned");
+    let mut previous_rules_v6_guard = previous_rules_v6.lock().expect("Lock poisoned");
 
     // Check if rules have changed
     let ipv4_changed = *previous_rules_guard != current_rules;
@@ -282,48 +280,43 @@ fn apply_rules(
 /// Check if an IP address is allowed by access rules
 /// Returns true if the IP is explicitly allowed, false otherwise
 pub fn is_ip_allowed_by_access_rules(ip: IpAddr) -> bool {
-    if let Ok(guard) = global_config().read() {
-        if let Some(cfg) = guard.as_ref() {
-            let allow_rules = &cfg.access_rules.allow;
+    if let Ok(guard) = global_config().read()
+        && let Some(cfg) = guard.as_ref() {
+        let allow_rules = &cfg.access_rules.allow;
 
-            // Check direct IP matches
-            for ip_str in &allow_rules.ips {
-                if let Ok(allowed_ip) = ip_str.parse::<IpAddr>() {
-                    if ip == allowed_ip {
-                        return true;
-                    }
-                }
+        // Check direct IP matches
+        for ip_str in &allow_rules.ips {
+            if let Ok(allowed_ip) = ip_str.parse::<IpAddr>()
+                && ip == allowed_ip {
+                return true;
+            }
 
-                // Check CIDR ranges
-                if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str) {
-                    if is_ip_in_cidr(ip, network, prefix_len) {
+            // Check CIDR ranges
+            if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str)
+                && is_ip_in_cidr(ip, network, prefix_len) {
+                return true;
+            }
+        }
+
+        // Check country-based allow rules
+        for country_map in &allow_rules.country {
+            for (_country_code, ip_list) in country_map.iter() {
+                for ip_str in ip_list {
+                    if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str)
+                        && is_ip_in_cidr(ip, network, prefix_len) {
                         return true;
                     }
                 }
             }
+        }
 
-            // Check country-based allow rules
-            for country_map in &allow_rules.country {
-                for (_country_code, ip_list) in country_map.iter() {
-                    for ip_str in ip_list {
-                        if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str) {
-                            if is_ip_in_cidr(ip, network, prefix_len) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check ASN-based allow rules
-            for asn_map in &allow_rules.asn {
-                for (_asn, ip_list) in asn_map.iter() {
-                    for ip_str in ip_list {
-                        if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str) {
-                            if is_ip_in_cidr(ip, network, prefix_len) {
-                                return true;
-                            }
-                        }
+        // Check ASN-based allow rules
+        for asn_map in &allow_rules.asn {
+            for (_asn, ip_list) in asn_map.iter() {
+                for ip_str in ip_list {
+                    if let Some((network, prefix_len)) = parse_ip_or_cidr(ip_str)
+                        && is_ip_in_cidr(ip, network, prefix_len) {
+                        return true;
                     }
                 }
             }

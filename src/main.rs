@@ -65,10 +65,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Validate required arguments when no config file is provided
-    if args.config.is_none() {
-        if args.arxignis_api_key.is_none() {
-            return Err(anyhow::anyhow!("--arxignis-api-key is required when no config file is provided"));
-        }
+    if args.config.is_none()
+        && args.arxignis_api_key.is_none() {
+        return Err(anyhow::anyhow!("--arxignis-api-key is required when no config file is provided"));
     }
 
     // Load configuration
@@ -288,7 +287,7 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
 
             // Determine Redis URL
             let redis_url = acme_config.redis_url
-                .or_else(|| if redis_config.url.is_empty() { None } else { Some(redis_config.url) });
+                .or_else(|| if redis_config.url.is_empty() { None } else { Some(redis_config.url.clone()) });
 
             // Create Redis SSL config if available
             let redis_ssl = redis_config.ssl.map(|ssl| crate::acme::config::RedisSslConfig {
@@ -461,14 +460,13 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
     }
 
     // Validate API key if provided
-    if !config.arxignis.base_url.is_empty() && !config.arxignis.api_key.is_empty() {
-        if let Err(e) = validate_api_key(
+    if !config.arxignis.base_url.is_empty() && !config.arxignis.api_key.is_empty()
+        && let Err(e) = validate_api_key(
             &config.arxignis.base_url,
             &config.arxignis.api_key,
         ).await {
-            log::error!("API key validation failed: {}", e);
-            return Err(anyhow::anyhow!("API key validation failed: {}", e));
-        }
+        log::error!("API key validation failed: {}", e);
+        return Err(anyhow::anyhow!("API key validation failed: {}", e));
     }
 
     // Initialize content scanning from CLI config
@@ -592,12 +590,10 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
 
         if let Err(e) = worker_manager.register_worker(worker_config, config_worker) {
             log::error!("Failed to register config worker: {}", e);
+        } else if config.mode == "agent" {
+            log::info!("Registered config worker for agent mode (interval: {}s) - fetches access rules, WAF rules, and content scanning config", refresh_interval);
         } else {
-            if config.mode == "agent" {
-                log::info!("Registered config worker for agent mode (interval: {}s) - fetches access rules, WAF rules, and content scanning config", refresh_interval);
-            } else {
-                log::info!("Registered config worker (interval: {}s) - fetches access rules, WAF rules, and content scanning config", refresh_interval);
-            }
+            log::info!("Registered config worker (interval: {}s) - fetches access rules, WAF rules, and content scanning config", refresh_interval);
         }
     } else {
         log::info!("Skipping config worker (no API credentials provided)");

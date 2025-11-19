@@ -41,15 +41,14 @@ pub fn generate_fingerprint_from_client_hello(
 
         // Store fingerprint temporarily if we have peer address
         // Convert pingora SocketAddr to std::net::SocketAddr for storage
-        if let Some(ref addr) = peer_addr {
-            if let Some(inet) = addr.as_inet() {
-                let std_addr = SocketAddr::new(inet.ip().into(), inet.port());
+        if let Some(ref addr) = peer_addr
+            && let Some(inet) = addr.as_inet() {
+            let std_addr = SocketAddr::new(inet.ip(), inet.port());
                 let key = format!("{}", std_addr);
                 if let Ok(mut map) = get_fingerprint_map().lock() {
                     map.insert(key, fingerprint_arc.clone());
                 }
             }
-        }
 
         // Log fingerprint details at info level
         debug!(
@@ -87,7 +86,7 @@ pub fn extract_and_fingerprint<S: std::os::unix::io::AsRawFd>(
         Ok(Some(hello)) => {
             // Convert std::net::SocketAddr to pingora SocketAddr
             use pingora_core::protocols::l4::socket::SocketAddr as PingoraAddr;
-            let pingora_addr = peer_addr.map(|addr| PingoraAddr::Inet(addr));
+            let pingora_addr = peer_addr.map(PingoraAddr::Inet);
             generate_fingerprint_from_client_hello(&hello, pingora_addr)
         }
         Ok(None) => {

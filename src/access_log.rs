@@ -175,24 +175,21 @@ impl AccessLogSummary {
             if let Ok(value) = HeaderValue::from_str(&threat.score.to_string()) {
                 headers.insert("X-Threat-Score", value);
             }
-            if let Some(country) = &threat.country {
-                if let Ok(value) = HeaderValue::from_str(country) {
-                    headers.insert("X-Client-Country", value);
-                }
+            if let Some(country) = &threat.country
+                && let Ok(value) = HeaderValue::from_str(country) {
+                headers.insert("X-Client-Country", value);
             }
         }
 
         // Add performance metrics
-        if let Some(ms) = self.performance.request_time_ms {
-            if let Ok(value) = HeaderValue::from_str(&ms.to_string()) {
-                headers.insert("X-Request-Time-Ms", value);
-            }
+        if let Some(ms) = self.performance.request_time_ms
+            && let Ok(value) = HeaderValue::from_str(&ms.to_string()) {
+            headers.insert("X-Request-Time-Ms", value);
         }
 
-        if let Some(ms) = self.performance.upstream_time_ms {
-            if let Ok(value) = HeaderValue::from_str(&ms.to_string()) {
-                headers.insert("X-Upstream-Time-Ms", value);
-            }
+        if let Some(ms) = self.performance.upstream_time_ms
+            && let Ok(value) = HeaderValue::from_str(&ms.to_string()) {
+            headers.insert("X-Upstream-Time-Ms", value);
         }
 
         // Add compact JSON summary
@@ -315,7 +312,7 @@ impl HttpAccessLog {
         tls_ja4_unsorted: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let timestamp = Utc::now();
-        let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
+        let request_id = format!("req_{}", SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos());
 
         // Extract request details
         let uri = &req_parts.uri;
@@ -372,7 +369,7 @@ impl HttpAccessLog {
         // Get log sender configuration for body processing
         let log_config = {
             let config_store = get_log_sender_config();
-            let config_guard = config_store.read().unwrap();
+            let config_guard = config_store.read().expect("Lock poisoned");
             config_guard.as_ref().cloned()
         };
 

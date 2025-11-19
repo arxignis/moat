@@ -198,7 +198,7 @@ async fn fetch_domains_from_upstreams(upstreams_path: &str) -> Result<Vec<String
     let mut domains = Vec::new();
 
     if let Some(upstreams) = &parsed.upstreams {
-        for (hostname, _host_config) in upstreams {
+        for hostname in upstreams.keys() {
             domains.push(hostname.clone());
         }
     }
@@ -284,7 +284,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
         let hash_cache = get_certificate_hash_cache();
 
         // Get file paths first - use certificate name for file naming
-        let sanitized_cert_name = cert_name.replace('.', "_").replace('*', "_");
+        let sanitized_cert_name = cert_name.replace(['.', '*'], "_");
         let cert_path = cert_dir.join(format!("{}.crt", sanitized_cert_name));
         let key_path = cert_dir.join(format!("{}.key", sanitized_cert_name));
 
@@ -504,7 +504,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
                 log::warn!("Certificate fullchain found but private key missing in Redis for domain: {} (cert: {}, key: {})", domain, cert_name, privkey_key);
                 // Only request certificate if no certificate name is specified (i.e., use domain name)
                 if cert_name_opt.is_none() {
-                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, &certificate_path).await {
+                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, certificate_path).await {
                         log::warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
                     } else {
                         log::debug!("Successfully requested certificate from ACME for domain: {}", domain);
@@ -518,7 +518,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
                 log::warn!("Certificate private key found but fullchain missing in Redis for domain: {} (cert: {}, key: {})", domain, cert_name, fullchain_key);
                 // Only request certificate if no certificate name is specified (i.e., use domain name)
                 if cert_name_opt.is_none() {
-                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, &certificate_path).await {
+                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, certificate_path).await {
                         log::warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
                     } else {
                         log::debug!("Successfully requested certificate from ACME for domain: {}", domain);
@@ -555,7 +555,7 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
                 }
 
                     // Request certificate from ACME server if enabled
-                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, &certificate_path).await {
+                    if let Err(e) = request_certificate_from_acme(domain, normalized_cert_name, certificate_path).await {
                         log::warn!("Failed to request certificate from ACME for domain {}: {}", domain, e);
                     } else {
                         log::debug!("Successfully requested certificate from ACME for domain: {}", domain);
@@ -618,35 +618,33 @@ static UPSTREAMS_PATH: once_cell::sync::OnceCell<Arc<std::sync::RwLock<Option<St
 /// Set the global ACME config (called from main.rs)
 pub fn set_acme_config(config: crate::cli::AcmeConfig) {
     let store = ACME_CONFIG.get_or_init(|| Arc::new(std::sync::RwLock::new(None)));
-    let mut guard = store.write().unwrap();
+    let mut guard = store.write().expect("Lock poisoned");
     *guard = Some(config);
 }
 
 /// Set the global upstreams path (called from certificate worker)
 fn set_upstreams_path(path: String) {
     let store = UPSTREAMS_PATH.get_or_init(|| Arc::new(std::sync::RwLock::new(None)));
-    let mut guard = store.write().unwrap();
+    let mut guard = store.write().expect("Lock poisoned");
     *guard = Some(path);
 }
 
 /// Get the global ACME config
 pub async fn get_acme_config() -> Option<crate::cli::AcmeConfig> {
     let store = ACME_CONFIG.get()?;
-    let guard = tokio::task::spawn_blocking({
+    tokio::task::spawn_blocking({
         let store = Arc::clone(store);
-        move || store.read().unwrap().clone()
-    }).await.ok()?;
-    guard
+        move || store.read().expect("Lock poisoned").clone()
+    }).await.ok()?
 }
 
 /// Get the global upstreams path
 async fn get_upstreams_path() -> Option<String> {
     let store = UPSTREAMS_PATH.get()?;
-    let guard = tokio::task::spawn_blocking({
+    tokio::task::spawn_blocking({
         let store = Arc::clone(store);
-        move || store.read().unwrap().clone()
-    }).await.ok()?;
-    guard
+        move || store.read().expect("Lock poisoned").clone()
+    }).await.ok()?
 }
 
 /// Request a certificate from ACME server for a domain
@@ -754,7 +752,7 @@ pub async fn request_certificate_from_acme(
     // Get Redis SSL config if available
     let redis_ssl = crate::redis::RedisManager::get()
         .ok()
-        .and_then(|_| {
+        .and({
             // Try to get SSL config from global config if available
             // For now, we'll use None and let it use defaults
             None

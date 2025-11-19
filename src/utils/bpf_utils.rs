@@ -1,6 +1,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsFd;
 use std::fs;
+use std::ffi::CString;
 
 use crate::bpf::{self, FilterSkel};
 use libbpf_rs::{Xdp, XdpFlags};
@@ -31,7 +32,7 @@ pub fn bpf_attach_to_xdp(
     ifindex: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Try hardware mode first, fall back to driver mode if not supported
-    let xdp = Xdp::new(skel.progs.arxignis_xdp_filter.as_fd().into());
+    let xdp = Xdp::new(skel.progs.arxignis_xdp_filter.as_fd());
 
     // Try hardware offload mode first
     if let Ok(()) = xdp.attach(ifindex, XdpFlags::HW_MODE) {
@@ -70,7 +71,7 @@ pub fn bpf_attach_to_xdp(
     match xdp.attach(ifindex, XdpFlags::SKB_MODE) {
         Ok(()) => {
             log::info!("XDP program attached in generic SKB mode");
-            return Ok(());
+            Ok(())
         }
         Err(e) => {
             // Check if error is EEXIST (error 17) first
@@ -159,7 +160,8 @@ pub fn convert_ipv6_into_bpf_map_key_bytes(ip: Ipv6Addr, prefixlen: u32) -> Box<
 pub fn bpf_detach_from_xdp(ifindex: i32) -> Result<(), Box<dyn std::error::Error>> {
     // Create a dummy XDP instance for detaching
     // We need to query first to get the existing program ID
-    let dummy_fd = unsafe { libc::open("/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+    let path = CString::new("/dev/null").expect("CString::new failed");
+    let dummy_fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
     if dummy_fd < 0 {
         return Err("Failed to create dummy file descriptor".into());
     }

@@ -82,19 +82,17 @@ impl ProxyHttp for LB {
         let ep = _ctx.extraparams.clone();
 
         // Try to get TLS fingerprint if available
-        if _ctx.tls_fingerprint.is_none() {
-            if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
-                if let Some(fingerprint) = crate::utils::tls_client_hello::get_fingerprint(&peer_addr) {
-                    _ctx.tls_fingerprint = Some(fingerprint.clone());
-                    debug!(
-                        "TLS Fingerprint retrieved for session - Peer: {}, JA4: {}, SNI: {:?}, ALPN: {:?}",
-                        peer_addr,
-                        fingerprint.ja4,
-                        fingerprint.sni,
-                        fingerprint.alpn
-                    );
-                }
-            }
+        if _ctx.tls_fingerprint.is_none()
+            && let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet())
+            && let Some(fingerprint) = crate::utils::tls_client_hello::get_fingerprint(peer_addr) {
+            _ctx.tls_fingerprint = Some(fingerprint.clone());
+            debug!(
+                "TLS Fingerprint retrieved for session - Peer: {}, JA4: {}, SNI: {:?}, ALPN: {:?}",
+                peer_addr,
+                fingerprint.ja4,
+                fingerprint.sni,
+                fingerprint.alpn
+            );
         }
 
         // Evaluate WAF rules
@@ -110,7 +108,7 @@ impl ProxyHttp for LB {
                     match waf_result.action {
                         WafAction::Block => {
                             info!("WAF blocked request: rule={}, id={}, uri={}", waf_result.rule_name, waf_result.rule_id, session.req_header().uri);
-                            let mut header = ResponseHeader::build(403, None).unwrap();
+                            let mut header = ResponseHeader::build(403, None).expect("Failed to build WAF block response");
                             header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
                             header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
                             session.set_keepalive(None);
@@ -124,25 +122,22 @@ impl ProxyHttp for LB {
                             let mut captcha_token: Option<String> = None;
 
                             // Check cookies for captcha_token
-                            if let Some(cookies) = session.req_header().headers.get("cookie") {
-                                if let Ok(cookie_str) = cookies.to_str() {
-                                    for cookie in cookie_str.split(';') {
-                                        let trimmed = cookie.trim();
-                                        if let Some(value) = trimmed.strip_prefix("captcha_token=") {
-                                            captcha_token = Some(value.to_string());
-                                            break;
-                                        }
+                            if let Some(cookies) = session.req_header().headers.get("cookie")
+                                && let Ok(cookie_str) = cookies.to_str() {
+                                for cookie in cookie_str.split(';') {
+                                    let trimmed = cookie.trim();
+                                    if let Some(value) = trimmed.strip_prefix("captcha_token=") {
+                                        captcha_token = Some(value.to_string());
+                                        break;
                                     }
                                 }
                             }
 
                             // Check X-Captcha-Token header if not found in cookies
-                            if captcha_token.is_none() {
-                                if let Some(token_header) = session.req_header().headers.get("x-captcha-token") {
-                                    if let Ok(token_str) = token_header.to_str() {
-                                        captcha_token = Some(token_str.to_string());
-                                    }
-                                }
+                            if captcha_token.is_none()
+                                && let Some(token_header) = session.req_header().headers.get("x-captcha-token")
+                                && let Ok(token_str) = token_header.to_str() {
+                                captcha_token = Some(token_str.to_string());
                             }
 
                             // Validate token if present
@@ -191,7 +186,7 @@ impl ProxyHttp for LB {
                                             // Fallback to challenge without token
                                             match apply_captcha_challenge_with_token("") {
                                                 Ok(html) => {
-                                                    let mut header = ResponseHeader::build(403, None).unwrap();
+                                                    let mut header = ResponseHeader::build(403, None).expect("Failed to build WAF block response");
                                                     header.insert_header("Content-Type", "text/html; charset=utf-8").ok();
                                                     session.set_keepalive(None);
                                                     session.write_response_header(Box::new(header), false).await?;
@@ -201,7 +196,7 @@ impl ProxyHttp for LB {
                                                 Err(e) => {
                                                     error!("Failed to apply captcha challenge: {}", e);
                                                     // Block the request if captcha fails
-                                                    let mut header = ResponseHeader::build(403, None).unwrap();
+                                                    let mut header = ResponseHeader::build(403, None).expect("Failed to build WAF block response");
                                                     header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
                                                     header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
                                                     session.set_keepalive(None);
@@ -216,7 +211,7 @@ impl ProxyHttp for LB {
                                 // Return captcha challenge page
                                 match apply_captcha_challenge_with_token(&jwt_token) {
                                     Ok(html) => {
-                                        let mut header = ResponseHeader::build(403, None).unwrap();
+                                        let mut header = ResponseHeader::build(403, None).expect("Failed to build WAF block response");
                                         header.insert_header("Content-Type", "text/html; charset=utf-8").ok();
                                         header.insert_header("Set-Cookie", format!("captcha_token={}; Path=/; HttpOnly; SameSite=Lax", jwt_token)).ok();
                                         header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
@@ -229,7 +224,7 @@ impl ProxyHttp for LB {
                                     Err(e) => {
                                         error!("Failed to apply captcha challenge: {}", e);
                                         // Block the request if captcha fails
-                                        let mut header = ResponseHeader::build(403, None).unwrap();
+                                        let mut header = ResponseHeader::build(403, None).expect("Failed to build WAF block response");
                                         header.insert_header("X-WAF-Rule", waf_result.rule_name).ok();
                                         header.insert_header("X-WAF-Rule-ID", waf_result.rule_id).ok();
                                         session.set_keepalive(None);
@@ -259,9 +254,9 @@ impl ProxyHttp for LB {
             }
 
             // Get threat intelligence data
-            if _ctx.threat_data.is_none() {
-                if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
-                    match crate::threat::get_threat_intel(&peer_addr.ip().to_string()).await {
+            if _ctx.threat_data.is_none()
+                && let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
+                match crate::threat::get_threat_intel(&peer_addr.ip().to_string()).await {
                         Ok(Some(threat_response)) => {
                             _ctx.threat_data = Some(threat_response);
                             debug!("Threat intelligence retrieved for IP: {}", peer_addr.ip());
@@ -269,9 +264,8 @@ impl ProxyHttp for LB {
                         Ok(None) => {
                             debug!("No threat intelligence data for IP: {}", peer_addr.ip());
                         }
-                        Err(e) => {
-                            debug!("Threat intelligence error for IP {}: {}", peer_addr.ip(), e);
-                        }
+                    Err(e) => {
+                        debug!("Threat intelligence error for IP {}: {}", peer_addr.ip(), e);
                     }
                 }
             }
@@ -284,65 +278,65 @@ impl ProxyHttp for LB {
 
         let mut backend_id = None;
 
-        if ep.sticky_sessions {
-            if let Some(cookies) = session.req_header().headers.get("cookie") {
-                if let Ok(cookie_str) = cookies.to_str() {
-                    for cookie in cookie_str.split(';') {
-                        let trimmed = cookie.trim();
-                        if let Some(value) = trimmed.strip_prefix("backend_id=") {
-                            backend_id = Some(value);
-                            break;
-                        }
-                    }
+        if ep.sticky_sessions
+            && let Some(cookies) = session.req_header().headers.get("cookie")
+            && let Ok(cookie_str) = cookies.to_str() {
+            for cookie in cookie_str.split(';') {
+                let trimmed = cookie.trim();
+                if let Some(value) = trimmed.strip_prefix("backend_id=") {
+                    backend_id = Some(value);
+                    break;
                 }
             }
         }
 
-        match _ctx.hostname.as_ref() {
+        let Some(host) = _ctx.hostname.as_ref() else {
+            return Ok(false);
+        };
+        // let optioninnermap = self.get_host(host.as_str(), host.as_str(), backend_id);
+        let optioninnermap = self.get_host(host.as_str(), session.req_header().uri.path(), backend_id);
+        match optioninnermap {
             None => return Ok(false),
-            Some(host) => {
-                // let optioninnermap = self.get_host(host.as_str(), host.as_str(), backend_id);
-                let optioninnermap = self.get_host(host.as_str(), session.req_header().uri.path(), backend_id);
-                match optioninnermap {
-                    None => return Ok(false),
-                    Some(ref innermap) => {
-                        // Check for HTTPS redirect before rate limiting
-                        if ep.https_proxy_enabled.unwrap_or(false) || innermap.https_proxy_enabled {
-                            if let Some(stream) = session.stream() {
-                                if stream.get_ssl().is_none() {
-                                    // HTTP request - redirect to HTTPS
-                                    let uri = session.req_header().uri.path_and_query().map_or("/", |pq| pq.as_str());
-                                    let port = self.config.proxy_port_tls.unwrap_or(403);
-                                    let redirect_url = format!("https://{}:{}{}", host, port, uri);
-                                    let mut redirect_response = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
-                                    redirect_response.insert_header("Location", redirect_url)?;
-                                    redirect_response.insert_header("Content-Length", "0")?;
-                                    session.set_keepalive(None);
-                                    session.write_response_header(Box::new(redirect_response), false).await?;
-                                    return Ok(true);
-                                }
-                            }
+            Some(ref innermap) => {
+                // Check for HTTPS redirect before rate limiting
+                if (ep.https_proxy_enabled.unwrap_or(false) || innermap.https_proxy_enabled)
+                    && let Some(stream) = session.stream()
+                    && stream.get_ssl().is_none() {
+                    // HTTP request - redirect to HTTPS
+                    let uri = session.req_header().uri.path_and_query().map_or("/", |pq| pq.as_str());
+                    let port = self.config.proxy_port_tls.unwrap_or(403);
+                    let redirect_url = format!("https://{}:{}{}", host, port, uri);
+                    let mut redirect_response = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
+                    redirect_response.insert_header("Location", redirect_url)?;
+                    redirect_response.insert_header("Content-Length", "0")?;
+                    session.set_keepalive(None);
+                    session.write_response_header(Box::new(redirect_response), false).await?;
+                    return Ok(true);
+                }
+                if let Some(rate) = innermap.rate_limit.or(ep.rate_limit) {
+                    // let rate_key = session.client_addr().and_then(|addr| addr.as_inet()).map(|inet| inet.ip().to_string()).unwrap_or_else(|| host.to_string());
+                    let rate_key = session.client_addr().and_then(|addr| addr.as_inet()).map(|inet| inet.ip());
+                    let curr_window_requests = RATE_LIMITER.observe(&rate_key, 1);
+                    if curr_window_requests > rate {
+                        let mut header = ResponseHeader::build(429, None).expect("Failed to build rate limit response");
+                        if let Err(e) = header.insert_header("X-Rate-Limit-Limit", rate.to_string()) {
+                            warn!("Failed to insert X-Rate-Limit-Limit header: {}", e);
                         }
-                        if let Some(rate) = innermap.rate_limit.or(ep.rate_limit) {
-                            // let rate_key = session.client_addr().and_then(|addr| addr.as_inet()).map(|inet| inet.ip().to_string()).unwrap_or_else(|| host.to_string());
-                            let rate_key = session.client_addr().and_then(|addr| addr.as_inet()).map(|inet| inet.ip());
-                            let curr_window_requests = RATE_LIMITER.observe(&rate_key, 1);
-                            if curr_window_requests > rate {
-                                let mut header = ResponseHeader::build(429, None).unwrap();
-                                header.insert_header("X-Rate-Limit-Limit", rate.to_string()).unwrap();
-                                header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
-                                header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
-                                session.set_keepalive(None);
-                                session.write_response_header(Box::new(header), true).await?;
-                                debug!("Rate limited: {:?}, {}", rate_key, rate);
-                                return Ok(true);
-                            }
+                        if let Err(e) = header.insert_header("X-Rate-Limit-Remaining", "0") {
+                            warn!("Failed to insert X-Rate-Limit-Remaining header: {}", e);
                         }
+                        if let Err(e) = header.insert_header("X-Rate-Limit-Reset", "1") {
+                            warn!("Failed to insert X-Rate-Limit-Reset header: {}", e);
+                        }
+                        session.set_keepalive(None);
+                        session.write_response_header(Box::new(header), true).await?;
+                        debug!("Rate limited: {:?}, {}", rate_key, rate);
+                        return Ok(true);
                     }
                 }
-                _ctx.upstream_peer = optioninnermap;
             }
         }
+        _ctx.upstream_peer = optioninnermap;
         Ok(false)
     }
     async fn upstream_peer(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
@@ -373,7 +367,7 @@ impl ProxyHttp for LB {
             let json_body = Bytes::from(json_response.to_string());
 
             // Build response header
-            let mut header = ResponseHeader::build(403, None).unwrap();
+            let mut header = ResponseHeader::build(403, None).expect("Failed to build malware block response");
             header.insert_header("Content-Type", "application/json").ok();
             header.insert_header("X-Content-Scan-Result", "malware_detected").ok();
 
@@ -424,7 +418,7 @@ impl ProxyHttp for LB {
                             peer.options.verify_hostname = false;
                         }
 
-                        ctx.backend_id = format!("{}:{}:{}", innermap.address.clone(), innermap.port.clone(), innermap.ssl_enabled);
+                        ctx.backend_id = format!("{}:{}:{}", innermap.address.clone(), innermap.port, innermap.ssl_enabled);
                         Ok(peer)
                     }
                     None => {
@@ -486,125 +480,122 @@ impl ProxyHttp for LB {
         if end_of_stream {
             info!("END OF STREAM reached. Total body size: {} bytes", ctx.request_body.len());
         }
-        
-        if end_of_stream && !ctx.request_body.is_empty() {
-            if let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
-                // Get peer address for scanning
-                let peer_addr = if let Some(addr) = _session.client_addr().and_then(|a| a.as_inet()) {
-                    std::net::SocketAddr::new(addr.ip(), addr.port())
-                } else {
-                    return Ok(()); // Can't scan without peer address
-                };
 
-                // Convert request header to Parts for should_scan check
-                let req_header = _session.req_header();
-                let method = req_header.method.as_str();
-                let uri = req_header.uri.to_string();
-                let mut req_builder = hyper::http::Request::builder()
-                    .method(method)
-                    .uri(&uri);
+        if end_of_stream && !ctx.request_body.is_empty()
+            && let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
+            // Get peer address for scanning
+            let peer_addr = if let Some(addr) = _session.client_addr().and_then(|a| a.as_inet()) {
+                std::net::SocketAddr::new(addr.ip(), addr.port())
+            } else {
+                return Ok(()); // Can't scan without peer address
+            };
 
-                // Copy essential headers for content scanning (content-type, content-length)
-                if let Some(content_type) = req_header.headers.get("content-type") {
-                    if let Ok(ct_str) = content_type.to_str() {
-                        req_builder = req_builder.header("content-type", ct_str);
-                    }
+            // Convert request header to Parts for should_scan check
+            let req_header = _session.req_header();
+            let method = req_header.method.as_str();
+            let uri = req_header.uri.to_string();
+            let mut req_builder = hyper::http::Request::builder()
+                .method(method)
+                .uri(&uri);
+
+            // Copy essential headers for content scanning (content-type, content-length)
+            if let Some(content_type) = req_header.headers.get("content-type")
+                && let Ok(ct_str) = content_type.to_str() {
+                req_builder = req_builder.header("content-type", ct_str);
+            }
+            if let Some(content_length) = req_header.headers.get("content-length")
+                && let Ok(cl_str) = content_length.to_str() {
+                req_builder = req_builder.header("content-length", cl_str);
+            }
+
+            let req = match req_builder.body(()) {
+                Ok(req) => req,
+                Err(_) => {
+                    warn!("Failed to build request for content scanning, skipping scan");
+                    return Ok(());
                 }
-                if let Some(content_length) = req_header.headers.get("content-length") {
-                    if let Ok(cl_str) = content_length.to_str() {
-                        req_builder = req_builder.header("content-length", cl_str);
-                    }
-                }
+            };
+            let (req_parts, _) = req.into_parts();
 
-                let req = match req_builder.body(()) {
-                    Ok(req) => req,
-                    Err(_) => {
-                        warn!("Failed to build request for content scanning, skipping scan");
-                        return Ok(());
-                    }
-                };
-                let (req_parts, _) = req.into_parts();
+            // Check if we should scan this request
+            info!("Content scanner: checking if should scan - body size: {}, method: {}, content-type: {:?}",
+                  ctx.request_body.len(), req_parts.method, req_parts.headers.get("content-type"));
+            let should_scan = scanner.should_scan(&req_parts, &ctx.request_body, peer_addr);
+            if should_scan {
+                info!("Content scanner: WILL SCAN request body (size: {} bytes)", ctx.request_body.len());
 
-                // Check if we should scan this request
-                info!("Content scanner: checking if should scan - body size: {}, method: {}, content-type: {:?}",
-                      ctx.request_body.len(), req_parts.method, req_parts.headers.get("content-type"));
-                let should_scan = scanner.should_scan(&req_parts, &ctx.request_body, peer_addr);
-                if should_scan {
-                    info!("Content scanner: WILL SCAN request body (size: {} bytes)", ctx.request_body.len());
+                // Check if content-type is multipart and scan accordingly
+                let content_type = req_parts.headers
+                    .get("content-type")
+                    .and_then(|h| h.to_str().ok());
 
-                    // Check if content-type is multipart and scan accordingly
-                    let content_type = req_parts.headers
-                        .get("content-type")
-                        .and_then(|h| h.to_str().ok());
-
-                    let scan_result = if let Some(ct) = content_type {
-                        info!("Content-Type header: {}", ct);
-                        if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
-                            info!("Detected multipart content with boundary: '{}', scanning parts individually", boundary);
-                            scanner.scan_multipart_content(&ctx.request_body, &boundary).await
-                        } else {
-                            info!("Not multipart or no boundary found, scanning as single blob");
-                            scanner.scan_content(&ctx.request_body).await
-                        }
+                let scan_result = if let Some(ct) = content_type {
+                    info!("Content-Type header: {}", ct);
+                    if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
+                        info!("Detected multipart content with boundary: '{}', scanning parts individually", boundary);
+                        scanner.scan_multipart_content(&ctx.request_body, &boundary).await
                     } else {
-                        info!("No Content-Type header, scanning as single blob");
+                        info!("Not multipart or no boundary found, scanning as single blob");
                         scanner.scan_content(&ctx.request_body).await
-                    };
-
-                    match scan_result {
-                        Ok(scan_result) => {
-                            if scan_result.malware_detected {
-                                info!("Malware detected in request from {}: {} {} - signature: {:?}",
-                                    peer_addr, method, uri, scan_result.signature);
-
-                                // Mark malware detected in context
-                                ctx.malware_detected = true;
-
-                                // Send 403 response immediately to block the request
-                                let json_response = serde_json::json!({
-                                    "success": false,
-                                    "error": "Request blocked",
-                                    "reason": "malware_detected",
-                                    "message": "Malware detected in request"
-                                });
-                                let json_body = Bytes::from(json_response.to_string());
-
-                                let mut header = ResponseHeader::build(403, None)?;
-                                header.insert_header("Content-Type", "application/json")?;
-                                header.insert_header("X-Content-Scan-Result", "malware_detected")?;
-
-                                _session.set_keepalive(None);
-                                _session.write_response_header(Box::new(header), false).await?;
-                                _session.write_response_body(Some(json_body), true).await?;
-                                
-                                ctx.malware_response_sent = true;
-
-                                // Return error to abort the request
-                                return Err(Box::new(Error {
-                                    etype: HTTPStatus(403),
-                                    esource: ErrorSourceInternal,
-                                    retry: RetryType::Decided(false),
-                                    cause: None,
-                                    context: Option::from(ImmutStr::Static("Malware detected")),
-                                }));
-                            } else {
-                                debug!("Content scan completed: no malware detected");
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Content scanning failed: {}", e);
-                            // On scanning error, allow the request to proceed (fail open)
-                        }
                     }
                 } else {
-                    debug!("Content scanner: skipping scan (should_scan returned false)");
+                    info!("No Content-Type header, scanning as single blob");
+                    scanner.scan_content(&ctx.request_body).await
+                };
+
+                match scan_result {
+                    Ok(scan_result) => {
+                        if scan_result.malware_detected {
+                            info!("Malware detected in request from {}: {} {} - signature: {:?}",
+                                peer_addr, method, uri, scan_result.signature);
+
+                            // Mark malware detected in context
+                            ctx.malware_detected = true;
+
+                            // Send 403 response immediately to block the request
+                            let json_response = serde_json::json!({
+                                "success": false,
+                                "error": "Request blocked",
+                                "reason": "malware_detected",
+                                "message": "Malware detected in request"
+                            });
+                            let json_body = Bytes::from(json_response.to_string());
+
+                            let mut header = ResponseHeader::build(403, None)?;
+                            header.insert_header("Content-Type", "application/json")?;
+                            header.insert_header("X-Content-Scan-Result", "malware_detected")?;
+
+                            _session.set_keepalive(None);
+                            _session.write_response_header(Box::new(header), false).await?;
+                            _session.write_response_body(Some(json_body), true).await?;
+
+                            ctx.malware_response_sent = true;
+
+                            // Return error to abort the request
+                            return Err(Box::new(Error {
+                                etype: HTTPStatus(403),
+                                esource: ErrorSourceInternal,
+                                retry: RetryType::Decided(false),
+                                cause: None,
+                                context: Option::from(ImmutStr::Static("Malware detected")),
+                            }));
+                        } else {
+                            debug!("Content scan completed: no malware detected");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Content scanning failed: {}", e);
+                        // On scanning error, allow the request to proceed (fail open)
+                    }
                 }
+            } else {
+                debug!("Content scanner: skipping scan (should_scan returned false)");
             }
         }
 
         Ok(())
     }
-    
+
     async fn response_filter(&self, session: &mut Session, _upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
         // Calculate upstream response time
         if let Some(upstream_start) = ctx.upstream_start_time {
@@ -618,32 +609,30 @@ impl ProxyHttp for LB {
                 let _ = _upstream_response.insert_header("set-cookie", format!("backend_id={}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax", bid.address));
             }
         }
-        match ctx.hostname.as_ref() {
-            Some(host) => {
-                let path = session.req_header().uri.path();
-                let host_header = host;
-                let split_header = host_header.split_once(':');
+        if let Some(host) = ctx.hostname.as_ref() {
+            let path = session.req_header().uri.path();
+            let host_header = host;
+            let split_header = host_header.split_once(':');
 
-                match split_header {
-                    Some(sh) => {
-                        let yoyo = self.get_header(sh.0, path);
-                        for k in yoyo.iter() {
-                            for t in k.iter() {
-                                _upstream_response.insert_header(t.0.clone(), t.1.clone()).unwrap();
-                            }
+            if let Some(sh) = split_header {
+                let yoyo = self.get_header(sh.0, path);
+                for k in yoyo.iter() {
+                    for t in k.iter() {
+                        if let Err(e) = _upstream_response.insert_header(t.0.clone(), t.1.clone()) {
+                            warn!("Failed to insert header: {}", e);
                         }
                     }
-                    None => {
-                        let yoyo = self.get_header(host_header, path);
-                        for k in yoyo.iter() {
-                            for t in k.iter() {
-                                _upstream_response.insert_header(t.0.clone(), t.1.clone()).unwrap();
-                            }
+                }
+            } else {
+                let yoyo = self.get_header(host_header, path);
+                for k in yoyo.iter() {
+                    for t in k.iter() {
+                        if let Err(e) = _upstream_response.insert_header(t.0.clone(), t.1.clone()) {
+                            warn!("Failed to insert header: {}", e);
                         }
                     }
                 }
             }
-            None => {}
         }
         session.set_keepalive(Some(300));
         Ok(())
@@ -694,7 +683,7 @@ impl ProxyHttp for LB {
                 request_builder = request_builder.header(name, value);
             }
 
-            let hyper_request = request_builder.body(()).unwrap();
+            let hyper_request = request_builder.body(()).expect("Failed to build hyper request");
             let (req_parts, _) = hyper_request.into_parts();
 
             // Convert request body to Bytes
@@ -856,7 +845,7 @@ fn return_header_host(session: &Session) -> Option<String> {
     } else {
         match session.req_header().headers.get("host") {
             Some(host) => {
-                let header_host = host.to_str().unwrap().splitn(2, ':').collect::<Vec<&str>>();
+                let header_host = host.to_str().expect("Invalid UTF-8 in host header").splitn(2, ':').collect::<Vec<&str>>();
                 Option::from(header_host[0].to_string())
             }
             None => None,

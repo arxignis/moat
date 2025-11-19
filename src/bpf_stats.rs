@@ -283,15 +283,21 @@ impl DroppedIpEvent {
     }
 }
 
-impl DroppedIpEvents {
-    /// Create a new collection of dropped IP events
-    pub fn new() -> Self {
+impl Default for DroppedIpEvents {
+    fn default() -> Self {
         Self {
             timestamp: Utc::now(),
             events: Vec::new(),
             total_events: 0,
             unique_ips: 0,
         }
+    }
+}
+
+impl DroppedIpEvents {
+    /// Create a new collection of dropped IP events
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add a dropped IP event

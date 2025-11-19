@@ -196,14 +196,8 @@ pub struct CaptchaConfig {
     pub cache_ttl: u64,
 }
 
-impl Config {
-    pub fn load_from_file(path: &PathBuf) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
-        Ok(config)
-    }
-
-    pub fn default() -> Self {
+impl Default for Config {
+    fn default() -> Self {
         Self {
             mode: "proxy".to_string(),
             redis: RedisConfig {
@@ -254,6 +248,14 @@ impl Config {
             pingora: PingoraConfig::default(),
             acme: AcmeConfig::default(),
         }
+    }
+}
+
+impl Config {
+    pub fn load_from_file(path: &PathBuf) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Config = serde_yaml::from_str(&content)?;
+        Ok(config)
     }
 
     pub fn merge_with_args(&mut self, args: &Args) {
@@ -403,10 +405,9 @@ impl Config {
             if let Some(val) = client_key_path {
                 ssl.client_key_path = Some(val);
             }
-            if let Some(val) = insecure_val {
-                if let Ok(insecure) = val.parse::<bool>() {
-                    ssl.insecure = insecure;
-                }
+            if let Some(val) = insecure_val
+                && let Ok(insecure) = val.parse::<bool>() {
+                ssl.insecure = insecure;
             }
         }
 
@@ -428,10 +429,9 @@ impl Config {
         if let Ok(val) = env::var("AX_ARXIGNIS_BASE_URL") {
             self.arxignis.base_url = val;
         }
-        if let Ok(val) = env::var("AX_ARXIGNIS_LOG_SENDING_ENABLED") {
-            if let Ok(parsed) = val.parse::<bool>() {
-                self.arxignis.log_sending_enabled = parsed;
-            }
+        if let Ok(val) = env::var("AX_ARXIGNIS_LOG_SENDING_ENABLED")
+            && let Ok(parsed) = val.parse::<bool>() {
+            self.arxignis.log_sending_enabled = parsed;
         }
         if let Ok(val) = env::var("AX_ARXIGNIS_INCLUDE_RESPONSE_BODY") {
             self.arxignis.include_response_body = val.parse().unwrap_or(true);
@@ -813,19 +813,16 @@ impl PingoraConfig {
         app_config.proxy_protocol_enabled = self.proxy_protocol.enabled;
 
         // Parse config_address to local_server
-        if let Some((ip, port_str)) = self.config_address.split_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                app_config.local_server = Some((ip.to_string(), port));
-            }
+        if let Some((ip, port_str)) = self.config_address.split_once(':')
+            && let Ok(port) = port_str.parse::<u16>() {
+            app_config.local_server = Some((ip.to_string(), port));
         }
 
         // Parse proxy_address_tls to proxy_port_tls
-        if let Some(ref tls_addr) = self.proxy_address_tls {
-            if let Some((_, port_str)) = tls_addr.split_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    app_config.proxy_port_tls = Some(port);
-                }
-            }
+        if let Some(ref tls_addr) = self.proxy_address_tls
+            && let Some((_, port_str)) = tls_addr.split_once(':')
+            && let Ok(port) = port_str.parse::<u16>() {
+            app_config.proxy_port_tls = Some(port);
         }
 
         app_config

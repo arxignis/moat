@@ -14,9 +14,10 @@ use crate::redis::RedisManager;
 use crate::http_client::get_global_reqwest_client;
 
 /// Captcha provider types supported by Gen0Sec
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum, Default)]
 pub enum CaptchaProvider {
     #[serde(rename = "hcaptcha")]
+    #[default]
     HCaptcha,
     #[serde(rename = "recaptcha")]
     ReCaptcha,
@@ -24,11 +25,6 @@ pub enum CaptchaProvider {
     Turnstile,
 }
 
-impl Default for CaptchaProvider {
-    fn default() -> Self {
-        CaptchaProvider::HCaptcha
-    }
-}
 
 impl std::str::FromStr for CaptchaProvider {
     type Err = anyhow::Error;
@@ -883,7 +879,7 @@ pub async fn validate_captcha_response(
     let request = CaptchaValidationRequest {
         response_token,
         ip_address,
-        user_agent: user_agent,
+        user_agent,
         site_key: client.config.site_key.clone(),
         secret_key: client.config.secret_key.clone(),
         provider: client.config.provider.clone(),

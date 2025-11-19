@@ -76,7 +76,7 @@ impl TlsAccept for Certificates {
                 // We need to extract them from the context to use with ssl_use_certificate
                 // However, SslContext doesn't expose the certificate/key directly
                 // So we'll use set_ssl_context instead, which should work
-                match ssl.set_ssl_context(&*ctx) {
+                match ssl.set_ssl_context(&ctx) {
                     Ok(_) => {
                         log::info!("TlsAccept: Successfully set SSL context for hostname: {}", name_str);
                         return;
@@ -102,7 +102,7 @@ impl TlsAccept for Certificates {
         if let Some(default_ctx) = self.cert_name_map.get(default_cert_name) {
             let ctx = default_ctx.value();
             log::info!("TlsAccept: Using configured default certificate: {}", default_cert_name);
-            if let Err(e) = ssl.set_ssl_context(&*ctx) {
+            if let Err(e) = ssl.set_ssl_context(ctx) {
                 log::error!("TlsAccept: Failed to set default SSL context: {:?}", e);
             } else {
                 log::debug!("TlsAccept: Successfully set default certificate");
@@ -112,7 +112,7 @@ impl TlsAccept for Certificates {
             log::warn!("TlsAccept: Default certificate '{}' not found in cert_name_map, using first available", default_cert_name);
             if let Some(default_ctx) = self.cert_name_map.iter().next() {
                 let ctx = default_ctx.value();
-                if let Err(e) = ssl.set_ssl_context(&*ctx) {
+                if let Err(e) = ssl.set_ssl_context(ctx) {
                     log::error!("TlsAccept: Failed to set fallback SSL context: {:?}", e);
                 } else {
                     log::debug!("TlsAccept: Using fallback certificate");
@@ -222,8 +222,8 @@ impl Certificates {
         log::debug!("Built cert_name_map with {} entries", cert_name_map.len());
 
         Some(Self {
-            name_map: name_map,
-            cert_name_map: cert_name_map,
+            name_map,
+            cert_name_map,
             upstreams_cert_map: DashMap::new(),
             configs: cert_infos,
             default_cert_path: default_cert.cert_path.clone(),
@@ -313,7 +313,7 @@ impl Certificates {
                 Some(ctx) => {
                     log::info!("SNI callback: Found matching certificate for hostname: {}", name_str);
                     log::info!("SNI callback: Setting SSL context for hostname: {}", name_str);
-                    ssl_ref.set_ssl_context(&*ctx).map_err(|e| {
+                    ssl_ref.set_ssl_context(&ctx).map_err(|e| {
                         log::error!("SNI callback: Failed to set SSL context for hostname {}: {:?}", name_str, e);
                         SniError::ALERT_FATAL
                     })?;

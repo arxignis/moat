@@ -214,19 +214,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for ChainedReader<R> {
         let this = &mut *self;
 
         // First drain the prefix
-        if let Some(ref prefix) = this.prefix {
-            if this.prefix_pos < prefix.len() {
-                let remaining = &prefix[this.prefix_pos..];
-                let to_copy = remaining.len().min(buf.remaining());
-                buf.put_slice(&remaining[..to_copy]);
-                this.prefix_pos += to_copy;
+        if let Some(ref prefix) = this.prefix
+            && this.prefix_pos < prefix.len() {
+            let remaining = &prefix[this.prefix_pos..];
+            let to_copy = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            this.prefix_pos += to_copy;
 
-                if this.prefix_pos >= prefix.len() {
-                    this.prefix = None;
-                }
-
-                return std::task::Poll::Ready(Ok(()));
+            if this.prefix_pos >= prefix.len() {
+                this.prefix = None;
             }
+
+            return std::task::Poll::Ready(Ok(()));
         }
 
         // Then read from inner

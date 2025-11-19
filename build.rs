@@ -17,10 +17,10 @@ fn main() {
     let vmlinux_include = vmlinux::include_path_root().join(arch);
     assert!(Path::new(&vmlinux_include).exists(), "vmlinux.h not found");
 
-    let bpf_include = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join(HEADER_DIR);
+    let bpf_include = Path::new(&env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set")).join(HEADER_DIR);
 
     // ✅ Construct full output path in OUT_DIR
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let skel_path = out_dir.join("filter.skel.rs");
 
     // ✅ Pass the full path to build_and_generate

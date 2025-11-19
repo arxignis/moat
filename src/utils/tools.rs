@@ -136,7 +136,7 @@ pub fn merge_headers(target: &DashMap<String, Vec<(String, String)>>, source: &D
     for entry in source.iter() {
         let global_key = entry.key().clone();
         let global_values = entry.value().clone();
-        let mut target_entry = target.entry(global_key).or_insert_with(Vec::new);
+        let mut target_entry = target.entry(global_key).or_default();
         target_entry.extend(global_values);
     }
 }
@@ -152,7 +152,10 @@ pub fn clone_idmap_into(original: &UpstreamsDashMap, cloned: &UpstreamsIdMap) {
             let new_vec = vec.clone();
             for x in vec.iter() {
                 let mut id = String::new();
-                write!(&mut id, "{}:{}:{}", x.address, x.port, x.ssl_enabled).unwrap();
+                if let Err(e) = write!(&mut id, "{}:{}:{}", x.address, x.port, x.ssl_enabled) {
+                    warn!("Failed to write to id buffer: {}", e);
+                    continue;
+                }
                 let mut hasher = Sha256::new();
                 hasher.update(id.clone().into_bytes());
                 let hash = hasher.finalize();
@@ -178,9 +181,9 @@ pub fn clone_idmap_into(original: &UpstreamsDashMap, cloned: &UpstreamsIdMap) {
 pub fn listdir(dir: String) -> Vec<tls::CertificateConfig> {
     let mut f = HashMap::new();
     let mut certificate_configs: Vec<tls::CertificateConfig> = vec![];
-    let paths = fs::read_dir(dir).unwrap();
+    let paths = fs::read_dir(dir).expect("Failed to read directory");
     for path in paths {
-        let path_str = path.unwrap().path().to_str().unwrap().to_owned();
+        let path_str = path.expect("Failed to read directory entry").path().to_str().expect("Invalid UTF-8 in path").to_owned();
         if path_str.ends_with(".crt") {
             let name = path_str.replace(".crt", "");
             let mut inner = vec![];
@@ -269,14 +272,11 @@ pub fn check_priv(addr: &str) {
         }
     };
 
-    match port < 1024 {
-        true => {
-            let meta = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap();
-            if meta != 0 {
-                error!("Running on privileged port requires to start as ROOT");
-                process::exit(1)
-            }
+    if port < 1024 {
+        let meta = std::fs::metadata("/proc/self").map(|m| m.uid()).expect("Failed to get process metadata");
+        if meta != 0 {
+            error!("Running on privileged port requires to start as ROOT");
+            process::exit(1)
         }
-        false => {}
     }
 }

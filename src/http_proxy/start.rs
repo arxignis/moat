@@ -26,7 +26,7 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
         cfg.pingora.to_app_config()
     } else {
         // Fallback to old parsing method for backward compatibility
-        let parameters = Some(Opt::parse_args()).unwrap();
+        let parameters = Opt::parse_args();
         let file = parameters.conf.clone().unwrap();
         crate::utils::parceyaml::parce_main_config(file.as_str())
     };

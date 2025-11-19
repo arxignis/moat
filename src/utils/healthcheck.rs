@@ -11,7 +11,7 @@ use tonic::transport::Endpoint;
 
 pub async fn hc2(upslist: Arc<UpstreamsDashMap>, fullist: Arc<UpstreamsDashMap>, idlist: Arc<UpstreamsIdMap>, params: (&str, u64)) {
     let mut period = interval(Duration::from_secs(params.1));
-    let client = Client::builder().timeout(Duration::from_secs(params.1)).danger_accept_invalid_certs(true).build().unwrap();
+    let client = Client::builder().timeout(Duration::from_secs(params.1)).danger_accept_invalid_certs(true).build().expect("Failed to build HTTP client");
     loop {
         tokio::select! {
             _ = period.tick() => {
@@ -30,7 +30,7 @@ pub async fn populate_upstreams(upslist: &Arc<UpstreamsDashMap>, fullist: &Arc<U
 }
 
 pub async fn initiate_upstreams(fullist: UpstreamsDashMap) -> UpstreamsDashMap {
-    let client = Client::builder().timeout(Duration::from_secs(2)).danger_accept_invalid_certs(true).build().unwrap();
+    let client = Client::builder().timeout(Duration::from_secs(2)).danger_accept_invalid_certs(true).build().expect("Failed to build HTTP client");
     build_upstreams(&fullist, "HEAD", &client).await
 }
 
@@ -45,8 +45,8 @@ async fn build_upstreams(fullist: &UpstreamsDashMap, method: &str, client: &Clie
             let path = path_entry.key();
             let mut innervec = Vec::new();
 
-            for (_, upstream) in path_entry.value().0.iter().enumerate() {
-                let tls = detect_tls(upstream.address.as_str(), &upstream.port, &client).await;
+            for upstream in path_entry.value().0.iter() {
+                let tls = detect_tls(upstream.address.as_str(), &upstream.port, client).await;
                 let is_h2 = matches!(tls.1, Some(Version::HTTP_2));
 
                 let link = if tls.0 {
@@ -66,7 +66,7 @@ async fn build_upstreams(fullist: &UpstreamsDashMap, method: &str, client: &Clie
                 };
 
                 if scheme.healthcheck.unwrap_or(true) {
-                    let resp = http_request(&link, method, "", &client).await;
+                    let resp = http_request(&link, method, "", client).await;
                     if resp.0 {
                         if resp.1 {
                             scheme.http2_enabled = is_h2; // could be adjusted further
@@ -110,12 +110,12 @@ async fn http_request(url: &str, method: &str, payload: &str, client: &Client) -
         }
     }
 
-    match send_request(&client, method, url, payload).await {
+    match send_request(client, method, url, payload).await {
         Some(response) => {
             let status = response.status().as_u16();
             ((99..499).contains(&status), false)
         }
-        None => (ping_grpc(&url).await, true),
+        None => (ping_grpc(url).await, true),
     }
 }
 
@@ -125,10 +125,7 @@ pub async fn ping_grpc(addr: &str) -> bool {
     if let Ok(endpoint) = endpoint_result {
         let endpoint = endpoint.timeout(Duration::from_secs(2));
 
-        match tokio::time::timeout(Duration::from_secs(3), endpoint.connect()).await {
-            Ok(Ok(_channel)) => true,
-            _ => false,
-        }
+        matches!(tokio::time::timeout(Duration::from_secs(3), endpoint.connect()).await, Ok(Ok(_channel)))
     } else {
         false
     }
@@ -136,12 +133,9 @@ pub async fn ping_grpc(addr: &str) -> bool {
 
 async fn detect_tls(ip: &str, port: &u16, client: &Client) -> (bool, Option<Version>) {
     let https_url = format!("https://{}:{}", ip, port);
-    match client.get(&https_url).send().await {
-        Ok(response) => {
-            // println!("{} => {:?} (HTTPS)", https_url, response.version());
-            return (true, Some(response.version()));
-        }
-        _ => {}
+    if let Ok(response) = client.get(&https_url).send().await {
+        // println!("{} => {:?} (HTTPS)", https_url, response.version());
+        return (true, Some(response.version()));
     }
     let http_url = format!("http://{}:{}", ip, port);
     match client.get(&http_url).send().await {

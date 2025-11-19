@@ -12,11 +12,10 @@ pub trait GetHost {
 #[async_trait]
 impl GetHost for LB {
     fn get_host(&self, peer: &str, path: &str, backend_id: Option<&str>) -> Option<InnerMap> {
-        if let Some(b) = backend_id {
-            if let Some(bb) = self.ump_byid.get(b) {
-                // println!("BIB :===> {:?}", Some(bb.value()));
-                return Some(bb.value().clone());
-            }
+        if let Some(b) = backend_id
+            && let Some(bb) = self.ump_byid.get(b) {
+            // println!("BIB :===> {:?}", Some(bb.value()));
+            return Some(bb.value().clone());
         }
 
         // Check arxignis_paths first - these paths work regardless of hostname
@@ -54,7 +53,7 @@ impl GetHost for LB {
                 } else if path.len() == pattern_prefix.len() {
                     // Exact match (already handled above, but keep for completeness)
                     true
-                } else if let Some(next_char) = path.chars().skip(pattern_prefix.len()).next() {
+                } else if let Some(next_char) = path.chars().nth(pattern_prefix.len()) {
                     // Next character after prefix should be / for proper path segment match
                     next_char == '/'
                 } else {
@@ -68,7 +67,7 @@ impl GetHost for LB {
                         let matched_server = servers[idx].clone();
                         let prefix_len = pattern_prefix.len();
                         // Keep the longest (most specific) match based on the prefix length
-                        if best_match.as_ref().map_or(true, |(_, _, best_len)| prefix_len > *best_len) {
+                        if best_match.as_ref().is_none_or(|(_, _, best_len)| prefix_len > *best_len) {
                             best_match = Some((pattern.clone(), matched_server, prefix_len));
                         }
                     }
@@ -115,13 +114,12 @@ impl GetHost for LB {
                 break;
             }
         }
-        if best_match.is_none() {
-            if let Some(entry) = host_entry.get("/") {
-                let (servers, index) = entry.value();
-                if !servers.is_empty() {
-                    let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
-                    best_match = Some(servers[idx].clone());
-                }
+        if best_match.is_none()
+            && let Some(entry) = host_entry.get("/") {
+            let (servers, index) = entry.value();
+            if !servers.is_empty() {
+                let idx = index.fetch_add(1, Ordering::Relaxed) % servers.len();
+                best_match = Some(servers[idx].clone());
             }
         }
         // println!("Best Match :===> {:?}", best_match);
@@ -132,11 +130,10 @@ impl GetHost for LB {
         let mut current_path = path.to_string();
         let mut best_match: Option<Vec<(String, String)>> = None;
         loop {
-            if let Some(entry) = host_entry.get(&current_path) {
-                if !entry.value().is_empty() {
-                    best_match = Some(entry.value().clone());
-                    break;
-                }
+            if let Some(entry) = host_entry.get(&current_path)
+                && !entry.value().is_empty() {
+                best_match = Some(entry.value().clone());
+                break;
             }
             if let Some(pos) = current_path.rfind('/') {
                 current_path.truncate(pos);
@@ -144,12 +141,10 @@ impl GetHost for LB {
                 break;
             }
         }
-        if best_match.is_none() {
-            if let Some(entry) = host_entry.get("/") {
-                if !entry.value().is_empty() {
-                    best_match = Some(entry.value().clone());
-                }
-            }
+        if best_match.is_none()
+            && let Some(entry) = host_entry.get("/")
+            && !entry.value().is_empty() {
+            best_match = Some(entry.value().clone());
         }
         best_match
     }

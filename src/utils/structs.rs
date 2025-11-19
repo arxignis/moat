@@ -175,8 +175,8 @@ pub struct InnerMap {
 }
 
 #[allow(dead_code)]
-impl InnerMap {
-    pub fn new() -> Self {
+impl Default for InnerMap {
+    fn default() -> Self {
         Self {
             address: Default::default(),
             port: Default::default(),
@@ -186,5 +186,11 @@ impl InnerMap {
             rate_limit: Default::default(),
             healthcheck: Default::default(),
         }
+    }
+}
+
+impl InnerMap {
+    pub fn new() -> Self {
+        Self::default()
     }
 }

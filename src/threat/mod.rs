@@ -124,11 +124,10 @@ impl ThreatClient {
     pub async fn get_threat_intel(&self, ip: &str) -> Result<Option<ThreatResponse>> {
         // Check pingora-memory-cache
         let (cached_data, status) = self.pingora_cache.get(ip);
-        if let Some(data) = cached_data {
-            if status.is_hit() {
-                log::debug!("Threat data for {} found in pingora-memory-cache", ip);
-                return Ok(Some(data));
-            }
+        if let Some(data) = cached_data
+            && status.is_hit() {
+            log::debug!("Threat data for {} found in pingora-memory-cache", ip);
+            return Ok(Some(data));
         }
 
         // Check L2 cache (Redis) with TTL from API response

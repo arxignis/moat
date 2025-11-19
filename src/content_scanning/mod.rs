@@ -177,16 +177,16 @@ impl ContentScanner {
                 .unwrap_or("");
             let content_length = body_bytes.len() as i64;
 
-            if ctx.set_field_value(self.scheme.get_field("http.request.method").unwrap(), method).is_err() {
+            if ctx.set_field_value(self.scheme.get_field("http.request.method").expect("http.request.method field not found"), method).is_err() {
                 return false;
             }
-            if ctx.set_field_value(self.scheme.get_field("http.request.path").unwrap(), path).is_err() {
+            if ctx.set_field_value(self.scheme.get_field("http.request.path").expect("http.request.path field not found"), path).is_err() {
                 return false;
             }
-            if ctx.set_field_value(self.scheme.get_field("http.request.content_type").unwrap(), content_type).is_err() {
+            if ctx.set_field_value(self.scheme.get_field("http.request.content_type").expect("http.request.content_type field not found"), content_type).is_err() {
                 return false;
             }
-            if ctx.set_field_value(self.scheme.get_field("http.request.content_length").unwrap(), content_length).is_err() {
+            if ctx.set_field_value(self.scheme.get_field("http.request.content_length").expect("http.request.content_length field not found"), content_length).is_err() {
                 return false;
             }
 
@@ -217,9 +217,9 @@ impl ContentScanner {
         }
 
         // Check content type
-        if let Some(content_type) = req_parts.headers.get("content-type") {
-            if let Ok(content_type_str) = content_type.to_str() {
-                let content_type_lower = content_type_str.to_lowercase();
+        if let Some(content_type) = req_parts.headers.get("content-type")
+            && let Ok(content_type_str) = content_type.to_str() {
+            let content_type_lower = content_type_str.to_lowercase();
 
                 // If specific content types are configured, only scan those
                 if !config.scan_content_types.is_empty() {
@@ -240,19 +240,17 @@ impl ContentScanner {
                    content_type_lower.contains("audio/") {
                     log::debug!("Skipping content scan: binary content type {}", content_type_str);
                     return false;
-                }
             }
         }
 
         // Check file extension from URL path
-        if let Some(path) = req_parts.uri.path().split('/').last() {
-            if let Some(extension) = std::path::Path::new(path).extension() {
-                if let Some(ext_str) = extension.to_str() {
-                    let ext_lower = format!(".{}", ext_str.to_lowercase());
-                    if config.skip_extensions.contains(&ext_lower) {
-                        log::debug!("Skipping content scan: file extension {} in skip list", ext_lower);
-                        return false;
-                    }
+        if let Some(path) = req_parts.uri.path().rsplit('/').next() {
+            if let Some(extension) = std::path::Path::new(path).extension()
+                && let Some(ext_str) = extension.to_str() {
+                let ext_lower = format!(".{}", ext_str.to_lowercase());
+                if config.skip_extensions.contains(&ext_lower) {
+                    log::debug!("Skipping content scan: file extension {} in skip list", ext_lower);
+                    return false;
                 }
             }
         }

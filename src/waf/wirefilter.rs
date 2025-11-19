@@ -202,16 +202,15 @@ impl HttpFilter {
 
         // Compute hash and skip update if unchanged
         let new_hash = Self::compute_rules_hash(&rules_hash_input);
-        if let Some(prev) = self.rules_hash.read().unwrap().as_ref() {
-            if prev == &new_hash {
-                log::debug!("HTTP filter WAF rules unchanged; skipping update");
-                return Ok(());
-            }
+        if let Some(prev) = self.rules_hash.read().expect("Lock poisoned").as_ref()
+            && prev == &new_hash {
+            log::debug!("HTTP filter WAF rules unchanged; skipping update");
+            return Ok(());
         }
 
         let rules_count = compiled_rules.len();
-        *self.rules.write().unwrap() = compiled_rules;
-        *self.rules_hash.write().unwrap() = Some(new_hash);
+        *self.rules.write().expect("Lock poisoned") = compiled_rules;
+        *self.rules_hash.write().expect("Lock poisoned") = Some(new_hash);
 
         log::info!("HTTP filter updated with {} WAF rules from config", rules_count);
 
