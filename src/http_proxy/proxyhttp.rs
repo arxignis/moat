@@ -10,7 +10,7 @@ use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use pingora_http::{RequestHeader, ResponseHeader, StatusCode};
 use pingora_core::prelude::*;
-use pingora_core::ErrorSource::Upstream;
+use pingora_core::ErrorSource::{Upstream, Internal as ErrorSourceInternal};
 use pingora_core::{Error, ErrorType::HTTPStatus, RetryType, ImmutStr};
 use pingora_core::listeners::ALPN;
 use pingora_core::prelude::HttpPeer;
@@ -52,6 +52,7 @@ pub struct Context {
     waf_result: Option<crate::waf::wirefilter::WafResult>,
     threat_data: Option<crate::threat::ThreatResponse>,
     upstream_time: Option<Duration>,
+    disable_access_log: bool,
 }
 
 #[async_trait]
@@ -72,23 +73,30 @@ impl ProxyHttp for LB {
             waf_result: None,
             threat_data: None,
             upstream_time: None,
+            disable_access_log: false,
         }
     }
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        // Enable body buffering for content scanning
+        session.enable_retry_buffering();
+
         let ep = _ctx.extraparams.clone();
 
         // Try to get TLS fingerprint if available
         if _ctx.tls_fingerprint.is_none() {
             if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
-                if let Some(fingerprint) = crate::utils::tls_client_hello::get_fingerprint(&peer_addr) {
+                let std_addr = std::net::SocketAddr::new(peer_addr.ip().into(), peer_addr.port());
+                if let Some(fingerprint) = crate::utils::tls_client_hello::get_fingerprint(&std_addr) {
                     _ctx.tls_fingerprint = Some(fingerprint.clone());
                     debug!(
                         "TLS Fingerprint retrieved for session - Peer: {}, JA4: {}, SNI: {:?}, ALPN: {:?}",
-                        peer_addr,
+                        std_addr,
                         fingerprint.ja4,
                         fingerprint.sni,
                         fingerprint.alpn
                     );
+                } else {
+                    debug!("No TLS fingerprint found in storage for peer: {}", std_addr);
                 }
             }
         }
@@ -336,7 +344,11 @@ impl ProxyHttp for LB {
                         }
                     }
                 }
-                _ctx.upstream_peer = optioninnermap;
+                _ctx.upstream_peer = optioninnermap.clone();
+                // Set disable_access_log flag from upstream config
+                if let Some(ref innermap) = optioninnermap {
+                    _ctx.disable_access_log = innermap.disable_access_log;
+                }
             }
         }
         Ok(false)
@@ -472,11 +484,12 @@ impl ProxyHttp for LB {
         Self::CTX: Send + Sync,
     {
         // Accumulate request body for content scanning
+        // Copy the body data but don't take it - Pingora will forward it if no malware
         if let Some(body_bytes) = body {
+            info!("BODY CHUNK received: {} bytes, total so far: {}, end_of_stream: {}", body_bytes.len(), ctx.request_body.len() + body_bytes.len(), end_of_stream);
             ctx.request_body.extend_from_slice(body_bytes);
         }
 
-        // When stream ends, perform content scanning if enabled
         if end_of_stream && !ctx.request_body.is_empty() {
             if let Some(scanner) = crate::content_scanning::get_global_content_scanner() {
                 // Get peer address for scanning
@@ -516,8 +529,11 @@ impl ProxyHttp for LB {
                 let (req_parts, _) = req.into_parts();
 
                 // Check if we should scan this request
-                if scanner.should_scan(&req_parts, &ctx.request_body, peer_addr) {
-                    debug!("Content scanner: scanning request body (size: {} bytes)", ctx.request_body.len());
+                info!("Content scanner: checking if should scan - body size: {}, method: {}, content-type: {:?}",
+                      ctx.request_body.len(), req_parts.method, req_parts.headers.get("content-type"));
+                let should_scan = scanner.should_scan(&req_parts, &ctx.request_body, peer_addr);
+                if should_scan {
+                    info!("Content scanner: WILL SCAN request body (size: {} bytes)", ctx.request_body.len());
 
                     // Check if content-type is multipart and scan accordingly
                     let content_type = req_parts.headers
@@ -525,13 +541,16 @@ impl ProxyHttp for LB {
                         .and_then(|h| h.to_str().ok());
 
                     let scan_result = if let Some(ct) = content_type {
+                        info!("Content-Type header: {}", ct);
                         if let Some(boundary) = crate::content_scanning::extract_multipart_boundary(ct) {
-                            debug!("Detected multipart content, scanning parts individually");
+                            info!("Detected multipart content with boundary: '{}', scanning parts individually", boundary);
                             scanner.scan_multipart_content(&ctx.request_body, &boundary).await
                         } else {
+                            info!("Not multipart or no boundary found, scanning as single blob");
                             scanner.scan_content(&ctx.request_body).await
                         }
                     } else {
+                        info!("No Content-Type header, scanning as single blob");
                         scanner.scan_content(&ctx.request_body).await
                     };
 
@@ -541,11 +560,36 @@ impl ProxyHttp for LB {
                                 info!("Malware detected in request from {}: {} {} - signature: {:?}",
                                     peer_addr, method, uri, scan_result.signature);
 
-                                // Mark malware detected in context - upstream_peer will handle blocking
+                                // Mark malware detected in context
                                 ctx.malware_detected = true;
 
-                                // Don't send response here - let upstream_peer handle it before forwarding
-                                return Ok(());
+                                // Send 403 response immediately to block the request
+                                let json_response = serde_json::json!({
+                                    "success": false,
+                                    "error": "Request blocked",
+                                    "reason": "malware_detected",
+                                    "message": "Malware detected in request"
+                                });
+                                let json_body = Bytes::from(json_response.to_string());
+
+                                let mut header = ResponseHeader::build(403, None)?;
+                                header.insert_header("Content-Type", "application/json")?;
+                                header.insert_header("X-Content-Scan-Result", "malware_detected")?;
+
+                                _session.set_keepalive(None);
+                                _session.write_response_header(Box::new(header), false).await?;
+                                _session.write_response_body(Some(json_body), true).await?;
+
+                                ctx.malware_response_sent = true;
+
+                                // Return error to abort the request
+                                return Err(Box::new(Error {
+                                    etype: HTTPStatus(403),
+                                    esource: ErrorSourceInternal,
+                                    retry: RetryType::Decided(false),
+                                    cause: None,
+                                    context: Option::from(ImmutStr::Static("Malware detected")),
+                                }));
                             } else {
                                 debug!("Content scan completed: no malware detected");
                             }
@@ -563,6 +607,7 @@ impl ProxyHttp for LB {
 
         Ok(())
     }
+
     async fn response_filter(&self, session: &mut Session, _upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
         // Calculate upstream response time
         if let Some(upstream_start) = ctx.upstream_start_time {
@@ -609,6 +654,12 @@ impl ProxyHttp for LB {
 
     async fn logging(&self, session: &mut Session, _e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
         let response_code = session.response_written().map_or(0, |resp| resp.status.as_u16());
+
+        // Skip logging if disabled for this endpoint
+        if ctx.disable_access_log {
+            return;
+        }
+
         debug!("{}, response code: {response_code}", self.request_summary(session, ctx));
 
         // Log TLS fingerprint if available
@@ -668,18 +719,20 @@ impl ProxyHttp for LB {
             // Try to get TLS fingerprint from context or retrieve it again
             // Priority: 1) Context, 2) Retrieve from storage, 3) None
             let tls_fp_for_log = if let Some(tls_fp) = ctx.tls_fingerprint.as_ref() {
-                debug!("TLS fingerprint found in context - JA4: {}, SNI: {:?}, ALPN: {:?}",
-                       tls_fp.ja4, tls_fp.sni, tls_fp.alpn);
+                debug!("TLS fingerprint found in context - JA4: {}, JA4_unsorted: {}, SNI: {:?}, ALPN: {:?}",
+                       tls_fp.ja4, tls_fp.ja4_unsorted, tls_fp.sni, tls_fp.alpn);
                 Some(tls_fp.clone())
             } else if let Some(peer_addr) = session.client_addr().and_then(|addr| addr.as_inet()) {
                 // Try to retrieve TLS fingerprint again if not in context
                 let std_addr = std::net::SocketAddr::new(peer_addr.ip().into(), peer_addr.port());
                 if let Some(fingerprint) = crate::utils::tls_client_hello::get_fingerprint(&std_addr) {
-                    debug!("TLS fingerprint retrieved from storage - JA4: {}, SNI: {:?}, ALPN: {:?}",
-                           fingerprint.ja4, fingerprint.sni, fingerprint.alpn);
+                    debug!("TLS fingerprint retrieved from storage - JA4: {}, JA4_unsorted: {}, SNI: {:?}, ALPN: {:?}",
+                           fingerprint.ja4, fingerprint.ja4_unsorted, fingerprint.sni, fingerprint.alpn);
+                    // Store in context for future use in this request
+                    ctx.tls_fingerprint = Some(fingerprint.clone());
                     Some(fingerprint)
                 } else {
-                    debug!("No TLS fingerprint found in storage for peer: {}", std_addr);
+                    debug!("No TLS fingerprint found in storage for peer: {} (this may be normal if ClientHello callback didn't fire or PROXY protocol is used)", std_addr);
                     None
                 }
             } else {
@@ -699,26 +752,32 @@ impl ProxyHttp for LB {
             };
 
             // Get server certificate info (if available)
-            let server_cert_info_opt = if let Some(hostname) = ctx.hostname.as_ref() {
-                // Try to get certificate path from certificate store
-                let cert_path = if let Ok(store) = crate::worker::certificate::get_certificate_store().try_read() {
-                    if let Some(certs) = store.as_ref() {
-                        certs.get_cert_path_for_hostname(hostname)
+            // Try hostname first, then SNI from TLS fingerprint
+            let server_cert_info_opt = {
+                let hostname_to_use = ctx.hostname.as_ref()
+                    .or_else(|| tls_fp_for_log.as_ref().and_then(|fp| fp.sni.as_ref()));
+
+                if let Some(hostname) = hostname_to_use {
+                    // Try to get certificate path from certificate store
+                    let cert_path = if let Ok(store) = crate::worker::certificate::get_certificate_store().try_read() {
+                        if let Some(certs) = store.as_ref() {
+                            certs.get_cert_path_for_hostname(hostname)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // If certificate path found, extract certificate info
+                    if let Some(cert_path) = cert_path {
+                        crate::utils::tls::extract_cert_info(&cert_path)
                     } else {
                         None
                     }
                 } else {
                     None
-                };
-
-                // If certificate path found, extract certificate info
-                if let Some(cert_path) = cert_path {
-                    crate::utils::tls::extract_cert_info(&cert_path)
-                } else {
-                    None
                 }
-            } else {
-                None
             };
 
             // Build upstream info
@@ -761,20 +820,51 @@ impl ProxyHttp for LB {
             // Extract SNI, ALPN, cipher, JA4, and JA4_unsorted from TLS fingerprint if available
             // Use the same TLS fingerprint we retrieved above
             let (tls_sni, tls_alpn, tls_cipher, tls_ja4, tls_ja4_unsorted) = if let Some(tls_fp) = tls_fp_for_log.as_ref() {
+                // Validate that JA4 values are not empty
+                let ja4 = if tls_fp.ja4.is_empty() {
+                    warn!("TLS fingerprint found but JA4 is empty - this should not happen");
+                    None
+                } else {
+                    Some(tls_fp.ja4.clone())
+                };
+
+                let ja4_unsorted = if tls_fp.ja4_unsorted.is_empty() {
+                    warn!("TLS fingerprint found but JA4_unsorted is empty - this should not happen");
+                    None
+                } else {
+                    Some(tls_fp.ja4_unsorted.clone())
+                };
+
                 debug!(
-                    "TLS fingerprint found for logging - JA4: {}, JA4_unsorted: {}, SNI: {:?}, ALPN: {:?}, Cipher: {:?}",
-                    tls_fp.ja4, tls_fp.ja4_unsorted, tls_fp.sni, tls_fp.alpn, tls_fp.cipher_suite
+                    "TLS fingerprint found for logging - JA4: {:?}, JA4_unsorted: {:?}, SNI: {:?}, ALPN: {:?}, Cipher: {:?}",
+                    ja4, ja4_unsorted, tls_fp.sni, tls_fp.alpn, tls_fp.cipher_suite
                 );
+
+                // Use SNI from fingerprint, fallback to hostname from context or Host header
+                let sni = tls_fp.sni.clone().or_else(|| {
+                    ctx.hostname.clone().or_else(|| {
+                        session.req_header().headers.get("host")
+                            .and_then(|h| h.to_str().ok())
+                            .map(|h| h.split(':').next().unwrap_or(h).to_string())
+                    })
+                });
+
                 (
-                    tls_fp.sni.clone(),
+                    sni,
                     tls_fp.alpn.clone(),
                     tls_fp.cipher_suite.clone(),
-                    Some(tls_fp.ja4.clone()),
-                    Some(tls_fp.ja4_unsorted.clone()),
+                    ja4,
+                    ja4_unsorted,
                 )
             } else {
-                debug!("No TLS fingerprint found for logging - peer: {:?}", peer_addr);
-                (None, None, None, None, None)
+                debug!("No TLS fingerprint found for logging - peer: {:?} (JA4/JA4_unsorted will be null)", peer_addr);
+                // Fallback: try to extract SNI from Host header if available
+                let sni = ctx.hostname.clone().or_else(|| {
+                    session.req_header().headers.get("host")
+                        .and_then(|h| h.to_str().ok())
+                        .map(|h| h.split(':').next().unwrap_or(h).to_string())
+                });
+                (sni, None, None, None, None)
             };
 
             // Create access log with upstream and performance info

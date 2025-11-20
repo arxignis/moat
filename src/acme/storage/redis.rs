@@ -39,8 +39,12 @@ impl RedisStorage {
             .map(|rm| rm.get_prefix().to_string())
             .unwrap_or_else(|_| "ssl-storage".to_string());
 
+        // Normalize domain: strip wildcard prefix (*.) for consistent Redis key naming
+        // This ensures wildcard certificates (*.example.com) are stored with the same key
+        // as when they're looked up (example.com)
         let domain = config.opts.domain.clone();
-        let base_key = format!("{}:{}", prefix, domain);
+        let normalized_domain = domain.strip_prefix("*.").unwrap_or(&domain);
+        let base_key = format!("{}:{}", prefix, normalized_domain);
 
         // Try to reuse the connection manager from RedisManager for connection pooling
         // ConnectionManager is Clone and shares the underlying connection pool

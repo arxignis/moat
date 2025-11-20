@@ -553,8 +553,14 @@ impl HttpAccessLog {
         waf_result: Option<&crate::waf::wirefilter::WafResult>,
         threat_data: Option<&crate::threat::ThreatResponse>,
     ) -> Option<RemediationDetails> {
-        // If neither WAF result nor threat data is available, return None
-        if waf_result.is_none() && threat_data.is_none() {
+        // Check if we have any data that requires remediation
+        let has_remediation_data = match waf_result {
+            Some(waf) => matches!(waf.action, crate::waf::wirefilter::WafAction::Block | crate::waf::wirefilter::WafAction::Challenge),
+            None => false,
+        };
+
+        // If neither WAF result requiring remediation nor threat data is available, return None
+        if !has_remediation_data && threat_data.is_none() {
             return None;
         }
 
@@ -575,11 +581,22 @@ impl HttpAccessLog {
             ip_asn_country: None,
         };
 
-        // Populate WAF data if available
+        // Populate WAF data if available, but only for actions that require remediation (Block/Challenge)
+        // Allow actions don't need remediation details, but we still want to track them for auditing
         if let Some(waf) = waf_result {
-            remediation.waf_action = Some(format!("{:?}", waf.action).to_lowercase());
-            remediation.waf_rule_id = Some(waf.rule_id.clone());
-            remediation.waf_rule_name = Some(waf.rule_name.clone());
+            // Only include WAF data in remediation if action is Block or Challenge
+            // Allow actions are informational and don't require remediation
+            match waf.action {
+                crate::waf::wirefilter::WafAction::Block | crate::waf::wirefilter::WafAction::Challenge => {
+                    remediation.waf_action = Some(format!("{:?}", waf.action).to_lowercase());
+                    remediation.waf_rule_id = Some(waf.rule_id.clone());
+                    remediation.waf_rule_name = Some(waf.rule_name.clone());
+                }
+                crate::waf::wirefilter::WafAction::Allow => {
+                    // Allow actions don't need remediation details
+                    // They're logged for auditing but not included in remediation section
+                }
+            }
         }
 
         // Populate threat intelligence data if available

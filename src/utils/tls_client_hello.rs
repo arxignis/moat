@@ -36,7 +36,18 @@ pub fn generate_fingerprint_from_client_hello(
            peer_addr_str, hello.sni, hello.alpn, hello.raw.len());
 
     // Generate JA4 fingerprint from raw ClientHello bytes
-    if let Some(fingerprint) = crate::utils::tls_fingerprint::fingerprint_client_hello(&hello.raw) {
+    if let Some(mut fingerprint) = crate::utils::tls_fingerprint::fingerprint_client_hello(&hello.raw) {
+        // Always prefer SNI and ALPN from Pingora's parsed ClientHello if available
+        // Pingora's parsing is more reliable than raw bytes parsing
+        if hello.sni.is_some() {
+            fingerprint.sni = hello.sni.clone();
+        }
+
+        // ALPN: Pingora returns Vec<String>, use first one if available
+        if !hello.alpn.is_empty() {
+            fingerprint.alpn = hello.alpn.first().cloned();
+        }
+
         let fingerprint_arc: Arc<Fingerprint> = Arc::new(fingerprint);
 
         // Store fingerprint temporarily if we have peer address
