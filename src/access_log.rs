@@ -587,7 +587,7 @@ impl HttpAccessLog {
             // Only include WAF data in remediation if action is Block or Challenge
             // Allow actions are informational and don't require remediation
             match waf.action {
-                crate::waf::wirefilter::WafAction::Block | crate::waf::wirefilter::WafAction::Challenge => {
+                crate::waf::wirefilter::WafAction::Block | crate::waf::wirefilter::WafAction::Challenge | crate::waf::wirefilter::WafAction::RateLimit => {
                     remediation.waf_action = Some(format!("{:?}", waf.action).to_lowercase());
                     remediation.waf_rule_id = Some(waf.rule_id.clone());
                     remediation.waf_rule_name = Some(waf.rule_name.clone());
