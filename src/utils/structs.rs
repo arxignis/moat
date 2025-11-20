@@ -97,6 +97,16 @@ pub struct HostConfig {
     pub acme: Option<crate::acme::upstreams_reader::UpstreamsAcmeConfig>,
 }
 
+impl HostConfig {
+    /// Check if a domain needs a certificate to be automatically requested via ACME
+    /// Only returns true if there's an explicit ACME configuration block.
+    /// If ssl_enabled is true but no ACME config exists, the user is expected to provide certificates manually.
+    pub fn needs_certificate(&self) -> bool {
+        // Only request certificates if ACME is explicitly configured
+        self.acme.is_some()
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PathConfig {
     pub servers: Vec<String>,
@@ -112,6 +122,8 @@ pub struct PathConfig {
     pub rate_limit: Option<isize>,
     #[serde(default)]
     pub healthcheck: Option<bool>,
+    #[serde(default)]
+    pub disable_access_log: Option<bool>,
 }
 #[derive(Debug, Default)]
 pub struct Configuration {
@@ -150,6 +162,7 @@ pub struct AppConfig {
     pub file_server_folder: Option<String>,
     pub runuser: Option<String>,
     pub rungroup: Option<String>,
+    pub proxy_protocol_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -161,6 +174,7 @@ pub struct InnerMap {
     pub https_proxy_enabled: bool,
     pub rate_limit: Option<isize>,
     pub healthcheck: Option<bool>,
+    pub disable_access_log: bool,
 }
 
 #[allow(dead_code)]
@@ -174,6 +188,7 @@ impl InnerMap {
             https_proxy_enabled: Default::default(),
             rate_limit: Default::default(),
             healthcheck: Default::default(),
+            disable_access_log: Default::default(),
         }
     }
 }

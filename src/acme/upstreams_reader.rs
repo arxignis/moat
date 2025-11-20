@@ -54,6 +54,11 @@ impl UpstreamsDomainReader {
 
         if let Some(upstreams) = &parsed.upstreams {
             for (hostname, host_config) in upstreams {
+                // Only include domains that need certificates
+                if !host_config.needs_certificate() {
+                    continue;
+                }
+
                 let is_wildcard = hostname.starts_with("*.");
 
                 // Determine challenge type from ACME config or auto-detect

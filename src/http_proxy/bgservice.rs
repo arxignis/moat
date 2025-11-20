@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use pingora_core::server::ShutdownWatch;
 use pingora_core::services::background::BackgroundService;
 use std::sync::Arc;
@@ -147,7 +147,7 @@ impl BackgroundService for LB {
                             }
 
                             // Check and request certificates for new/updated domains
-                            check_and_request_certificates_for_upstreams(&ss.upstreams).await;
+                            check_and_request_certificates_for_upstreams(&ss.upstreams, &self.config.upstreams_conf).await;
 
                             // info!("Upstreams list is changed, updating to:");
                             // print_upstreams(&self.ump_full);
@@ -160,8 +160,9 @@ impl BackgroundService for LB {
     }
 }
 
+
 /// Check certificates for domains in upstreams and request from ACME if missing
-async fn check_and_request_certificates_for_upstreams(upstreams: &crate::utils::structs::UpstreamsDashMap) {
+async fn check_and_request_certificates_for_upstreams(upstreams: &crate::utils::structs::UpstreamsDashMap, upstreams_path: &str) {
     // Check if ACME is enabled
     let _acme_config = match get_acme_config().await {
         Some(config) if config.enabled => config,
@@ -169,6 +170,15 @@ async fn check_and_request_certificates_for_upstreams(upstreams: &crate::utils::
             // ACME not enabled, skip certificate checking
             return;
         }
+    };
+
+    // Read upstreams.yaml to check which domains need certificates
+    use serde_yaml;
+    let parsed: Option<crate::utils::structs::Config> = if let Ok(yaml_content) = tokio::fs::read_to_string(upstreams_path).await {
+        serde_yaml::from_str(&yaml_content).ok()
+    } else {
+        warn!("Failed to read upstreams file: {}, skipping certificate checks", upstreams_path);
+        None
     };
 
     // Get Redis manager to check for existing certificates
@@ -187,12 +197,35 @@ async fn check_and_request_certificates_for_upstreams(upstreams: &crate::utils::
         let domain = entry.key();
         let normalized_domain = domain.strip_prefix("*.").unwrap_or(domain);
 
-               // Check if certificate exists in Redis
-               // Get prefix from RedisManager
-               let prefix = RedisManager::get()
-                   .map(|rm| rm.get_prefix().to_string())
-                   .unwrap_or_else(|_| "ssl-storage".to_string());
-               let fullchain_key = format!("{}:{}:live:fullchain", prefix, normalized_domain);
+        // Check if this domain needs a certificate by reading upstreams.yaml
+        let needs_cert = if let Some(ref parsed) = parsed {
+            if let Some(ref upstreams_map) = parsed.upstreams {
+                if let Some(host_config) = upstreams_map.get(domain) {
+                    host_config.needs_certificate()
+                } else {
+                    // Domain not in config, skip
+                    continue;
+                }
+            } else {
+                // No upstreams in config, skip
+                continue;
+            }
+        } else {
+            // Couldn't read config, skip
+            continue;
+        };
+
+        if !needs_cert {
+            debug!("Skipping certificate check for domain {} (no ACME config and ssl_enabled: false)", domain);
+            continue;
+        }
+
+        // Check if certificate exists in Redis
+        // Get prefix from RedisManager
+        let prefix = RedisManager::get()
+            .map(|rm| rm.get_prefix().to_string())
+            .unwrap_or_else(|_| "ssl-storage".to_string());
+        let fullchain_key = format!("{}:{}:live:fullchain", prefix, normalized_domain);
         let cert_exists: u32 = match redis::cmd("EXISTS")
             .arg(&fullchain_key)
             .query_async(&mut connection)

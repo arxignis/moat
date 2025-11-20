@@ -166,6 +166,7 @@ pub fn clone_idmap_into(original: &UpstreamsDashMap, cloned: &UpstreamsIdMap) {
                     https_proxy_enabled: false,
                     rate_limit: None,
                     healthcheck: None,
+                    disable_access_log: false,
                 };
                 cloned.insert(id, to_add);
                 cloned.insert(hh, x.to_owned());

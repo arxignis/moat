@@ -207,6 +207,7 @@ async fn fetch_domains_from_upstreams(upstreams_path: &str) -> Result<Vec<String
     Ok(domains)
 }
 
+
 /// Fetch SSL certificates from Redis for domains listed in upstreams.yaml
 async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &str) -> Result<()> {
     let redis_manager = RedisManager::get()
@@ -223,9 +224,15 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
         .with_context(|| format!("Failed to parse upstreams YAML: {:?}", path))?;
 
     // Build mapping of domain -> certificate_name (or None if not specified)
+    // Only include domains that need certificates (have ACME config or ssl_enabled: true)
     let mut domain_cert_map: Vec<(String, Option<String>)> = Vec::new();
     if let Some(upstreams) = &parsed.upstreams {
         for (hostname, host_config) in upstreams {
+            // Only process domains that need certificates
+            if !host_config.needs_certificate() {
+                log::debug!("Skipping certificate check for domain {} (no ACME config and ssl_enabled: false)", hostname);
+                continue;
+            }
             let cert_name = host_config.certificate.clone();
             domain_cert_map.push((hostname.clone(), cert_name));
         }
@@ -281,65 +288,40 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
         let cert_path = cert_dir.join(format!("{}.crt", sanitized_cert_name));
         let key_path = cert_dir.join(format!("{}.key", sanitized_cert_name));
 
-        // Determine local hash for comparison
-        // IMPORTANT: We use the Redis hash (remote_hash) as the source of truth when available
-        // because Redis calculates hash from raw bytes, while files are normalized (whitespace changes)
-        // If we have a Redis hash, we trust it. If not, we check cache or recalculate from files.
-        let local_hash = if remote_hash.is_some() {
-            // We have a Redis hash - check if we have it cached locally
+        // Check local certificates first before checking Redis
+        // This allows using local certificates even if Redis is unavailable or certificate not in Redis yet
+        let local_hash = if cert_path.exists() && key_path.exists() {
+            // Local files exist - check cache first, then calculate if needed
             let cached_hash = {
                 let cache = hash_cache.read().await;
                 cache.get(cert_name).cloned()
             };
 
             if let Some(cached_hash) = cached_hash {
-                // We have a cached hash - verify files exist
-                if cert_path.exists() && key_path.exists() {
-                    // Files exist and we have cached hash - use cached hash (which should match Redis)
-            Some(cached_hash)
-                } else {
-                    // Files don't exist - clear cache
+                Some(cached_hash)
+            } else if let Ok(calculated_hash) = calculate_local_hash(&cert_path, &key_path) {
+                // Calculate from files and cache it
                 let mut cache = hash_cache.write().await;
-                    cache.remove(cert_name);
-                    None
-                }
+                cache.insert(cert_name.to_string(), calculated_hash.clone());
+                Some(calculated_hash)
             } else {
-                // No cached hash - if files exist, we'll download and cache the hash
-                // For now, return None to trigger download (hash will be cached after download)
                 None
             }
         } else {
-            // No Redis hash - check files and calculate hash if needed
-            if cert_path.exists() && key_path.exists() {
-                let cached_hash = {
-                    let cache = hash_cache.read().await;
-                    cache.get(domain).cloned()
-                };
-
-                if let Some(cached_hash) = cached_hash {
-                    Some(cached_hash)
-                } else if let Ok(calculated_hash) = calculate_local_hash(&cert_path, &key_path) {
-                    // Calculate from files and cache it
-                    let mut cache = hash_cache.write().await;
-                    cache.insert(domain.clone(), calculated_hash.clone());
-                    Some(calculated_hash)
-                } else {
-                    None
-                }
-            } else {
-                // Files don't exist - clear cache
-                let mut cache = hash_cache.write().await;
-                cache.remove(domain);
-                None
-            }
+            // Files don't exist - clear cache
+            let mut cache = hash_cache.write().await;
+            cache.remove(cert_name);
+            None
         };
 
         // Determine if we need to download
-        let should_download = if let (Some(remote), Some(local)) = (&remote_hash, &local_hash) {
-            if remote == local {
-                // Hashes match - check if files actually exist
-                if cert_path.exists() && key_path.exists() {
-                    log::debug!("Certificate hash matches for domain: {} (hash: {}), files exist, skipping download", domain, remote);
+        // Priority: Use local certificate if available and valid, otherwise check Redis
+        let should_download = if let Some(local) = &local_hash {
+            // Local certificate exists - check if it matches Redis (if Redis hash is available)
+            if let Some(remote) = &remote_hash {
+                if remote == local {
+                    // Hashes match - use local certificate
+                    log::debug!("Certificate hash matches for domain: {} (hash: {}), using local certificate", domain, remote);
                     // Add existing certificate to config without re-downloading
                     certificate_configs.push(CertificateConfig {
                         cert_path: cert_path.to_string_lossy().to_string(),
@@ -350,23 +332,30 @@ async fn fetch_certificates_from_redis(certificate_path: &str, upstreams_path: &
                         domain, cert_path.display(), key_path.display());
                     false // Don't download
                 } else {
-                    log::warn!("Hash matches but certificate files missing for domain: {} (cert: {}, key: {}), will download",
-                        domain, cert_path.display(), key_path.display());
-                    true // Download - files are missing
+                    log::debug!("Certificate hash mismatch for domain: {} (remote: {}, local: {}), downloading new certificate from Redis", domain, remote, local);
+                    true // Download - hash changed in Redis
                 }
             } else {
-                log::debug!("Certificate hash mismatch for domain: {} (remote: {}, local: {}), downloading new certificate", domain, remote, local);
-                true // Download - hash changed
+                // No Redis hash, but we have local certificate - use it
+                log::debug!("No Redis hash found for domain: {}, but local certificate exists, using local certificate", domain);
+                // Add existing certificate to config without re-downloading
+                certificate_configs.push(CertificateConfig {
+                    cert_path: cert_path.to_string_lossy().to_string(),
+                    key_path: key_path.to_string_lossy().to_string(),
+                });
+                skipped_count += 1;
+                log::debug!("Added existing local certificate config for domain: {} -> cert: {}, key: {}",
+                    domain, cert_path.display(), key_path.display());
+                false // Don't download - use local certificate
             }
-        } else if remote_hash.is_none() {
-            log::debug!("No certificate hash found in Redis for domain: {}, will check if certificate exists in Redis", domain);
-            true // Download - check if certificate exists
-        } else if local_hash.is_none() {
-            log::debug!("No local certificate found for domain: {} (files don't exist or hash not calculated), downloading from Redis", domain);
-            true // Download - no local certificate
+        } else if remote_hash.is_some() {
+            // No local certificate, but Redis has one - download it
+            log::debug!("No local certificate found for domain: {}, but Redis hash exists, downloading from Redis", domain);
+            true // Download from Redis
         } else {
-            log::debug!("Unexpected state for domain: {} (remote_hash: {:?}, local_hash: {:?}), defaulting to download", domain, remote_hash, local_hash);
-            true // Default to downloading
+            // No local certificate and no Redis hash - check if certificate exists in Redis
+            log::debug!("No local certificate and no Redis hash for domain: {}, will check if certificate exists in Redis", domain);
+            true // Check Redis for certificate
         };
 
         // Skip download if not needed

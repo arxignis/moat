@@ -72,25 +72,25 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 url = "2.5"
 clamav-tcp = "0.2"
 multer = "3.0"
+proxy-protocol = { git = "https://github.com/gen0sec/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}
 rand = "0.9"
 regex = "1.0"
 daemonize = "0.5.0"
 
-#pingora = { path = "../pingora/pingora", features = ["lb", "openssl"] }
+#pingora = { path = "../pingora/pingora", features = ["lb", "openssl", "proxy"] }
 #pingora-core = { path = "../pingora/pingora-core" }
 #pingora-proxy = { path = "../pingora/pingora-proxy" }
 #pingora-limits = { path = "../pingora/pingora-limits" }
 #pingora-http = { path = "../pingora/pingora-http" }
+#pingora-memory-cache = { path = "../pingora/pingora-memory-cache" }
 
-
-pingora = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca", features = ["lb", "openssl"] }
-pingora-core = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-proxy = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-limits = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-http = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-pingora-memory-cache = { git = "https://github.com/gen0sec/pingora" , rev = "65d2d76f1e80cb3ac7c31493a0aba203fea055ca" }
-proxy-protocol = { git = "https://github.com/gen0sec/proxy-protocol", rev = "ac28b27d317088f0e9e89805ada3b9f5cfbf5673"}
 wirefilter-engine = { git = "https://github.com/gen0sec/wirefilter" , rev = "ab901470a24aad789cb9c03dd214d6c7d4cab589" }
+pingora = { git = "https://github.com/gen0sec/pingora", rev = "24a5643184d2a1b056260b2d24e2381f11de54d2", features = ["lb", "openssl", "proxy"] }
+pingora-core = { git = "https://github.com/gen0sec/pingora", rev = "24a5643184d2a1b056260b2d24e2381f11de54d2"}
+pingora-proxy = { git = "https://github.com/gen0sec/pingora", rev = "24a5643184d2a1b056260b2d24e2381f11de54d2"}
+pingora-limits = { git = "https://github.com/gen0sec/pingora", rev = "24a5643184d2a1b056260b2d24e2381f11de54d2"}
+pingora-http = { git = "https://github.com/gen0sec/pingora", rev = "24a5643184d2a1b056260b2d24e2381f11de54d2"}
+pingora-memory-cache = { git = "https://github.com/gen0sec/pingora", rev = "24a5643184d2a1b056260b2d24e2381f11de54d2"}
 
 mimalloc = { version = "0.1.48", default-features = false }
 dashmap = "7.0.0-rc2"
