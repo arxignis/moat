@@ -63,6 +63,7 @@ async fn build_upstreams(fullist: &UpstreamsDashMap, method: &str, client: &Clie
                     https_proxy_enabled: upstream.https_proxy_enabled,
                     rate_limit: upstream.rate_limit,
                     healthcheck: upstream.healthcheck,
+                    disable_access_log: upstream.disable_access_log,
                 };
 
                 if scheme.healthcheck.unwrap_or(true) {

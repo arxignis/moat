@@ -245,6 +245,10 @@ impl Certificates {
 
     fn find_ssl_context(&self, server_name: &str) -> Option<SslContext> {
         log::debug!("Finding SSL context for server_name: {}", server_name);
+        log::debug!("upstreams_cert_map entries: {:?}",
+            self.upstreams_cert_map.iter().map(|e| (e.key().clone(), e.value().clone())).collect::<Vec<_>>());
+        log::debug!("cert_name_map entries: {:?}",
+            self.cert_name_map.iter().map(|e| e.key().clone()).collect::<Vec<_>>());
 
         // First, check if there's an upstreams mapping for this hostname
         if let Some(cert_name) = self.upstreams_cert_map.get(server_name) {
@@ -255,7 +259,9 @@ impl Certificates {
                 return Some(ctx.clone());
             } else {
                 // Certificate specified in upstreams.yaml but doesn't exist - use default instead of searching further
-                log::warn!("Certificate '{}' specified in upstreams config for hostname '{}' not found in cert_name_map. Will use default certificate (NOT searching for wildcards).", cert_name_str, server_name);
+                log::warn!("Certificate '{}' specified in upstreams config for hostname '{}' not found in cert_name_map. Available certificates: {:?}. Will use default certificate (NOT searching for wildcards).",
+                    cert_name_str, server_name,
+                    self.cert_name_map.iter().map(|e| e.key().clone()).collect::<Vec<_>>());
                 return None; // Return None to use default certificate - DO NOT continue searching
             }
         } else {
@@ -268,19 +274,7 @@ impl Certificates {
             return Some(ctx.clone());
         }
 
-        // Check if default certificate is configured - if so, prefer it over wildcards
-        let default_cert_name = std::path::Path::new(&self.default_cert_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("default");
-
-        // If default certificate exists and is configured, use it instead of wildcards
-        if self.cert_name_map.contains_key(default_cert_name) {
-            log::info!("Default certificate '{}' is configured. Skipping wildcard matching for '{}' to use default instead.", default_cert_name, server_name);
-            return None; // Return None to use default certificate instead of wildcard
-        }
-
-        // Try wildcard match from certificate CN/SAN (only if no default is configured)
+        // Try wildcard match from certificate CN/SAN before falling back to default
         for config in &self.configs {
             for name in &config.common_names {
                 if name.starts_with("*.") && server_name.ends_with(&name[1..]) {
@@ -294,6 +288,18 @@ impl Certificates {
                     return Some(config.ssl_context.clone());
                 }
             }
+        }
+
+        // Check if default certificate is configured - use it as fallback
+        let default_cert_name = std::path::Path::new(&self.default_cert_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default");
+
+        // If default certificate exists and is configured, use it as fallback
+        if self.cert_name_map.contains_key(default_cert_name) {
+            log::info!("No exact or wildcard match found for '{}', will use default certificate '{}'", server_name, default_cert_name);
+            return None; // Return None to use default certificate
         }
 
         log::warn!("No matching certificate found for hostname: {}, will use default certificate", server_name);

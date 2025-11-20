@@ -53,11 +53,20 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
     // Pass None to avoid pingora parsing the config file (we use our own parser above)
     let mut server = Server::new(None).unwrap();
 
+    // Store proxy_protocol_enabled before moving maincfg
+    let proxy_protocol_enabled = maincfg.proxy_protocol_enabled;
+
     // Use proxy_protocol_enabled from config
-    if maincfg.proxy_protocol_enabled {
+    if proxy_protocol_enabled {
         info!("PROXY protocol support enabled - Pingora will parse headers before HTTP/TLS");
+        info!("WARNING: All incoming connections must include PROXY protocol headers when enabled");
+        info!("Direct connections without PROXY headers will fail. Ensure load balancer sends PROXY headers.");
+        info!("PROXY protocol will be parsed before TLS handshake for secure connections");
         // Enable PROXY protocol globally in Pingora
         pingora_core::protocols::proxy_protocol::set_proxy_protocol_enabled(true);
+        info!("PROXY protocol enabled globally for all TCP and TLS listeners");
+    } else {
+        info!("PROXY protocol support disabled - direct connections allowed");
     }
 
     server.bootstrap();
@@ -180,6 +189,9 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
                 };
 
                 // Register ClientHello callback to generate fingerprints
+                // Note: When PROXY protocol is enabled, ClientHello extraction may fail if the connection
+                // is reset before TLS handshake completes. The "Failed to peek at socket" warnings are
+                // expected in this case and are non-fatal - the TLS handshake will still proceed.
                 #[cfg(unix)]
                 {
                     use log::info;
@@ -210,11 +222,17 @@ pub fn run_with_config(config: Option<crate::cli::Config>) {
                             {
                                 debug!("Fingerprint generated successfully for peer: {}", peer_str);
                             } else {
-                                warn!("Failed to generate fingerprint for peer: {}", peer_str);
+                                // Log at debug level - failures are more common with PROXY protocol
+                                // due to connection resets, but this is non-fatal
+                                debug!("Failed to generate fingerprint for peer: {} (non-fatal, TLS handshake will continue)", peer_str);
                             }
                         },
                     ));
-                    info!("TLS ClientHello callback registered for fingerprint generation");
+                    if proxy_protocol_enabled {
+                        info!("TLS ClientHello callback registered for fingerprint generation (PROXY protocol enabled - some extraction failures are expected and non-fatal)");
+                    } else {
+                        info!("TLS ClientHello callback registered for fingerprint generation");
+                    }
                 }
 
                 proxy.add_tls_with_settings(&bind_address_tls, None, tls_settings);

@@ -122,6 +122,8 @@ pub struct PathConfig {
     pub rate_limit: Option<isize>,
     #[serde(default)]
     pub healthcheck: Option<bool>,
+    #[serde(default)]
+    pub disable_access_log: Option<bool>,
 }
 #[derive(Debug, Default)]
 pub struct Configuration {
@@ -172,6 +174,7 @@ pub struct InnerMap {
     pub https_proxy_enabled: bool,
     pub rate_limit: Option<isize>,
     pub healthcheck: Option<bool>,
+    pub disable_access_log: bool,
 }
 
 #[allow(dead_code)]
@@ -185,6 +188,7 @@ impl InnerMap {
             https_proxy_enabled: Default::default(),
             rate_limit: Default::default(),
             healthcheck: Default::default(),
+            disable_access_log: Default::default(),
         }
     }
 }

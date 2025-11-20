@@ -138,6 +138,7 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
                         let https_proxy_enabled = path_config.https_proxy_enabled.unwrap_or(false);
                         let ssl_enabled = path_config.ssl_enabled.unwrap_or(true);
                         let http2_enabled = path_config.http2_enabled.unwrap_or(false);
+                        let disable_access_log = path_config.disable_access_log.unwrap_or(false);
                         server_list.push(InnerMap {
                             address: ip.trim().to_string(),
                             port,
@@ -146,6 +147,7 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
                             https_proxy_enabled,
                             rate_limit: path_config.rate_limit,
                             healthcheck: path_config.healthcheck,
+                            disable_access_log,
                         });
                     }
                 }
@@ -182,6 +184,7 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
                             let https_proxy_enabled = path_config.https_proxy_enabled.unwrap_or(false);
                             let ssl_enabled = path_config.ssl_enabled.unwrap_or(true); // Default to SSL
                             let http2_enabled = path_config.http2_enabled.unwrap_or(false); // Default to HTTP/1.1
+                            let disable_access_log = path_config.disable_access_log.unwrap_or(false);
                             server_list.push(InnerMap {
                                 address: ip.trim().to_string(),
                                 port,
@@ -190,6 +193,7 @@ async fn populate_file_upstreams(config: &mut Configuration, parsed: &Config) {
                                 https_proxy_enabled,
                                 rate_limit: path_config.rate_limit,
                                 healthcheck: path_config.healthcheck,
+                                disable_access_log,
                             });
                         }
                     }
@@ -218,12 +222,12 @@ pub fn parce_main_config(path: &str) -> AppConfig {
 
 pub fn parce_main_config_with_log_level(path: &str, log_level: Option<&str>) -> AppConfig {
     let data = fs::read_to_string(path).unwrap();
-    
+
     if let Ok(new_config) = serde_yaml::from_str::<crate::cli::Config>(&data) {
         log_builder(log_level);
         return new_config.pingora.to_app_config();
     }
-    
+
     let mut cfo: AppConfig = serde_yaml::from_str(&*data).expect("Failed to parse main config file");
     log_builder(log_level);
     cfo.healthcheck_method = cfo.healthcheck_method.to_uppercase();
