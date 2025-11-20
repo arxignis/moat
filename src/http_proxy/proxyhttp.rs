@@ -24,6 +24,7 @@ use tokio::time::Instant;
 use hyper::http;
 
 static RATE_LIMITER: Lazy<Rate> = Lazy::new(|| Rate::new(Duration::from_secs(1)));
+static WAF_RATE_LIMITERS: Lazy<DashMap<String, Arc<Rate>>> = Lazy::new(|| DashMap::new());
 
 #[derive(Clone)]
 pub struct LB {
@@ -244,6 +245,57 @@ impl ProxyHttp for LB {
                             } else {
                                 // Token is valid, allow request to continue
                                 debug!("Captcha token validated, allowing request");
+                            }
+                        }
+                        WafAction::RateLimit => {
+                            // Get rate limit config from waf_result
+                            if let Some(rate_limit_config) = &waf_result.rate_limit_config {
+                                let period_secs = rate_limit_config.period_secs();
+                                let requests_limit = rate_limit_config.requests_count();
+
+                                // Get or create rate limiter for this rule
+                                let rate_limiter = WAF_RATE_LIMITERS
+                                    .entry(waf_result.rule_id.clone())
+                                    .or_insert_with(|| {
+                                        info!("Creating new rate limiter for rule {}: {} requests per {} seconds", 
+                                            waf_result.rule_id, requests_limit, period_secs);
+                                        Arc::new(Rate::new(Duration::from_secs(period_secs)))
+                                    })
+                                    .clone();
+
+                                // Use client IP as the rate key
+                                let rate_key = peer_addr.ip().to_string();
+                                let curr_window_requests = rate_limiter.observe(&rate_key, 1);
+
+                                if curr_window_requests > requests_limit as isize {
+                                    info!("Rate limit exceeded: rule={}, id={}, ip={}, requests={}/{}", 
+                                        waf_result.rule_name, waf_result.rule_id, rate_key, curr_window_requests, requests_limit);
+
+                                    let body = serde_json::json!({
+                                        "error": "Too Many Requests",
+                                        "message": format!("Rate limit exceeded: {} requests per {} seconds", requests_limit, period_secs),
+                                        "rule": &waf_result.rule_name,
+                                        "rule_id": &waf_result.rule_id
+                                    }).to_string();
+
+                                    let mut header = ResponseHeader::build(429, None).unwrap();
+                                    header.insert_header("X-Rate-Limit-Limit", requests_limit.to_string()).ok();
+                                    header.insert_header("X-Rate-Limit-Remaining", "0").ok();
+                                    header.insert_header("X-Rate-Limit-Reset", period_secs.to_string()).ok();
+                                    header.insert_header("X-WAF-Rule", &waf_result.rule_name).ok();
+                                    header.insert_header("X-WAF-Rule-ID", &waf_result.rule_id).ok();
+                                    header.insert_header("Content-Type", "application/json").ok();
+                                    
+                                    session.set_keepalive(None);
+                                    session.write_response_header(Box::new(header), false).await?;
+                                    session.write_response_body(Some(Bytes::from(body)), true).await?;
+                                    return Ok(true);
+                                } else {
+                                    debug!("Rate limit check passed: rule={}, id={}, ip={}, requests={}/{}", 
+                                        waf_result.rule_name, waf_result.rule_id, rate_key, curr_window_requests, requests_limit);
+                                }
+                            } else {
+                                warn!("Rate limit action triggered but no config found for rule {}", waf_result.rule_id);
                             }
                         }
                         WafAction::Allow => {

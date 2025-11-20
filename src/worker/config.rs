@@ -51,6 +51,39 @@ pub struct WafRule {
     pub description: String,
     pub action: String,
     pub expression: String,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RateLimitConfig {
+    pub period: String,
+    pub duration: String,
+    pub requests: String,
+}
+
+impl RateLimitConfig {
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        // Parse from nested structure: {"rateLimit": {"period": "25", ...}}
+        if let Some(rate_limit_obj) = value.get("rateLimit") {
+            serde_json::from_value(rate_limit_obj.clone())
+                .map_err(|e| e.to_string())
+        } else {
+            Err("rateLimit field not found".to_string())
+        }
+    }
+
+    pub fn period_secs(&self) -> u64 {
+        self.period.parse().unwrap_or(60)
+    }
+
+    pub fn duration_secs(&self) -> u64 {
+        self.duration.parse().unwrap_or(60)
+    }
+
+    pub fn requests_count(&self) -> usize {
+        self.requests.parse().unwrap_or(100)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
