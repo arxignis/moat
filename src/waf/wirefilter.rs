@@ -68,6 +68,42 @@ impl HttpFilter {
             ip.src.asn_country: Bytes,
             threat.score: Int,
             threat.advice: Bytes,
+            signal.ja4: Bytes,
+            signal.ja4_raw: Bytes,
+            signal.ja4_unsorted: Bytes,
+            signal.ja4_raw_unsorted: Bytes,
+            signal.tls_version: Bytes,
+            signal.cipher_suite: Bytes,
+            signal.sni: Bytes,
+            signal.alpn: Bytes,
+            signal.ja4h: Bytes,
+            signal.ja4h_method: Bytes,
+            signal.ja4h_version: Bytes,
+            signal.ja4h_has_cookie: Int,
+            signal.ja4h_has_referer: Int,
+            signal.ja4h_header_count: Int,
+            signal.ja4h_language: Bytes,
+            signal.ja4t: Bytes,
+            signal.ja4t_window_size: Int,
+            signal.ja4t_ttl: Int,
+            signal.ja4t_mss: Int,
+            signal.ja4t_window_scale: Int,
+            signal.ja4l_client: Bytes,
+            signal.ja4l_server: Bytes,
+            signal.ja4l_syn_time: Int,
+            signal.ja4l_synack_time: Int,
+            signal.ja4l_ack_time: Int,
+            signal.ja4l_ttl_client: Int,
+            signal.ja4l_ttl_server: Int,
+            signal.ja4s: Bytes,
+            signal.ja4s_proto: Bytes,
+            signal.ja4s_version: Bytes,
+            signal.ja4s_cipher: Int,
+            signal.ja4s_alpn: Bytes,
+            signal.ja4x: Bytes,
+            signal.ja4x_issuer_rdns: Bytes,
+            signal.ja4x_subject_rdns: Bytes,
+            signal.ja4x_extensions: Bytes,
         };
 
         // Register functions used in Cloudflare-style expressions
@@ -158,12 +194,12 @@ impl HttpFilter {
                 rule.config.as_ref().and_then(|cfg| {
                     match crate::worker::config::RateLimitConfig::from_json(cfg) {
                         Ok(config) => {
-                            log::info!("Parsed rate limit config for rule {}: period={}, requests={}", 
+                            log::info!("Parsed rate limit config for rule {}: period={}, requests={}",
                                 rule.id, config.period, config.requests);
                             Some(config)
                         }
                         Err(e) => {
-                            log::error!("Failed to parse rate limit config for rule {}: {}. Config JSON: {}", 
+                            log::error!("Failed to parse rate limit config for rule {}: {}. Config JSON: {}",
                                 rule.id, e, serde_json::to_string(cfg).unwrap_or_else(|_| "invalid json".to_string()));
                             None
                         }
@@ -224,12 +260,12 @@ impl HttpFilter {
                 rule.config.as_ref().and_then(|cfg| {
                     match crate::worker::config::RateLimitConfig::from_json(cfg) {
                         Ok(config) => {
-                            log::info!("Parsed rate limit config for rule {}: period={}, requests={}", 
+                            log::info!("Parsed rate limit config for rule {}: period={}, requests={}",
                                 rule.id, config.period, config.requests);
                             Some(config)
                         }
                         Err(e) => {
-                            log::error!("Failed to parse rate limit config for rule {}: {}. Config JSON: {}", 
+                            log::error!("Failed to parse rate limit config for rule {}: {}. Config JSON: {}",
                                 rule.id, e, serde_json::to_string(cfg).unwrap_or_else(|_| "invalid json".to_string()));
                             None
                         }
@@ -482,6 +518,164 @@ impl HttpFilter {
             }
         };
 
+        // Extract HTTP version
+        let http_version = format!("{:?}", req_parts.version);
+
+        // Generate JA4H fingerprint from HTTP request (available now)
+        let ja4h_fp = crate::ja4_plus::Ja4hFingerprint::from_http_request(
+            method,
+            &http_version,
+            &req_parts.headers,
+        );
+
+        // Set default empty values for all signal (JA4) fields
+        // These fields will be populated when JA4 data is available
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4_raw").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4_unsorted").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4_raw_unsorted").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.tls_version").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.cipher_suite").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.sni").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.alpn").unwrap(),
+            "",
+        )?;
+        // Populate JA4H fields from generated fingerprint
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h").unwrap(),
+            ja4h_fp.fingerprint.clone(),
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h_method").unwrap(),
+            ja4h_fp.method.clone(),
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h_version").unwrap(),
+            ja4h_fp.version.clone(),
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h_has_cookie").unwrap(),
+            if ja4h_fp.has_cookie { 1i64 } else { 0i64 },
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h_has_referer").unwrap(),
+            if ja4h_fp.has_referer { 1i64 } else { 0i64 },
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h_header_count").unwrap(),
+            ja4h_fp.header_count as i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4h_language").unwrap(),
+            ja4h_fp.language.clone(),
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4t").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4t_window_size").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4t_ttl").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4t_mss").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4t_window_scale").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_client").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_server").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_syn_time").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_synack_time").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_ack_time").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_ttl_client").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4l_ttl_server").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4s").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4s_proto").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4s_version").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4s_cipher").unwrap(),
+            0i64,
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4s_alpn").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4x").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4x_issuer_rdns").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4x_subject_rdns").unwrap(),
+            "",
+        )?;
+        ctx.set_field_value(
+            self.scheme.get_field("signal.ja4x_extensions").unwrap(),
+            "",
+        )?;
+
         // Execute each rule individually and return the first match
         let rules_guard = self.rules.read().unwrap();
         for (filter, action, rule_name, rule_id, rate_limit_config) in rules_guard.iter() {
@@ -693,8 +887,11 @@ mod tests {
 
         let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
         let result = filter.should_block_request_from_parts(&req_parts, b"", peer_addr).await?;
-        assert!(result.is_some(), "Request to blocked host should be blocked");
-        assert_eq!(result.unwrap().action, WafAction::Block);
+        if let Some(waf_result) = result {
+            assert_eq!(waf_result.action, WafAction::Block, "Request to blocked host should be blocked");
+        } else {
+            panic!("Request to blocked host should be blocked");
+        }
 
         Ok(())
     }
@@ -708,8 +905,7 @@ mod tests {
             .method("POST")
             .uri("http://example.com/test")
             .header("content-type", "text/html")
-            .body(())
-            .unwrap();
+            .body(())?;
         let (req_parts, _) = req.into_parts();
 
         let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
@@ -719,8 +915,116 @@ mod tests {
         let result = filter.should_block_request_from_parts(&req_parts, clean_content, peer_addr).await?;
 
         // Should be blocked by host rule, not content scanning
-        assert!(result.is_some(), "Request to example.com should be blocked by host rule");
-        assert_eq!(result.unwrap().rule_name, "default");
+        if let Some(waf_result) = result {
+            assert_eq!(waf_result.rule_name, "default", "Request to example.com should be blocked by host rule");
+        } else {
+            panic!("Request to example.com should be blocked by host rule");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ja4h_http_version_extraction() -> Result<()> {
+        // Test that HTTP version is correctly extracted and used in JA4H fingerprint
+        let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
+
+        // Test HTTP/1.0
+        let filter_http10 = HttpFilter::new("signal.ja4h_version == \"HTTP/1.0\"")?;
+        let req_http10 = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_10)
+            .body(())?;
+        let (req_parts_http10, _) = req_http10.into_parts();
+        let result_http10 = filter_http10.should_block_request_from_parts(&req_parts_http10, b"", peer_addr).await?;
+        if let Some(waf_result) = result_http10 {
+            assert_eq!(waf_result.action, WafAction::Block, "HTTP/1.0 request should match version check");
+        } else {
+            panic!("HTTP/1.0 request should match version check");
+        }
+
+        // Test HTTP/1.1
+        let filter_http11 = HttpFilter::new("signal.ja4h_version == \"HTTP/1.1\"")?;
+        let req_http11 = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_11)
+            .body(())?;
+        let (req_parts_http11, _) = req_http11.into_parts();
+        let result_http11 = filter_http11.should_block_request_from_parts(&req_parts_http11, b"", peer_addr).await?;
+        if let Some(waf_result) = result_http11 {
+            assert_eq!(waf_result.action, WafAction::Block, "HTTP/1.1 request should match version check");
+        } else {
+            panic!("HTTP/1.1 request should match version check");
+        }
+
+        // Test HTTP/2.0
+        let filter_http2 = HttpFilter::new("signal.ja4h_version == \"HTTP/2.0\"")?;
+        let req_http2 = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_2)
+            .body(())?;
+        let (req_parts_http2, _) = req_http2.into_parts();
+        let result_http2 = filter_http2.should_block_request_from_parts(&req_parts_http2, b"", peer_addr).await?;
+        if let Some(waf_result) = result_http2 {
+            assert_eq!(waf_result.action, WafAction::Block, "HTTP/2.0 request should match version check");
+        } else {
+            panic!("HTTP/2.0 request should match version check");
+        }
+
+        // Test that wrong version doesn't match
+        let filter_wrong_version = HttpFilter::new("signal.ja4h_version == \"HTTP/1.0\"")?;
+        let req_wrong = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_11)
+            .body(())?;
+        let (req_parts_wrong, _) = req_wrong.into_parts();
+        let result_wrong = filter_wrong_version.should_block_request_from_parts(&req_parts_wrong, b"", peer_addr).await?;
+        assert!(result_wrong.is_none(), "HTTP/1.1 request should not match HTTP/1.0 version check");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ja4h_fingerprint_with_different_versions() -> Result<()> {
+        // Test that JA4H fingerprint is correctly generated with different HTTP versions
+        let peer_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
+
+        // Test that JA4H fingerprint starts with correct version code for HTTP/1.0 (should be "10")
+        let filter_http10 = HttpFilter::new("starts_with(signal.ja4h, \"ge10\")")?;
+        let req_http10 = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_10)
+            .body(())?;
+        let (req_parts_http10, _) = req_http10.into_parts();
+        let result_http10 = filter_http10.should_block_request_from_parts(&req_parts_http10, b"", peer_addr).await?;
+        assert!(result_http10.is_some(), "HTTP/1.0 request should generate JA4H starting with 'ge10'");
+
+        // Test that JA4H fingerprint starts with correct version code for HTTP/1.1 (should be "11")
+        let filter_http11 = HttpFilter::new("starts_with(signal.ja4h, \"ge11\")")?;
+        let req_http11 = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_11)
+            .body(())?;
+        let (req_parts_http11, _) = req_http11.into_parts();
+        let result_http11 = filter_http11.should_block_request_from_parts(&req_parts_http11, b"", peer_addr).await?;
+        assert!(result_http11.is_some(), "HTTP/1.1 request should generate JA4H starting with 'ge11'");
+
+        // Test that JA4H fingerprint starts with correct version code for HTTP/2.0 (should be "20")
+        let filter_http2 = HttpFilter::new("starts_with(signal.ja4h, \"ge20\")")?;
+        let req_http2 = Builder::new()
+            .method("GET")
+            .uri("http://example.com/test")
+            .version(hyper::http::Version::HTTP_2)
+            .body(())?;
+        let (req_parts_http2, _) = req_http2.into_parts();
+        let result_http2 = filter_http2.should_block_request_from_parts(&req_parts_http2, b"", peer_addr).await?;
+        assert!(result_http2.is_some(), "HTTP/2.0 request should generate JA4H starting with 'ge20'");
 
         Ok(())
     }
