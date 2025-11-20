@@ -13,6 +13,7 @@ use anyhow::anyhow;
 pub enum WafAction {
     Block,
     Challenge,
+    RateLimit,
     Allow,
 }
 
@@ -21,6 +22,7 @@ impl WafAction {
         match action.to_lowercase().as_str() {
             "block" => WafAction::Block,
             "challenge" => WafAction::Challenge,
+            "ratelimit" => WafAction::RateLimit,
             _ => WafAction::Allow,
         }
     }
@@ -32,12 +34,13 @@ pub struct WafResult {
     pub action: WafAction,
     pub rule_name: String,
     pub rule_id: String,
+    pub rate_limit_config: Option<crate::worker::config::RateLimitConfig>,
 }
 
 /// Wirefilter-based HTTP request filtering engine
 pub struct HttpFilter {
     scheme: Arc<Scheme>,
-    rules: Arc<RwLock<Vec<(wirefilter::Filter, WafAction, String, String)>>>, // (filter, action, name, id)
+    rules: Arc<RwLock<Vec<(wirefilter::Filter, WafAction, String, String, Option<crate::worker::config::RateLimitConfig>)>>>, // (filter, action, name, id, rate_limit_config)
     rules_hash: Arc<RwLock<Option<String>>>,
 }
 
@@ -107,7 +110,7 @@ impl HttpFilter {
         Ok(Self {
             scheme,
             rules: Arc::new(RwLock::new(vec![
-                (filter, WafAction::Block, "default".to_string(), "default".to_string())
+                (filter, WafAction::Block, "default".to_string(), "default".to_string(), None)
             ])),
             rules_hash: Arc::new(RwLock::new(None)),
         })
@@ -150,7 +153,27 @@ impl HttpFilter {
             let filter = ast.compile();
             let action = WafAction::from_str(&rule.action);
 
-            compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone()));
+            // Parse rate limit config if action is RateLimit
+            let rate_limit_config = if action == WafAction::RateLimit {
+                rule.config.as_ref().and_then(|cfg| {
+                    match crate::worker::config::RateLimitConfig::from_json(cfg) {
+                        Ok(config) => {
+                            log::info!("Parsed rate limit config for rule {}: period={}, requests={}", 
+                                rule.id, config.period, config.requests);
+                            Some(config)
+                        }
+                        Err(e) => {
+                            log::error!("Failed to parse rate limit config for rule {}: {}. Config JSON: {}", 
+                                rule.id, e, serde_json::to_string(cfg).unwrap_or_else(|_| "invalid json".to_string()));
+                            None
+                        }
+                    }
+                })
+            } else {
+                None
+            };
+
+            compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone(), rate_limit_config));
             rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, rule.expression));
         }
 
@@ -196,7 +219,27 @@ impl HttpFilter {
             let filter = ast.compile();
             let action = WafAction::from_str(&rule.action);
 
-            compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone()));
+            // Parse rate limit config if action is RateLimit
+            let rate_limit_config = if action == WafAction::RateLimit {
+                rule.config.as_ref().and_then(|cfg| {
+                    match crate::worker::config::RateLimitConfig::from_json(cfg) {
+                        Ok(config) => {
+                            log::info!("Parsed rate limit config for rule {}: period={}, requests={}", 
+                                rule.id, config.period, config.requests);
+                            Some(config)
+                        }
+                        Err(e) => {
+                            log::error!("Failed to parse rate limit config for rule {}: {}. Config JSON: {}", 
+                                rule.id, e, serde_json::to_string(cfg).unwrap_or_else(|_| "invalid json".to_string()));
+                            None
+                        }
+                    }
+                })
+            } else {
+                None
+            };
+
+            compiled_rules.push((filter, action, rule.name.clone(), rule.id.clone(), rate_limit_config));
             rules_hash_input.push_str(&format!("{}:{}:{};", rule.id, rule.action, rule.expression));
         }
 
@@ -441,13 +484,14 @@ impl HttpFilter {
 
         // Execute each rule individually and return the first match
         let rules_guard = self.rules.read().unwrap();
-        for (filter, action, rule_name, rule_id) in rules_guard.iter() {
+        for (filter, action, rule_name, rule_id, rate_limit_config) in rules_guard.iter() {
             let rule_result = filter.execute(&ctx)?;
             if rule_result {
                 return Ok(Some(WafResult {
                     action: action.clone(),
                     rule_name: rule_name.clone(),
                     rule_id: rule_id.clone(),
+                    rate_limit_config: rate_limit_config.clone(),
                 }));
             }
         }
