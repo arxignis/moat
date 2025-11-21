@@ -205,12 +205,12 @@ async fn async_main(_args: Args, config: Config) -> Result<()> {
                             continue;
                         }
                     };
-                    if let Err(e) = bpf_attach_to_xdp(&mut skel, ifindex) {
+                    if let Err(e) = bpf_attach_to_xdp(&mut skel, ifindex, Some(iface.as_str())) {
                         // Check if error is EAFNOSUPPORT (error 97) - IPv6 might be disabled
                         let error_str = e.to_string();
                         if error_str.contains("97") || error_str.contains("Address family not supported") {
                             log::error!("Failed to attach XDP to '{}': {} (IPv6 may be disabled)", iface, e);
-                            log::info!("Hint: XDP requires IPv6 kernel support. Try 'sysctl -w net.ipv6.conf.all.disable_ipv6=0' or set 'disable_xdp: true' in config.yaml");
+                            log::info!("Hint: XDP requires IPv6 kernel support. Try 'sysctl -w net.ipv6.conf.{}.disable_ipv6=0' or set 'disable_xdp: true' in config.yaml", iface);
                         } else {
                             log::error!("Failed to attach XDP to '{}': {}", iface, e);
                         }

@@ -257,7 +257,7 @@ impl ProxyHttp for LB {
                                 let rate_limiter = WAF_RATE_LIMITERS
                                     .entry(waf_result.rule_id.clone())
                                     .or_insert_with(|| {
-                                        info!("Creating new rate limiter for rule {}: {} requests per {} seconds", 
+                                        info!("Creating new rate limiter for rule {}: {} requests per {} seconds",
                                             waf_result.rule_id, requests_limit, period_secs);
                                         Arc::new(Rate::new(Duration::from_secs(period_secs)))
                                     })
@@ -268,7 +268,7 @@ impl ProxyHttp for LB {
                                 let curr_window_requests = rate_limiter.observe(&rate_key, 1);
 
                                 if curr_window_requests > requests_limit as isize {
-                                    info!("Rate limit exceeded: rule={}, id={}, ip={}, requests={}/{}", 
+                                    info!("Rate limit exceeded: rule={}, id={}, ip={}, requests={}/{}",
                                         waf_result.rule_name, waf_result.rule_id, rate_key, curr_window_requests, requests_limit);
 
                                     let body = serde_json::json!({
@@ -285,13 +285,13 @@ impl ProxyHttp for LB {
                                     header.insert_header("X-WAF-Rule", &waf_result.rule_name).ok();
                                     header.insert_header("X-WAF-Rule-ID", &waf_result.rule_id).ok();
                                     header.insert_header("Content-Type", "application/json").ok();
-                                    
+
                                     session.set_keepalive(None);
                                     session.write_response_header(Box::new(header), false).await?;
                                     session.write_response_body(Some(Bytes::from(body)), true).await?;
                                     return Ok(true);
                                 } else {
-                                    debug!("Rate limit check passed: rule={}, id={}, ip={}, requests={}/{}", 
+                                    debug!("Rate limit check passed: rule={}, id={}, ip={}, requests={}/{}",
                                         waf_result.rule_name, waf_result.rule_id, rate_key, curr_window_requests, requests_limit);
                                 }
                             } else {
@@ -521,12 +521,46 @@ impl ProxyHttp for LB {
         // Track when we start upstream request
         ctx.upstream_start_time = Some(Instant::now());
 
+        // Check if config has a Host header before setting default
+        let mut config_has_host = false;
         if let Some(hostname) = ctx.hostname.as_ref() {
-            upstream_request.insert_header("Host", hostname)?;
+            let path = _session.req_header().uri.path();
+            if let Some(configured_headers) = self.get_header(hostname, path) {
+                for (key, _) in configured_headers.iter() {
+                    if key.eq_ignore_ascii_case("Host") {
+                        config_has_host = true;
+                        break;
+                    }
+                }
+            }
         }
+
+        // Only set default Host if config doesn't override it
+        if !config_has_host {
+            if let Some(hostname) = ctx.hostname.as_ref() {
+                upstream_request.insert_header("Host", hostname)?;
+            }
+        }
+
         if let Some(peer) = ctx.upstream_peer.as_ref() {
             upstream_request.insert_header("X-Forwarded-For", peer.address.as_str())?;
         }
+
+        // Apply configured headers from upstreams.yaml (will override default Host if present)
+        if let Some(hostname) = ctx.hostname.as_ref() {
+            let path = _session.req_header().uri.path();
+            if let Some(configured_headers) = self.get_header(hostname, path) {
+                for (key, value) in configured_headers {
+                    // insert_header will override existing headers with the same name
+                    let key_clone = key.clone();
+                    let value_clone = value.clone();
+                    if let Err(e) = upstream_request.insert_header(key_clone, value_clone) {
+                        debug!("Failed to insert header {}: {}", key, e);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 

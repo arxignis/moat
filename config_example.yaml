@@ -223,8 +223,13 @@ pingora:
   # Health check interval in seconds
   healthcheck_interval: 2
 
-  # Proxy protocol enabled
-  proxy_protocol_enabled: false
+  # PROXY protocol configuration
+  proxy_protocol:
+    # Enable PROXY protocol parsing (required when behind a load balancer that sends PROXY headers)
+    enabled: true
+    # Timeout for reading PROXY protocol header in milliseconds
+    timeout_ms: 1000
+
 
 # ACME Configuration (Let's Encrypt certificate management)
 acme:
